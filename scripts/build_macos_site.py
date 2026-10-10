@@ -9,17 +9,19 @@ p.add_argument('results', type=Path)
 p.add_argument('--output', type=Path, default=Path('site/macos'))
 a = p.parse_args()
 r = a.results
-summary = json.loads((r / 'summary.json').read_text())
 audit = json.loads((r / 'audit.json').read_text())
-trials = list(csv.DictReader((r / 'current.csv').open()))
 scene = audit.get('scene', 'lab')
 assert scene in ('lab', 'heavy')
 frameworks = audit['protocol'].get('frameworks', ['zgui', 'gpui', 'quickgui'])
 assert frameworks == (['zgui', 'gpui'] if scene == 'heavy' else ['zgui', 'gpui', 'quickgui'])
 modes = ['idle', 'stream', 'scroll', 'both']
 assert audit['protocol']['requested_seconds'] == 20 and audit['protocol']['repeats'] == 3
+summary = json.loads((r / 'summary.json').read_text())
+# Newer runs add the desktop baseline; the site shows the frameworks.
+summary['groups'] = [g for g in summary['groups'] if g['framework'] in frameworks]
+trials = [t for t in csv.DictReader((r / 'current.csv').open()) if t['framework'] in frameworks]
 assert audit['accepted'], 'only accepted runs are published'
-assert len(trials) == audit['trials'] == len(frameworks) * 12
+assert len(trials) == len(frameworks) * 12 <= audit['trials']
 assert len(summary['groups']) == len(frameworks) * 4
 assert {(g['framework'], g['mode']) for g in summary['groups']} == {(f, m) for f in frameworks for m in modes}
 assert {(t['framework'], t['mode'], int(t['repeat'])) for t in trials} == {(f, m, n) for f in frameworks for m in modes for n in range(3)}
@@ -33,7 +35,7 @@ for group in summary['groups']:
         assert all(math.isfinite(v) and v >= 0 for v in values)
         for field, value in [('median', statistics.median(values)), ('min', min(values)), ('max', max(values))]:
             assert math.isclose(group[key][field], value, rel_tol=1e-10, abs_tol=1e-10), (group['framework'], group['mode'], key)
-assert sum(int(t['samples']) for t in trials) == audit['samples']
+assert sum(int(t['samples']) for t in trials) <= audit['samples']
 assert all(58 <= int(t['workload_ticks']) / 20 <= 61 for t in trials if t['mode'] != 'idle')
 assert all(int(t['workload_ticks']) == 0 for t in trials if t['mode'] == 'idle')
 a.output.mkdir(parents=True, exist_ok=True)
