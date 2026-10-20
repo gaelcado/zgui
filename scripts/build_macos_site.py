@@ -12,12 +12,13 @@ r = a.results
 audit = json.loads((r / 'audit.json').read_text())
 scene = audit.get('scene', 'lab')
 assert scene in ('lab', 'heavy')
-frameworks = audit['protocol'].get('frameworks', ['zgui', 'gpui', 'quickgui'])
+# Newer runs add GPUI Fast (shown on the compare page) and the desktop
+# baseline; this site shows the original frameworks.
+frameworks = [f for f in audit['protocol'].get('frameworks', ['zgui', 'gpui', 'quickgui']) if f in ('zgui', 'gpui', 'quickgui')]
 assert frameworks == (['zgui', 'gpui'] if scene == 'heavy' else ['zgui', 'gpui', 'quickgui'])
 modes = ['idle', 'stream', 'scroll', 'both']
 assert audit['protocol']['requested_seconds'] == 20 and audit['protocol']['repeats'] == 3
 summary = json.loads((r / 'summary.json').read_text())
-# Newer runs add the desktop baseline; the site shows the frameworks.
 summary['groups'] = [g for g in summary['groups'] if g['framework'] in frameworks]
 trials = [t for t in csv.DictReader((r / 'current.csv').open()) if t['framework'] in frameworks]
 assert audit['accepted'], 'only accepted runs are published'
