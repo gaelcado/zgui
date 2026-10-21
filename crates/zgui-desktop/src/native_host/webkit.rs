@@ -329,7 +329,12 @@ pub(crate) struct MacWebView {
     observer: Retained<Observer>,
     messages: bool,
     transparent: bool,
+    /// The last HTML shown and its base: WebKit reloads such a page by
+    /// fetching its URL (`about:blank`, a blank page), so reload shows it again.
+    html: RefCell<Option<Html>>,
 }
+/// A page's HTML and its base URL.
+type Html = (Retained<NSString>, Option<Retained<NSURL>>);
 impl MacWebView {
     pub fn new(web: &WebView, mtm: MainThreadMarker) -> Self {
         let options = web.options().clone();
@@ -385,6 +390,7 @@ impl MacWebView {
             observer,
             messages: options.messages,
             transparent: options.transparent,
+            html: RefCell::new(None),
         }
     }
     pub fn view(&self) -> &NSView {
@@ -442,15 +448,34 @@ impl WebViewBackend for MacWebView {
     fn run(&self, command: WebViewCommand) {
         unsafe {
             match command {
-                WebViewCommand::LoadUrl(url) => self.load(&url),
+                WebViewCommand::LoadUrl(url) => {
+                    self.html.replace(None);
+                    self.load(&url);
+                }
                 WebViewCommand::LoadHtml { html, base_url } => {
                     let base =
                         base_url.and_then(|base| NSURL::URLWithString(&NSString::from_str(&base)));
-                    self.view
-                        .loadHTMLString_baseURL(&NSString::from_str(&html), base.as_deref());
+                    let html = NSString::from_str(&html);
+                    self.view.loadHTMLString_baseURL(&html, base.as_deref());
+                    self.html.replace(Some((html, base)));
                 }
                 WebViewCommand::Reload => {
-                    self.view.reload();
+                    // Still on the HTML's page (not a link followed from it).
+                    let html = self.html.borrow().clone().filter(|(_, base)| {
+                        let shown = base
+                            .as_ref()
+                            .and_then(|base| base.absoluteString())
+                            .map_or_else(|| "about:blank".into(), |url| url.to_string());
+                        url_of(&self.view) == shown
+                    });
+                    match html {
+                        Some((html, base)) => {
+                            self.view.loadHTMLString_baseURL(&html, base.as_deref());
+                        }
+                        None => {
+                            self.view.reload();
+                        }
+                    }
                 }
                 WebViewCommand::Stop => self.view.stopLoading(),
                 WebViewCommand::GoBack => {

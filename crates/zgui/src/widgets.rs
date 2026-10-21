@@ -1578,7 +1578,12 @@ impl Ui {
             );
             draw_scroll_limit.set(limit);
             scroll.0 = scroll.0.clamp(0., limit.0);
-            scroll.1 = scroll.1.clamp(0., limit.1);
+            scroll.1 = if multiline {
+                scroll.1.clamp(0., limit.1)
+            } else {
+                // One line, centred in the box (negative: pushed down).
+                (line_height - inner_height) / 2.
+            };
             s.set_style(caret, fixed(1., line_height));
             let mut text_style = fixed(wrap_width.unwrap_or(tw.max(inner_width) + 2.), th);
             text_style.text_wrap = draw_wrap.get();
