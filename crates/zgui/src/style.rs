@@ -34,7 +34,7 @@ pub enum ObjectFit {
     ScaleDown,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Styles {
     pub(crate) layout_options: Option<std::sync::Arc<crate::layout::LayoutOptions>>,
     pub(crate) object_fit: Option<ObjectFit>,
@@ -88,6 +88,45 @@ pub struct Styles {
     pub(crate) border_edges: Option<Option<Insets>>,
     /// Properties few views set (see `RareStyles`).
     pub(crate) rare: Option<std::sync::Arc<RareStyles>>,
+    /// Properties set by theme tokens (`.bg(tok::SURFACE_RAISED)`), resolved
+    /// when the node is styled; see `crate::theme`.
+    pub(crate) tokens: Option<std::sync::Arc<crate::theme::Bindings>>,
+}
+/// As derived, but copying the plain fields as one block: a derived clone
+/// moves each of some fifty `Option`s on its own (a load and store per tag
+/// and per value), which a style effect re-running every frame pays for.
+impl Clone for Styles {
+    #[inline]
+    fn clone(&self) -> Self {
+        // SAFETY: `copy` is a bitwise copy of `self`, its owning fields
+        // aliasing `self`'s. Each of those is overwritten with its own clone
+        // through `ptr::write`, which drops nothing (the aliases are not
+        // owned); the rest are `Copy`. `ManuallyDrop` keeps a panicking clone
+        // from dropping the aliases. The field list is checked below.
+        let mut copy = std::mem::ManuallyDrop::new(unsafe { std::ptr::read(self) });
+        unsafe {
+            std::ptr::write(&mut copy.layout_options, self.layout_options.clone());
+            std::ptr::write(&mut copy.font_family, self.font_family.clone());
+            std::ptr::write(&mut copy.paint_background, self.paint_background.clone());
+            std::ptr::write(&mut copy.rare, self.rare.clone());
+            std::ptr::write(&mut copy.tokens, self.tokens.clone());
+        }
+        std::mem::ManuallyDrop::into_inner(copy)
+    }
+}
+/// Fails to compile if a field that is not `Copy` is added to `Styles`
+/// without `Clone for Styles` cloning it: every other field is copied here
+/// with `..*styles`, which only `Copy` fields allow.
+#[allow(dead_code)]
+fn styles_clone_covers_every_owning_field(styles: &Styles) -> Styles {
+    Styles {
+        layout_options: None,
+        font_family: None,
+        paint_background: None,
+        rare: None,
+        tokens: None,
+        ..*styles
+    }
 }
 /// Scale, rotation, skew and origin, each set or not (see `Styled::scale`).
 /// Inline rather than among `RareStyles`: animations rewrite it every frame,
@@ -143,6 +182,8 @@ pub(crate) struct RareStyles {
     pub(crate) fade_insets: Option<[f32; 2]>,
     pub(crate) fade_edges_x: Option<[f32; 2]>,
     pub(crate) fade_insets_x: Option<[f32; 2]>,
+    pub(crate) fade_overflow: Option<bool>,
+    pub(crate) snap: Option<bool>,
     pub(crate) border_style: Option<crate::decoration::BorderStyle>,
     /// `Styled::border_over`.
     pub(crate) border_over: Option<bool>,
@@ -160,6 +201,8 @@ pub(crate) struct RareStyles {
     pub(crate) font_fallbacks: Option<std::sync::Arc<[crate::text_layout::FontFamily]>>,
     /// A mask image and the size it is drawn at (`Styled::mask`).
     pub(crate) mask: Option<Option<MaskImage>>,
+    /// `Styled::relative`: a containing block for absolute descendants.
+    pub(crate) relative: Option<bool>,
 }
 /// A mask image and the size (logical pixels) it is drawn at.
 pub(crate) type MaskImage = (std::sync::Arc<crate::image::ImageData>, (f32, f32));
@@ -173,6 +216,8 @@ impl RareStyles {
         fade_insets: None,
         fade_edges_x: None,
         fade_insets_x: None,
+        fade_overflow: None,
+        snap: None,
         border_style: None,
         border_over: None,
         outline: None,
@@ -186,6 +231,7 @@ impl RareStyles {
         font_features: None,
         font_fallbacks: None,
         mask: None,
+        relative: None,
     };
     /// Overlay explicitly supplied properties, preserving all others.
     fn merge(&mut self, other: &Self) {
@@ -212,6 +258,12 @@ impl RareStyles {
         }
         if other.fade_insets_x.is_some() {
             self.fade_insets_x = other.fade_insets_x;
+        }
+        if other.fade_overflow.is_some() {
+            self.fade_overflow = other.fade_overflow;
+        }
+        if other.snap.is_some() {
+            self.snap = other.snap;
         }
         if other.border_over.is_some() {
             self.border_over = other.border_over;
@@ -251,6 +303,9 @@ impl RareStyles {
         }
         if other.mask.is_some() {
             self.mask = other.mask.clone();
+        }
+        if other.relative.is_some() {
+            self.relative = other.relative;
         }
     }
 }
@@ -310,8 +365,15 @@ impl Styles {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Whether any property is set by a theme token.
+    pub fn has_tokens(&self) -> bool {
+        self.tokens.is_some()
+    }
     /// Overlay explicitly supplied properties, preserving all others.
     pub fn merge(&mut self, other: &Self) {
+        if self.tokens.is_some() || other.tokens.is_some() {
+            crate::theme::merge(self, other);
+        }
         if other.padding.is_some() {
             self.clear_layout_spacing(
                 false,
@@ -544,9 +606,35 @@ fn merge_insets(target: &mut Insets, source: Insets, mask: u8) {
         target.left = source.left;
     }
 }
+/// Take a setter's value; a theme token stands for a placeholder value the
+/// setter writes as any other, and the property is bound to the token (its
+/// value is written when the node is styled). A later value replaces the
+/// binding. One path through the setter keeps chained setters moving the
+/// style in place.
+macro_rules! value_or_token {
+    ($self:ident, $value:ident, $field:expr) => {
+        let ($value, token) = crate::theme::split($value.into());
+        if token.is_some() || $self.styles_mut().tokens.is_some() {
+            $self = crate::theme::rebound($self, $field, token);
+        }
+    };
+}
 /// Shared fluent styling API for views and reusable style patches.
+///
+/// Colours, lengths, typography and shadows take a value or a theme token
+/// (`.bg(tok::SURFACE_RAISED)`, `.p(tok::SPACE_3)`; see [`crate::theme`]).
 pub trait Styled: Sized {
     fn styles_mut(&mut self) -> &mut Styles;
+    /// Set `field` from the theme token `token` (what the typed setters do
+    /// for tokens; scripts use it for `"$name"` values).
+    fn token(
+        mut self,
+        field: crate::theme::Field,
+        token: impl Into<crate::theme::TokenId>,
+    ) -> Self {
+        crate::theme::bind_in(self.styles_mut(), field, token.into());
+        self
+    }
     /// Restore flex display after `hidden` or `grid`, preserving its direction.
     fn flex(mut self) -> Self {
         self.styles_mut().layout_options_mut().display = Some(crate::layout::Display::Flex);
@@ -807,15 +895,24 @@ pub trait Styled: Sized {
         options.margin.left = Some(crate::layout::Length::Auto);
         self
     }
-    /// Position at the parent content origin plus margins, outside normal flow.
-    /// Absolute children do not contribute to parent intrinsic size or flex space.
+    /// Take the view out of normal flow and position it against its
+    /// containing block: the nearest ancestor that is `relative`, found
+    /// without passing an `absolute` one; with none, its parent. `left`,
+    /// `top`, `right` and `bottom` count from that block's padding box
+    /// (inside its border), percentages of its size; without insets it
+    /// sits at its parent's content origin plus margins. Absolute views do
+    /// not contribute to their parent's intrinsic size or flex space, and
+    /// still paint in their parent's place, under its clip.
     fn absolute(mut self) -> Self {
         self.styles_mut().absolute = Some(true);
         self
     }
-    /// Restore normal row, column, or overlay layout participation.
+    /// Make the view the containing block of its `absolute` descendants
+    /// (CSS `position: relative`), and keep it in normal flow (undoing
+    /// `absolute`). It changes nothing about its own layout.
     fn relative(mut self) -> Self {
         self.styles_mut().absolute = Some(false);
+        self.styles_mut().rare_mut().relative = Some(true);
         self
     }
     /// Apply a reusable transformation while building a view or style patch.
@@ -854,12 +951,14 @@ pub trait Styled: Sized {
     fn object_cover(self) -> Self {
         self.object_fit(ObjectFit::Cover)
     }
-    fn w(mut self, value: f32) -> Self {
+    fn w(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Width);
         self.styles_mut().width = Some(value);
         self.styles_mut().width_percent = None;
         self
     }
-    fn h(mut self, value: f32) -> Self {
+    fn h(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Height);
         self.styles_mut().height = Some(value);
         self.styles_mut().height_percent = None;
         self
@@ -923,7 +1022,8 @@ pub trait Styled: Sized {
         self.styles_mut().rare_mut().max_height = Some(value);
         self
     }
-    fn gap(mut self, value: f32) -> Self {
+    fn gap(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Gap);
         if let Some(options) = &mut self.styles_mut().layout_options {
             let options = std::sync::Arc::make_mut(options);
             options.gap_x = None;
@@ -1040,12 +1140,14 @@ pub trait Styled: Sized {
         self.styles_mut().cursor = Some(cursor);
         self
     }
-    fn bg(mut self, value: Color) -> Self {
+    fn bg(mut self, value: impl Into<crate::theme::Themed<Color>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Background);
         self.styles_mut().background = Some(value);
         self.styles_mut().paint_background = Some(None);
         self
     }
-    fn text_color(mut self, value: Color) -> Self {
+    fn text_color(mut self, value: impl Into<crate::theme::Themed<Color>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::TextColor);
         self.styles_mut().text_color = Some(value);
         self
     }
@@ -1079,11 +1181,16 @@ pub trait Styled: Sized {
         self.styles_mut().rare_mut().font_features = Some(features);
         self
     }
-    fn font_family(mut self, family: impl Into<crate::text_layout::FontFamily>) -> Self {
-        self.styles_mut().font_family = Some(family.into());
+    fn font_family(
+        mut self,
+        family: impl Into<crate::theme::Themed<crate::text_layout::FontFamily>>,
+    ) -> Self {
+        value_or_token!(self, family, crate::theme::Field::FontFamily);
+        self.styles_mut().font_family = Some(family);
         self
     }
-    fn font_weight(mut self, weight: u16) -> Self {
+    fn font_weight(mut self, weight: impl Into<crate::theme::Themed<u16>>) -> Self {
+        value_or_token!(self, weight, crate::theme::Field::FontWeight);
         self.styles_mut().font_weight = Some(weight.clamp(1, 1000));
         self
     }
@@ -1094,13 +1201,15 @@ pub trait Styled: Sized {
         self.styles_mut().italic = Some(italic);
         self
     }
-    fn text_size(mut self, value: f32) -> Self {
+    fn text_size(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::TextSize);
         self.styles_mut().text_size = Some(value);
         self
     }
     /// Set inherited line spacing in logical pixels. Invalid/non-positive values
     /// use normal spacing; positive values smaller than the font size are allowed.
-    fn line_height(mut self, pixels: f32) -> Self {
+    fn line_height(mut self, pixels: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, pixels, crate::theme::Field::LineHeight);
         self.styles_mut().line_height = Some(crate::text_layout::LineHeight::px(pixels));
         self
     }
@@ -1111,27 +1220,32 @@ pub trait Styled: Sized {
     }
     /// Inherited extra glyph advance in logical pixels. Zero resets inherited tracking.
     /// Non-finite values normalize to zero; finite values clamp to ±1,000,000 pixels.
-    fn letter_spacing(mut self, pixels: f32) -> Self {
+    fn letter_spacing(mut self, pixels: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, pixels, crate::theme::Field::LetterSpacing);
         self.styles_mut().rare_mut().letter_spacing =
             Some(crate::text_layout::LetterSpacing::px(pixels));
         self
     }
 
-    fn rounded(mut self, value: f32) -> Self {
+    fn rounded(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Radius);
         self.styles_mut().radius = Some(value);
         self.styles_mut().corners = Some(None);
         self
     }
-    fn border(mut self, value: f32) -> Self {
+    fn border(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::BorderWidth);
         self.styles_mut().border_width = Some(value);
         self.styles_mut().border_edges = Some(None);
         self
     }
-    fn border_color(mut self, value: Color) -> Self {
+    fn border_color(mut self, value: impl Into<crate::theme::Themed<Color>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::BorderColor);
         self.styles_mut().border_color = Some(value);
         self
     }
-    fn opacity(mut self, value: f32) -> Self {
+    fn opacity(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Opacity);
         self.styles_mut().opacity = Some(value);
         self
     }
@@ -1139,7 +1253,8 @@ pub trait Styled: Sized {
     /// node, within its bounds, blurs by this sigma in logical pixels, as
     /// frosted glass; the node's own content stays sharp. For blurring the
     /// node's content itself, see `filter_blur`.
-    fn blur(mut self, value: f32) -> Self {
+    fn blur(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Blur);
         self.styles_mut().blur = Some(value);
         self
     }
@@ -1227,7 +1342,8 @@ pub trait Styled: Sized {
     fn size(self, width: f32, height: f32) -> Self {
         self.w(width).h(height)
     }
-    fn p(mut self, value: f32) -> Self {
+    fn p(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Padding(15));
         let style = self.styles_mut();
         if style.padding.is_some() && style.padding_sides == 0 {
             style.padding_sides = 15;
@@ -1241,7 +1357,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(false, 15);
         self
     }
-    fn px(mut self, value: f32) -> Self {
+    fn px(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Padding(10));
         let style = self.styles_mut();
         if style.padding.is_some() && style.padding_sides == 0 {
             style.padding_sides = 15;
@@ -1255,7 +1372,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(false, 10);
         self
     }
-    fn py(mut self, value: f32) -> Self {
+    fn py(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Padding(5));
         let style = self.styles_mut();
         if style.padding.is_some() && style.padding_sides == 0 {
             style.padding_sides = 15;
@@ -1269,7 +1387,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(false, 5);
         self
     }
-    fn pt(mut self, value: f32) -> Self {
+    fn pt(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Padding(1));
         let style = self.styles_mut();
         if style.padding.is_some() && style.padding_sides == 0 {
             style.padding_sides = 15;
@@ -1283,7 +1402,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(false, 1);
         self
     }
-    fn pr(mut self, value: f32) -> Self {
+    fn pr(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Padding(2));
         let style = self.styles_mut();
         if style.padding.is_some() && style.padding_sides == 0 {
             style.padding_sides = 15;
@@ -1297,7 +1417,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(false, 2);
         self
     }
-    fn pb(mut self, value: f32) -> Self {
+    fn pb(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Padding(4));
         let style = self.styles_mut();
         if style.padding.is_some() && style.padding_sides == 0 {
             style.padding_sides = 15;
@@ -1311,7 +1432,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(false, 4);
         self
     }
-    fn pl(mut self, value: f32) -> Self {
+    fn pl(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Padding(8));
         let style = self.styles_mut();
         if style.padding.is_some() && style.padding_sides == 0 {
             style.padding_sides = 15;
@@ -1325,7 +1447,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(false, 8);
         self
     }
-    fn m(mut self, value: f32) -> Self {
+    fn m(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Margin(15));
         let style = self.styles_mut();
         if style.margin.is_some() && style.margin_sides == 0 {
             style.margin_sides = 15;
@@ -1339,7 +1462,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(true, 15);
         self
     }
-    fn mx(mut self, value: f32) -> Self {
+    fn mx(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Margin(10));
         let style = self.styles_mut();
         if style.margin.is_some() && style.margin_sides == 0 {
             style.margin_sides = 15;
@@ -1353,7 +1477,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(true, 10);
         self
     }
-    fn my(mut self, value: f32) -> Self {
+    fn my(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Margin(5));
         let style = self.styles_mut();
         if style.margin.is_some() && style.margin_sides == 0 {
             style.margin_sides = 15;
@@ -1367,7 +1492,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(true, 5);
         self
     }
-    fn mt(mut self, value: f32) -> Self {
+    fn mt(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Margin(1));
         let style = self.styles_mut();
         if style.margin.is_some() && style.margin_sides == 0 {
             style.margin_sides = 15;
@@ -1381,7 +1507,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(true, 1);
         self
     }
-    fn mr(mut self, value: f32) -> Self {
+    fn mr(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Margin(2));
         let style = self.styles_mut();
         if style.margin.is_some() && style.margin_sides == 0 {
             style.margin_sides = 15;
@@ -1395,7 +1522,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(true, 2);
         self
     }
-    fn mb(mut self, value: f32) -> Self {
+    fn mb(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Margin(4));
         let style = self.styles_mut();
         if style.margin.is_some() && style.margin_sides == 0 {
             style.margin_sides = 15;
@@ -1409,7 +1537,8 @@ pub trait Styled: Sized {
         style.clear_layout_spacing(true, 4);
         self
     }
-    fn ml(mut self, value: f32) -> Self {
+    fn ml(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Margin(8));
         let style = self.styles_mut();
         if style.margin.is_some() && style.margin_sides == 0 {
             style.margin_sides = 15;
@@ -1485,6 +1614,13 @@ pub trait Styled: Sized {
         self.styles_mut().justify = Some(Justify::SpaceAround);
         self
     }
+    /// An overlay's children fill its height (its default, with
+    /// `items_stretch` across). Along a row or column, the same as
+    /// `justify_start`.
+    fn justify_stretch(mut self) -> Self {
+        self.styles_mut().justify = Some(Justify::Stretch);
+        self
+    }
     /// Fade content out over `top` and `bottom` bands at the edges of this
     /// node's clip (with `overflow_hidden` or a scroll view), per pixel.
     fn fade_edges(mut self, top: f32, bottom: f32) -> Self {
@@ -1507,6 +1643,20 @@ pub trait Styled: Sized {
     /// `fade_insets` at the left and right edges.
     fn fade_insets_x(mut self, left: f32, right: f32) -> Self {
         self.styles_mut().rare_mut().fade_insets_x = Some([left, right]);
+        self
+    }
+    /// Fade an edge only as far as content runs past it: a scroll view at
+    /// its top shows no top band, which grows to its width as the content
+    /// scrolls under that edge.
+    fn fade_overflow(mut self, value: bool) -> Self {
+        self.styles_mut().rare_mut().fade_overflow = Some(value);
+        self
+    }
+    /// Lay this node's edges on whole points after layout (percentages and
+    /// ratios leave fractions, which blur a 1-point border across pixels);
+    /// its size follows its rounded edges.
+    fn snap(mut self, value: bool) -> Self {
+        self.styles_mut().rare_mut().snap = Some(value);
         self
     }
     /// Fade all four edges (CSS order: top, right, bottom, left), each band
@@ -1557,7 +1707,8 @@ pub trait Styled: Sized {
     fn shrink_0(self) -> Self {
         self.flex_shrink(0.)
     }
-    fn shadow(mut self, value: BoxShadow) -> Self {
+    fn shadow(mut self, value: impl Into<crate::theme::Themed<BoxShadow>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::Shadow);
         self.styles_mut().rare_mut().shadow = Some(Some(value));
         self.styles_mut().rare_mut().shadows = Some(None);
         self
@@ -1607,6 +1758,11 @@ pub trait Styled: Sized {
     }
 }
 impl Styled for Styles {
+    fn styles_mut(&mut self) -> &mut Styles {
+        self
+    }
+}
+impl Styled for &mut Styles {
     fn styles_mut(&mut self) -> &mut Styles {
         self
     }

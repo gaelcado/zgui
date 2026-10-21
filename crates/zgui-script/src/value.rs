@@ -1,11 +1,17 @@
 //! Values a script can store in Rust-owned state.
-use mlua::{FromLua, IntoLua, Lua, UserData, UserDataMethods};
+//!
+//! A value is an immutable snapshot: lists and maps are shared (`Rc`), so an
+//! update builds a new value that shares every subtree it did not touch, and
+//! comparing two values (which decides whether state changed) stops at the
+//! first shared subtree. Scripts see values as read-only tables and change
+//! state through its methods: `set`, `set_key`, `patch`, `update`, `insert`.
+use mlua::{FromLua, IntoLua, Lua, Table, UserData, UserDataMethods};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use zgui::reactive::{Runtime, Signal};
 
 /// A script value. State holds these, so equal writes are suppressed like any
 /// other signal.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub enum Value {
     #[default]
     Nil,
@@ -15,14 +21,86 @@ pub enum Value {
     List(Rc<[Value]>),
     /// A table with string keys, sorted by key so equal tables compare equal.
     Map(Rc<[(Rc<str>, Value)]>),
+    /// An element a script keeps (`ui.use_state(el)`): opaque to Rust, equal
+    /// only to itself, and `null` as JSON.
+    Element(ElementHandle),
 }
+
+/// A mounted (or once mounted) element held in state.
+#[derive(Clone)]
+pub struct ElementHandle(pub(crate) Rc<crate::element::Element>);
+impl ElementHandle {
+    /// Whether the element is in the interface now.
+    pub fn is_mounted(&self) -> bool {
+        self.0.is_mounted()
+    }
+}
+impl PartialEq for ElementHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl std::fmt::Debug for ElementHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0.id {
+            Some(id) => write!(f, "Element({}#{id})", self.0.tag),
+            None => write!(f, "Element({})", self.0.tag),
+        }
+    }
+}
+
+/// Shared subtrees compare equal without being walked.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Nil, Value::Nil) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Num(a), Value::Num(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || a == b,
+            (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b) || a[..] == b[..],
+            (Value::Map(a), Value::Map(b)) => {
+                Rc::ptr_eq(a, b)
+                    || (a.len() == b.len()
+                        && a.iter().zip(b.iter()).all(|((ka, va), (kb, vb))| {
+                            (Rc::ptr_eq(ka, kb) || ka == kb) && va == vb
+                        }))
+            }
+            // `{}` is both.
+            (Value::List(l), Value::Map(m)) | (Value::Map(m), Value::List(l)) => {
+                l.is_empty() && m.is_empty()
+            }
+            (Value::Element(a), Value::Element(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// One step of a path into a value: a map's key or a list's 1-based index.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PathKey {
+    Key(Rc<str>),
+    Index(usize),
+}
+impl std::fmt::Display for PathKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathKey::Key(k) => write!(f, "{k:?}"),
+            PathKey::Index(i) => write!(f, "{i}"),
+        }
+    }
+}
+
 impl Value {
     /// As JSON (lists as arrays, maps as objects), for a host to keep.
     pub fn to_json(&self) -> String {
         fn convert(value: &Value) -> serde_json::Value {
             match value {
-                Value::Nil => serde_json::Value::Null,
+                Value::Nil | Value::Element(_) => serde_json::Value::Null,
                 Value::Bool(b) => serde_json::Value::Bool(*b),
+                // Whole numbers as integers: `2`, not `2.0`.
+                Value::Num(n) if n.fract() == 0. && n.abs() < 9e15 => {
+                    serde_json::Value::Number((*n as i64).into())
+                }
                 Value::Num(n) => serde_json::Number::from_f64(*n)
                     .map_or(serde_json::Value::Null, serde_json::Value::Number),
                 Value::Str(s) => serde_json::Value::String(s.to_string()),
@@ -69,11 +147,131 @@ impl Value {
             _ => None,
         }
     }
+    /// What is at `path`, if anything.
+    pub fn at(&self, path: &[PathKey]) -> Option<&Value> {
+        let mut value = self;
+        for step in path {
+            value = match step {
+                PathKey::Key(k) => value.field(k)?,
+                PathKey::Index(i) => value.list().get(i.checked_sub(1)?)?,
+            };
+        }
+        Some(value)
+    }
+    /// This value with `new` at `path`, sharing everything off the path. The
+    /// result is this value itself (the same `Rc`s) when nothing changes, so
+    /// writing it to state notifies nobody. Maps and lists along the path
+    /// that do not exist yet are made; `nil` removes a key, or a list's last
+    /// item.
+    pub fn set_path(&self, path: &[PathKey], new: Value) -> Result<Value, String> {
+        let Some((step, rest)) = path.split_first() else {
+            return Ok(if new == *self { self.clone() } else { new });
+        };
+        let kind = self.kind();
+        match step {
+            PathKey::Key(key) => {
+                let fields: &[(Rc<str>, Value)] = match self {
+                    Value::Map(fields) => fields,
+                    Value::Nil => &[],
+                    Value::List(items) if items.is_empty() => &[],
+                    _ => return Err(format!("key {step} of {kind}: only tables have keys")),
+                };
+                let found = fields.binary_search_by(|(k, _)| (**k).cmp(key));
+                let old = found.ok().map(|i| &fields[i].1);
+                let child = old
+                    .unwrap_or(&Value::Nil)
+                    .set_path(rest, new)
+                    .map_err(|e| format!("{step}: {e}"))?;
+                Ok(match (found, child) {
+                    (Ok(i), child) if child == fields[i].1 => self.clone(),
+                    (Err(_), Value::Nil) => self.clone(),
+                    (Ok(i), Value::Nil) => {
+                        let mut out = Vec::with_capacity(fields.len() - 1);
+                        out.extend_from_slice(&fields[..i]);
+                        out.extend_from_slice(&fields[i + 1..]);
+                        Value::map(out)
+                    }
+                    (Ok(i), child) => {
+                        let mut out: Vec<_> = fields.to_vec();
+                        out[i].1 = child;
+                        Value::Map(out.into())
+                    }
+                    (Err(i), child) => {
+                        let mut out = Vec::with_capacity(fields.len() + 1);
+                        out.extend_from_slice(&fields[..i]);
+                        out.push((key.clone(), child));
+                        out.extend_from_slice(&fields[i..]);
+                        Value::Map(out.into())
+                    }
+                })
+            }
+            PathKey::Index(index) => {
+                let items: &[Value] = match self {
+                    Value::List(items) => items,
+                    Value::Nil => &[],
+                    _ => return Err(format!("index {step} of {kind}: only lists have indices")),
+                };
+                let len = items.len();
+                if *index == 0 || *index > len + 1 {
+                    return Err(format!(
+                        "index {index} is outside the list (1 to {}; use insert or push to grow it)",
+                        len + 1
+                    ));
+                }
+                let old = items.get(index - 1);
+                let child = old
+                    .unwrap_or(&Value::Nil)
+                    .set_path(rest, new)
+                    .map_err(|e| format!("{step}: {e}"))?;
+                Ok(match (old, child) {
+                    (Some(old), child) if child == *old => self.clone(),
+                    (None, Value::Nil) => self.clone(),
+                    (Some(_), Value::Nil) if *index == len => Value::List(items[..len - 1].into()),
+                    (Some(_), Value::Nil) => {
+                        return Err(format!(
+                            "a list has no holes: state:remove({index}) takes item {index} out"
+                        ));
+                    }
+                    (Some(_), child) => {
+                        let mut out = items.to_vec();
+                        out[index - 1] = child;
+                        Value::List(out.into())
+                    }
+                    (None, child) => {
+                        let mut out = Vec::with_capacity(len + 1);
+                        out.extend_from_slice(items);
+                        out.push(child);
+                        Value::List(out.into())
+                    }
+                })
+            }
+        }
+    }
+    /// A map's fields, sorted by key; an empty map is `{}`, as Luau gives it.
+    fn map(fields: Vec<(Rc<str>, Value)>) -> Value {
+        if fields.is_empty() {
+            Value::List(Rc::new([]))
+        } else {
+            Value::Map(fields.into())
+        }
+    }
+    /// What kind of value this is, for messages.
+    fn kind(&self) -> &'static str {
+        match self {
+            Value::Nil => "nil",
+            Value::Bool(_) => "a boolean",
+            Value::Num(_) => "a number",
+            Value::Str(_) => "a string",
+            Value::List(_) => "a list",
+            Value::Map(_) => "a table",
+            Value::Element(_) => "an element",
+        }
+    }
 }
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Nil => Ok(()),
+            Value::Nil | Value::Element(_) => Ok(()),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Num(n) if n.fract() == 0. && n.abs() < 1e15 => write!(f, "{}", *n as i64),
             Value::Num(n) => write!(f, "{n}"),
@@ -115,77 +313,168 @@ impl From<bool> for Value {
         Value::Bool(value)
     }
 }
-impl FromLua for Value {
-    fn from_lua(value: mlua::Value, _: &Lua) -> mlua::Result<Self> {
-        Ok(match value {
-            mlua::Value::Nil => Value::Nil,
-            mlua::Value::Boolean(b) => Value::Bool(b),
-            mlua::Value::Integer(n) => Value::Num(n as f64),
-            mlua::Value::Number(n) => Value::Num(n),
-            mlua::Value::String(s) => Value::Str(s.to_string_lossy().into()),
-            mlua::Value::Table(t) => {
-                let len = t.raw_len();
-                let mut fields: Vec<(Rc<str>, Value)> = Vec::new();
-                let mut items = Vec::with_capacity(len);
-                for pair in t.pairs::<mlua::Value, Value>() {
-                    let (key, value) = pair?;
-                    match key {
-                        mlua::Value::Integer(i) if i >= 1 && i as usize <= len => {}
-                        mlua::Value::Number(n)
-                            if n.fract() == 0. && n >= 1. && n as usize <= len => {}
-                        mlua::Value::String(k) => fields.push((k.to_string_lossy().into(), value)),
-                        other => {
-                            return Err(mlua::Error::runtime(format!(
-                                "state tables are lists or have string keys, not {} keys",
-                                other.type_name()
-                            )));
-                        }
-                    }
-                }
-                for item in t.sequence_values::<Value>() {
-                    items.push(item?);
-                }
-                match (items.is_empty(), fields.is_empty()) {
-                    (_, true) => Value::List(items.into()),
-                    (true, false) => {
-                        fields.sort_by(|a, b| a.0.cmp(&b.0));
-                        Value::Map(fields.into())
-                    }
-                    (false, false) => {
-                        return Err(mlua::Error::runtime(
-                            "a state table is a list or has string keys, not both",
-                        ));
-                    }
-                }
-            }
-            mlua::Value::UserData(ud) if ud.is::<State>() => ud.borrow::<State>()?.0.get(),
+
+/// A script value as a state value. Where `old` has an equal part (a
+/// string, a subtree), the result shares it, so the new state compares
+/// cheaply with the old and keeps one copy of what did not change.
+pub(crate) fn convert(value: mlua::Value, old: Option<&Value>) -> mlua::Result<Value> {
+    Ok(match value {
+        mlua::Value::Nil => Value::Nil,
+        mlua::Value::Boolean(b) => Value::Bool(b),
+        mlua::Value::Integer(n) => Value::Num(n as f64),
+        mlua::Value::Number(n) => Value::Num(n),
+        mlua::Value::String(s) => match old {
+            Some(Value::Str(o)) if *s.as_bytes() == *o.as_bytes() => Value::Str(o.clone()),
+            _ => Value::Str(s.to_string_lossy().into()),
+        },
+        mlua::Value::Table(t) => table(&t, old)?,
+        mlua::Value::UserData(ud) if ud.is::<State>() => ud.borrow::<State>()?.0.get(),
+        mlua::Value::UserData(ud) if ud.is::<crate::element::ElementUd>() => Value::Element(
+            ElementHandle(ud.borrow::<crate::element::ElementUd>()?.0.clone()),
+        ),
+        mlua::Value::UserData(ud) if ud.is::<crate::element::RefUd>() => {
+            return Err(mlua::Error::runtime(
+                "state holds elements, not refs: keep the ref itself, or store ref:get()",
+            ));
+        }
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "state holds nil, booleans, numbers, strings, lists, tables and elements, not {}",
+                other.type_name()
+            )));
+        }
+    })
+}
+fn table(t: &Table, old: Option<&Value>) -> mlua::Result<Value> {
+    let len = t.raw_len();
+    let mut keyed: Vec<(String, mlua::Value)> = Vec::new();
+    for pair in t.pairs::<mlua::Value, mlua::Value>() {
+        let (key, value) = pair?;
+        match key {
+            mlua::Value::Integer(i) if i >= 1 && i as usize <= len => {}
+            mlua::Value::Number(n) if n.fract() == 0. && n >= 1. && n as usize <= len => {}
+            mlua::Value::String(k) => keyed.push((k.to_string_lossy(), value)),
             other => {
                 return Err(mlua::Error::runtime(format!(
-                    "state holds nil, booleans, numbers, strings, lists and tables, not {}",
+                    "state tables are lists or have string keys, not {} keys",
                     other.type_name()
                 )));
             }
-        })
+        }
+    }
+    if !keyed.is_empty() {
+        if len > 0 {
+            return Err(mlua::Error::runtime(
+                "a state table is a list or has string keys, not both",
+            ));
+        }
+        keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        // Walk the old fields alongside (both sorted): a key both have
+        // keeps its old string and converts against its old value.
+        let was: &[(Rc<str>, Value)] = match old {
+            Some(Value::Map(f)) => f,
+            _ => &[],
+        };
+        let mut at = 0;
+        let mut fields = Vec::with_capacity(keyed.len());
+        for (key, value) in keyed {
+            while at < was.len() && *was[at].0 < *key {
+                at += 1;
+            }
+            fields.push(match was.get(at) {
+                Some((k, v)) if **k == *key => (k.clone(), convert(value, Some(v))?),
+                _ => (Rc::from(key), convert(value, None)?),
+            });
+        }
+        let fresh = Value::Map(fields.into());
+        return Ok(match old {
+            Some(old) if *old == fresh => old.clone(),
+            _ => fresh,
+        });
+    }
+    let was = old.map_or(&[][..], Value::list);
+    let mut items = Vec::with_capacity(len);
+    for (i, item) in t.sequence_values::<mlua::Value>().enumerate() {
+        items.push(convert(item?, was.get(i))?);
+    }
+    Ok(match old {
+        Some(old @ Value::List(o)) if o.len() == items.len() && o[..] == items[..] => old.clone(),
+        _ => Value::List(items.into()),
+    })
+}
+impl FromLua for Value {
+    fn from_lua(value: mlua::Value, _: &Lua) -> mlua::Result<Self> {
+        convert(value, None)
+    }
+}
+/// As script data: tables are read-only (`frozen`) when they are state's
+/// own, or a mutable copy for `state:update`.
+pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlua::Value> {
+    match value {
+        Value::Nil => Ok(mlua::Value::Nil),
+        Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
+        Value::Num(n) => Ok(mlua::Value::Number(*n)),
+        Value::Str(s) => lua.create_string(&**s).map(mlua::Value::String),
+        Value::List(items) => {
+            let table = lua.create_table_with_capacity(items.len(), 0)?;
+            for (i, item) in items.iter().enumerate() {
+                table.raw_set(i + 1, to_lua(item, lua, frozen)?)?;
+            }
+            table.set_readonly(frozen);
+            Ok(mlua::Value::Table(table))
+        }
+        Value::Map(fields) => {
+            let table = lua.create_table_with_capacity(0, fields.len())?;
+            for (key, value) in fields.iter() {
+                table.raw_set(&**key, to_lua(value, lua, frozen)?)?;
+            }
+            table.set_readonly(frozen);
+            Ok(mlua::Value::Table(table))
+        }
+        Value::Element(e) => lua
+            .create_userdata(crate::element::ElementUd(e.0.clone()))
+            .map(mlua::Value::UserData),
     }
 }
 impl IntoLua for Value {
     fn into_lua(self, lua: &Lua) -> mlua::Result<mlua::Value> {
-        match self {
-            Value::Nil => Ok(mlua::Value::Nil),
-            Value::Bool(b) => Ok(mlua::Value::Boolean(b)),
-            Value::Num(n) => Ok(mlua::Value::Number(n)),
-            Value::Str(s) => lua.create_string(&*s).map(mlua::Value::String),
-            Value::List(items) => lua
-                .create_sequence_from(items.iter().cloned())
-                .map(mlua::Value::Table),
-            Value::Map(fields) => {
-                let table = lua.create_table_with_capacity(0, fields.len())?;
-                for (key, value) in fields.iter() {
-                    table.raw_set(&**key, value.clone())?;
-                }
-                Ok(mlua::Value::Table(table))
+        to_lua(&self, lua, true)
+    }
+}
+
+/// A path for `set_key`: a key, an index, or a list of them.
+fn path_of(value: mlua::Value) -> mlua::Result<Vec<PathKey>> {
+    let step = |value: mlua::Value| -> mlua::Result<PathKey> {
+        Ok(match value {
+            mlua::Value::String(s) => PathKey::Key(s.to_str()?.as_ref().into()),
+            mlua::Value::Integer(i) if i >= 1 => PathKey::Index(i as usize),
+            mlua::Value::Number(n) if n.fract() == 0. && n >= 1. => PathKey::Index(n as usize),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "a state path is made of string keys and indices from 1, not {}",
+                    match &other {
+                        mlua::Value::Integer(i) => i.to_string(),
+                        mlua::Value::Number(n) => n.to_string(),
+                        other => other.type_name().to_owned(),
+                    }
+                )));
             }
+        })
+    };
+    match value {
+        mlua::Value::Table(t) => {
+            let path = t
+                .sequence_values::<mlua::Value>()
+                .map(|v| step(v?))
+                .collect::<mlua::Result<Vec<_>>>()?;
+            if path.is_empty() {
+                return Err(mlua::Error::runtime(
+                    "state:set_key needs a key; state:set replaces the whole value",
+                ));
+            }
+            Ok(path)
         }
+        other => Ok(vec![step(other)?]),
     }
 }
 
@@ -204,19 +493,63 @@ impl State {
             None => self.0.set(value),
         };
     }
+    /// Writes what `f` makes of the current value.
+    fn change(&self, lua: &Lua, f: impl FnOnce(&Value) -> mlua::Result<Value>) -> mlua::Result<()> {
+        let next = self.0.with_untracked(f)?;
+        self.write(lua, next);
+        Ok(())
+    }
+}
+fn fail(method: &str, error: String) -> mlua::Error {
+    mlua::Error::runtime(format!("state:{method}: {error}"))
 }
 impl UserData for State {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("get", |_, s, ()| Ok(s.0.get()));
         methods.add_method("peek", |_, s, ()| Ok(s.0.with_untracked(Clone::clone)));
-        methods.add_method("set", |lua, s, value: Value| {
-            s.write(lua, value);
-            Ok(())
+        methods.add_method("set", |lua, s, value: mlua::Value| {
+            s.change(lua, |old| convert(value, Some(old)))
         });
+        // `fn(t)` gets a mutable copy: change it in place and return nothing,
+        // or return the new value.
         methods.add_method("update", |lua, s, f: mlua::Function| {
-            let next: Value = f.call(s.0.with_untracked(Clone::clone))?;
+            let old = s.0.with_untracked(Clone::clone);
+            let copy = to_lua(&old, lua, false)?;
+            let returned: mlua::Value = f.call(copy.clone())?;
+            let next = if returned.is_nil() { copy } else { returned };
+            let next = convert(next, Some(&old))?;
             s.write(lua, next);
             Ok(())
+        });
+        // `set_key("k", v)`, `set_key(3, v)`, `set_key({ "tabs", 3, "title" }, v)`.
+        methods.add_method(
+            "set_key",
+            |lua, s, (path, value): (mlua::Value, mlua::Value)| {
+                let path = path_of(path)?;
+                s.change(lua, |old| {
+                    let leaf = convert(value, old.at(&path))?;
+                    old.set_path(&path, leaf).map_err(|e| fail("set_key", e))
+                })
+            },
+        );
+        // A shallow merge: `patch({ a = 1, b = 2 })`.
+        methods.add_method("patch", |lua, s, patch: Table| {
+            s.change(lua, |old| {
+                let mut next = old.clone();
+                for pair in patch.pairs::<mlua::Value, mlua::Value>() {
+                    let (key, value) = pair?;
+                    let mlua::Value::String(key) = key else {
+                        return Err(fail(
+                            "patch",
+                            format!("takes string keys, not {} keys", key.type_name()),
+                        ));
+                    };
+                    let path = [PathKey::Key(key.to_str()?.as_ref().into())];
+                    let leaf = convert(value, next.at(&path))?;
+                    next = next.set_path(&path, leaf).map_err(|e| fail("patch", e))?;
+                }
+                Ok(next)
+            })
         });
         methods.add_method("toggle", |lua, s, ()| {
             s.write(lua, Value::Bool(!s.0.with_untracked(Value::truthy)));
@@ -227,21 +560,62 @@ impl UserData for State {
             s.write(lua, Value::Num(n + by.unwrap_or(1.)));
             Ok(())
         });
-        methods.add_method("push", |lua, s, item: Value| {
-            let mut items = s.0.with_untracked(|v| v.list().to_vec());
-            items.push(item);
-            s.write(lua, Value::List(items.into()));
-            Ok(())
+        methods.add_method("push", |lua, s, item: mlua::Value| {
+            s.change(lua, |old| {
+                let items = list_of(old, "push")?;
+                // One allocation the right size: no regrowth.
+                let mut next = Vec::with_capacity(items.len() + 1);
+                next.extend_from_slice(items);
+                next.push(convert(item, None)?);
+                Ok(Value::List(next.into()))
+            })
+        });
+        methods.add_method("insert", |lua, s, (index, item): (f64, mlua::Value)| {
+            s.change(lua, |old| {
+                let items = list_of(old, "insert")?;
+                let len = items.len();
+                if index.fract() != 0. || index < 1. || index as usize > len + 1 {
+                    return Err(fail(
+                        "insert",
+                        format!("index {index} is outside the list (1 to {})", len + 1),
+                    ));
+                }
+                let at = index as usize - 1;
+                let mut next = Vec::with_capacity(len + 1);
+                next.extend_from_slice(&items[..at]);
+                next.push(convert(item, None)?);
+                next.extend_from_slice(&items[at..]);
+                Ok(Value::List(next.into()))
+            })
         });
         methods.add_method("remove", |lua, s, index: usize| {
-            let mut items = s.0.with_untracked(|v| v.list().to_vec());
-            let removed = (1..=items.len())
-                .contains(&index)
-                .then(|| items.remove(index - 1));
-            s.write(lua, Value::List(items.into()));
-            Ok(removed.unwrap_or_default())
+            let next = s.0.with_untracked(|v| {
+                let items = v.list();
+                (1..=items.len()).contains(&index).then(|| {
+                    let mut next = Vec::with_capacity(items.len() - 1);
+                    next.extend_from_slice(&items[..index - 1]);
+                    next.extend_from_slice(&items[index..]);
+                    (items[index - 1].clone(), next)
+                })
+            });
+            let Some((removed, next)) = next else {
+                return Ok(Value::Nil);
+            };
+            s.write(lua, Value::List(next.into()));
+            Ok(removed)
         });
         methods.add_method("len", |_, s, ()| Ok(s.0.with(|v| v.list().len())));
+    }
+}
+/// The list a list method works on (nil is an empty list).
+fn list_of<'a>(value: &'a Value, method: &str) -> mlua::Result<&'a [Value]> {
+    match value {
+        Value::List(items) => Ok(items),
+        Value::Nil => Ok(&[]),
+        other => Err(fail(
+            method,
+            format!("the state holds {}, not a list", other.kind()),
+        )),
     }
 }
 
@@ -268,5 +642,89 @@ impl Store {
     }
     pub fn get(&self, key: &str) -> Option<Signal<Value>> {
         self.signals.borrow().get(key).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, Value)]) -> Value {
+        let mut fields: Vec<(Rc<str>, Value)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), v.clone()))
+            .collect();
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        Value::Map(fields.into())
+    }
+    fn key(k: &str) -> PathKey {
+        PathKey::Key(k.into())
+    }
+
+    #[test]
+    fn set_path_shares_what_it_does_not_touch() {
+        let tab = |t: &str| map(&[("title", t.into()), ("root", map(&[("id", "p".into())]))]);
+        let doc = map(&[
+            (
+                "tabs",
+                Value::List(vec![tab("a"), tab("b"), tab("c")].into()),
+            ),
+            ("active", "a".into()),
+        ]);
+        let next = doc
+            .set_path(&[key("tabs"), PathKey::Index(2), key("title")], "x".into())
+            .unwrap();
+        let (Value::List(old), Value::List(new)) =
+            (doc.field("tabs").unwrap(), next.field("tabs").unwrap())
+        else {
+            panic!("tabs are lists")
+        };
+        assert!(!Rc::ptr_eq(old, new));
+        // Untouched tabs, and the touched tab's untouched root, are shared.
+        let ptr = |v: &Value| match v {
+            Value::Map(m) => Rc::as_ptr(m) as *const u8,
+            _ => std::ptr::null(),
+        };
+        assert_eq!(ptr(&old[0]), ptr(&new[0]));
+        assert_eq!(ptr(&old[2]), ptr(&new[2]));
+        assert_eq!(
+            ptr(old[1].field("root").unwrap()),
+            ptr(new[1].field("root").unwrap())
+        );
+        assert_eq!(new[1].field("title"), Some(&"x".into()));
+        // An equal write gives the very same value back.
+        let same = doc
+            .set_path(&[key("tabs"), PathKey::Index(2), key("title")], "b".into())
+            .unwrap();
+        assert_eq!(ptr(&same), ptr(&doc));
+    }
+
+    #[test]
+    fn set_path_adds_removes_and_refuses_holes() {
+        let v = Value::Nil
+            .set_path(&[key("a"), key("b")], 1.0.into())
+            .unwrap();
+        assert_eq!(v, map(&[("a", map(&[("b", 1.0.into())]))]));
+        let v = v.set_path(&[key("a"), key("b")], Value::Nil).unwrap();
+        assert_eq!(v, map(&[("a", Value::List(Rc::new([])))]));
+        let list = Value::List(vec![1.0.into(), 2.0.into()].into());
+        assert_eq!(
+            list.set_path(&[PathKey::Index(3)], 3.0.into())
+                .unwrap()
+                .list()
+                .len(),
+            3
+        );
+        assert_eq!(
+            list.set_path(&[PathKey::Index(2)], Value::Nil)
+                .unwrap()
+                .list()
+                .len(),
+            1
+        );
+        assert!(list.set_path(&[PathKey::Index(1)], Value::Nil).is_err());
+        assert!(list.set_path(&[PathKey::Index(5)], 1.0.into()).is_err());
+        assert!(list.set_path(&[key("x")], 1.0.into()).is_err());
+        assert!(Value::Num(1.).set_path(&[key("x")], 1.0.into()).is_err());
     }
 }

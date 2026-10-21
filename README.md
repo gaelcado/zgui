@@ -43,6 +43,25 @@ Opening it again restores the tabs, splits and pages it had and reattaches
 each pane to its shell. State lives in
 `~/Library/Application Support/zgui-terminal`.
 
+Interfaces can be Luau scripts that hot reload ([scripting](docs/scripting.md);
+the [Luau reference](docs/reference/index.md) has a page per element, and
+[app structure](docs/reference/app-structure.md) shows a large app in modules).
+Check them before they run with
+[luau-lsp](https://github.com/JohnnyMorganz/luau-lsp) and the bundled types;
+it reports `file:line:col` and fails on errors, such as a local function used
+before its definition:
+
+```sh
+cargo run -p zgui-script --bin zgui -- check app.luau   # or a directory
+```
+
+A script error shows in a banner over the window, with its file and line,
+until the next good reload. Ctrl+Option+Cmd+I (Ctrl+Alt+Shift+I on Linux)
+or `ZGUI_INSPECT=1` shows the layout inspector: every box outlined, and the
+one under the pointer described with the script line that created it.
+`ZGUI_LAYOUT_WARNINGS=1` reports suspicious layouts (a collapsed box, content
+cut off by a clip that does not scroll, an unresolvable percentage) to stderr.
+
 Linux builds need the native development libraries for fontconfig, xkbcommon and
 D-Bus, plus `pkg-config` (for example `libfontconfig1-dev libxkbcommon-dev
 libdbus-1-dev pkg-config` on Debian/Ubuntu). File dialogs use the desktop's XDG

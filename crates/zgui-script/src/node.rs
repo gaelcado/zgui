@@ -6,6 +6,7 @@
 use crate::{
     Vm,
     element::{Ref, RefUd},
+    persist::Persist,
     value::{State, Store, Value},
 };
 use mlua::{Function, Lua, Table, UserData};
@@ -21,6 +22,7 @@ use zgui::{
     layout::Length,
     reactive::{Runtime, Signal},
     scene::{BoxShadow, Color, Transform},
+    theme::Themed,
 };
 
 /// Plain styles for a pseudo-state such as `hover`.
@@ -42,6 +44,9 @@ pub(crate) struct Node {
     pub disabled: Option<Source>,
     /// `layout = "height"`: the node's size follows its content, animated.
     pub layout: Option<LayoutAnim>,
+    /// `layout_id = "selection"`: a node mounting as another with the same
+    /// id leaves moves (and scales) from where that one was.
+    pub layout_id: Option<Rc<str>>,
     /// `mask = { bitmap, w, h, x, y }`: the content shows through the
     /// bitmap's alpha, drawn at `w`×`h` from (`x`, `y`).
     pub mask: Option<Mask>,
@@ -49,6 +54,20 @@ pub(crate) struct Node {
     pub shader: Option<Arc<zgui::decoration::FillShader>>,
     /// `shader_params`: the shader's sixteen values, as four vec4s.
     pub shader_params: Option<[[f32; 4]; 4]>,
+    /// `window_drag = true`: a press on it moves the window.
+    pub window_drag: bool,
+    /// Where the script created it (`app.luau:12`), recorded only while the
+    /// layout inspector or layout warnings want it.
+    pub source: Option<Rc<str>>,
+    /// `theme = …`: the subtree's theme scope.
+    pub theme: Option<ThemeSpec>,
+}
+/// What `theme = …` gives a subtree: fixed, or a state or function that
+/// computes it (the scope follows).
+pub(crate) enum ThemeSpec {
+    Fixed(zgui::theme::ThemeOverride),
+    State(Signal<Value>),
+    Computed(Function),
 }
 /// An alpha mask over a node's content; the offset animates (`maskX`).
 #[derive(Clone)]
@@ -143,6 +162,17 @@ impl UserData for WebUd {
         fields.add_field_method_get("can_go_forward", |_, w| Ok(w.0.can_go_forward()));
         fields.add_field_method_get("focused", |_, w| Ok(w.0.focused()));
         fields.add_field_method_get("error", |_, w| Ok(w.0.state().get().error));
+        // `{ x, y }` in points from the page's top left, or nil outside it.
+        fields.add_field_method_get("pointer", |lua, w| {
+            w.0.pointer()
+                .map(|(x, y)| {
+                    let table = lua.create_table()?;
+                    table.set("x", x)?;
+                    table.set("y", y)?;
+                    Ok(table)
+                })
+                .transpose()
+        });
     }
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("load", |_, w, url: String| {
@@ -229,12 +259,14 @@ pub(crate) fn json_value(json: &str) -> Value {
             serde_json::Value::Array(a) => {
                 Value::List(a.into_iter().map(convert).collect::<Vec<_>>().into())
             }
-            serde_json::Value::Object(o) => Value::Map(
-                o.into_iter()
-                    .map(|(k, v)| (k.into(), convert(v)))
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
+            serde_json::Value::Object(o) if o.is_empty() => Value::List(Rc::new([])),
+            serde_json::Value::Object(o) => {
+                let mut fields: Vec<(Rc<str>, Value)> =
+                    o.into_iter().map(|(k, v)| (k.into(), convert(v))).collect();
+                // Sorted, as maps are, whatever order serde_json keeps.
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
+                Value::Map(fields.into())
+            }
         }
     }
     serde_json::from_str(json)
@@ -288,6 +320,8 @@ impl UserData for BitmapUd {
 pub(crate) struct LayoutAnim {
     pub width: bool,
     pub height: bool,
+    /// `layout = "position"`: moves layout makes animate, on the compositor.
+    pub position: bool,
     /// ms; a spring's own settling time when `None`.
     pub duration: Option<f64>,
     pub ease: Option<crate::anime::ease::Ease>,
@@ -311,13 +345,38 @@ impl Node {
             focusable: None,
             disabled: None,
             layout: None,
+            layout_id: None,
             mask: None,
             shader: None,
             shader_params: None,
+            window_drag: false,
+            source: None,
+            theme: None,
         }
+    }
+    /// How the layout inspector names it: its kind, `#id` and `.class`es.
+    pub fn label(&self) -> String {
+        let mut label = self.tag().to_string();
+        if let Some(id) = &self.id {
+            label.push_str(" #");
+            label.push_str(id);
+        }
+        for class in self.classes.iter() {
+            label.push_str(" .");
+            label.push_str(class);
+        }
+        label
     }
     /// Whether scripts can reach this node (selectors, refs, `on_mount`):
     /// only those carry an element and its animated values.
+    /// Whether layout moves animate: `layout = "position"` or a `layout_id`.
+    pub fn tracks_layout(&self) -> bool {
+        self.layout_id.is_some() || self.layout.as_ref().is_some_and(|l| l.position)
+    }
+    /// Whether the node has a box whose size animates (`layout = "height"`).
+    pub fn sizes_layout(&self) -> bool {
+        self.layout.as_ref().is_some_and(|l| l.width || l.height)
+    }
     pub fn targetable(&self) -> bool {
         self.id.is_some()
             || !self.classes.is_empty()
@@ -341,7 +400,14 @@ impl Node {
                 | Kind::Menu { .. }
                 | Kind::Submenu { .. }
                 | Kind::Presence { .. }
+                | Kind::Each {
+                    motion: Some(_),
+                    ..
+                }
         ) || self.props.iter().any(|(_, s)| matches!(s, Source::Anim(_)))
+            // An icon's tint may be a theme token: it reads the scope.
+            || matches!(self.kind, Kind::Svg { .. })
+                && self.props.iter().any(|(p, _)| *p == Prop::Tint)
     }
     /// The element kind selectors match (`button`, `text`…).
     pub fn tag(&self) -> &'static str {
@@ -431,16 +497,11 @@ pub(crate) struct Events {
     pub context_menu_below: bool,
 }
 impl Kind {
-    /// Kinds that become a container of whatever they currently show.
-    pub fn is_region(&self) -> bool {
-        matches!(
-            self,
-            Kind::Show { .. }
-                | Kind::Each { .. }
-                | Kind::Switch { .. }
-                | Kind::Presence { .. }
-                | Kind::Slot(_)
-        )
+    /// Regions that become a box of any number of children, laid out as
+    /// their parent lays out its own (`show`, `switch` and `presence` lay
+    /// out as the one view they show instead).
+    pub fn flows(&self) -> bool {
+        matches!(self, Kind::Each { .. } | Kind::Slot(_))
     }
 }
 impl Events {
@@ -502,6 +563,12 @@ pub(crate) enum Kind {
         label: String,
         value: Signal<Value>,
         multiline: bool,
+        /// Shown while the value is empty (`placeholder`), in
+        /// `placeholder_color`.
+        placeholder: Option<Source>,
+        placeholder_color: Option<Source>,
+        /// `select_on_focus = true`: focusing it selects all its text.
+        select_on_focus: bool,
     },
     Progress {
         label: String,
@@ -522,6 +589,8 @@ pub(crate) enum Kind {
         items: Signal<Value>,
         build: Function,
         key: Option<Function>,
+        /// `animate`, `enter` or `exit`: rows move, enter and leave animated.
+        motion: Option<Rc<crate::motion::EachMotion>>,
     },
     /// A virtualized list: only visible rows are built.
     List {
@@ -608,8 +677,8 @@ pub(crate) enum Segment {
 /// A rich text run.
 pub(crate) struct Span {
     pub text: Text,
-    pub color: Option<Color>,
-    pub background: Option<Color>,
+    pub color: Option<Themed<Color>>,
+    pub background: Option<Themed<Color>>,
     pub size: Option<f32>,
     pub weight: Option<u16>,
     pub italic: bool,
@@ -637,6 +706,8 @@ pub(crate) enum Lit {
     Shadows(Arc<[BoxShadow]>),
     Gradient(f32, Arc<[GradientStop]>),
     Corners(Corners),
+    /// A theme token (`"$surface.raised"`), resolved when the node styles.
+    Token(zgui::theme::TokenId),
 }
 
 #[derive(Clone)]
@@ -664,8 +735,9 @@ pub(crate) struct Anim {
 }
 #[derive(Clone)]
 pub(crate) enum Curve {
+    /// `ms`: the duration in milliseconds, as everywhere in scripts.
     Tween {
-        seconds: f32,
+        ms: f32,
         ease: crate::anime::ease::Ease,
     },
     Spring {
@@ -674,7 +746,7 @@ pub(crate) enum Curve {
     },
     /// `fps` caps the frames a decorative loop asks for.
     Loop {
-        seconds: f32,
+        ms: f32,
         ease: crate::anime::ease::Ease,
         yoyo: bool,
         fps: Option<f64>,
@@ -754,12 +826,14 @@ props! {
     "shadow" => Shadow: Shadow, "opacity" => Opacity: Num,
     "brightness" => Brightness: Num, "contrast" => Contrast: Num, "saturate" => Saturate: Num, "blur" => Blur: Num, "backdrop_blur" => BackdropBlur: Num,
     "fade" => Fade: Pair, "fade_x" => FadeX: Pair, "fade_sides" => FadeSides: Corners,
+    "fade_overflow" => FadeOverflow: Bool, "snap" => Snap: Bool,
     "clip_inset" => ClipInset: Corners, "layer" => Layer: Bool, "fit" => Fit: Str, "tint" => Tint: Color,
     "cursor" => Cursor: Str,
     // Text.
     "text_size" => TextSize: Num, "weight" => Weight: Num, "bold" => Bold: Bool, "italic" => Italic: Bool,
     "align" => Align: Str, "font" => Font: Str, "wrap" => Wrap: Bool, "truncate" => Truncate: Bool,
     "lines" => Lines: Num, "line_height" => LineHeight: Num, "letter_spacing" => LetterSpacing: Num,
+    "tabular" => Tabular: Bool,
     // Transforms: after layout, about `origin` (fractions of the node).
     "x" => X: Num, "y" => Y: Num,
     "scale" => Scale: Num, "scale_x" => ScaleX: Num, "scale_y" => ScaleY: Num,
@@ -781,6 +855,12 @@ pub(crate) struct Env {
     pub retained: RefCell<Vec<Box<dyn Any>>>,
     /// The host's actions (`ui.action` binds them, `ui.invoke` calls them).
     pub actions: crate::Actions,
+    /// The host's saved state (`ui.persist`).
+    pub persist: Rc<Persist>,
+    /// The host's warnings (`crate::warn`): each once, across reloads.
+    pub warnings: crate::SharedWarnings,
+    /// Where `ui.every` and `ui.after` run.
+    pub timers: Rc<crate::timers::Timers>,
 }
 
 /// What a component instance owns while it is mounted.
@@ -803,8 +883,21 @@ pub(crate) fn env(lua: &Lua) -> mlua::Result<mlua::AppDataRef<'_, Env>> {
     lua.app_data_ref::<Env>()
         .ok_or_else(|| mlua::Error::runtime("ui library used outside a script host"))
 }
-fn node_ud(lua: &Lua, node: Node) -> mlua::Result<mlua::AnyUserData> {
+fn node_ud(lua: &Lua, mut node: Node) -> mlua::Result<mlua::AnyUserData> {
+    if node.owner.upgrade().is_some_and(|vm| vm.locate.get()) {
+        node.source = location(lua);
+    }
     lua.create_userdata(NodeUd(Rc::new(node)))
+}
+/// The script line calling the `ui` function running now: `app.luau:12`.
+fn location(lua: &Lua) -> Option<Rc<str>> {
+    lua.inspect_stack(1, |debug| {
+        let line = debug.current_line()?;
+        let source = debug.source().source?;
+        let chunk = source.strip_prefix('@').unwrap_or(&source);
+        Some(Rc::from(format!("{chunk}:{line}")))
+    })
+    .flatten()
 }
 fn state_of(value: &mlua::Value) -> Option<Signal<Value>> {
     match value {
@@ -827,6 +920,15 @@ fn expect_node(value: mlua::Value, what: &str) -> mlua::Result<Rc<Node>> {
 
 pub(crate) fn parse_color(text: &str) -> Option<Color> {
     crate::anime::value::parse_color(text).map(crate::anime::target::v_to_color)
+}
+/// A colour or a theme token (`"$text.secondary"`).
+fn themed_color(value: &Value) -> Option<Themed<Color>> {
+    match value {
+        Value::Str(s) if s.starts_with('$') && s.len() > 1 => {
+            Some(Themed::Token(zgui::theme::token(&s[1..])))
+        }
+        other => color_of(other).map(Themed::Value),
+    }
 }
 fn color_of(value: &Value) -> Option<Color> {
     match value {
@@ -878,6 +980,13 @@ fn shadow(value: &Value) -> Option<BoxShadow> {
 }
 /// Converts a value to a property's type, or `None` if it does not fit.
 pub(crate) fn lit(value: &Value, ty: Ty) -> Option<Lit> {
+    if let Value::Str(s) = value
+        && let Some(name) = s.strip_prefix('$')
+        && !name.is_empty()
+        && matches!(ty, Ty::Color | Ty::Num | Ty::Len | Ty::Shadow | Ty::Str)
+    {
+        return Some(Lit::Token(zgui::theme::token(name)));
+    }
     Some(match (ty, value) {
         (Ty::Num, v) => Lit::Num(v.as_f64()? as f32),
         (Ty::Bool, v) => Lit::Bool(v.truthy()),
@@ -982,6 +1091,13 @@ fn template(lua: &Lua, text: &str) -> mlua::Result<Text> {
         return Ok(Text::Literal(text.to_owned()));
     }
     let env = env(lua)?;
+    let prefix = module_prefix(lua, &env);
+    let script = || {
+        env.vm
+            .upgrade()
+            .map(|vm| vm.name.clone())
+            .unwrap_or_default()
+    };
     let mut segments = Vec::new();
     let mut literal = String::new();
     let mut rest = text;
@@ -1003,9 +1119,18 @@ fn template(lua: &Lua, text: &str) -> mlua::Result<Text> {
             rest = &rest[c.len_utf8()..];
             continue;
         };
-        let state = env
-            .store
-            .get(name)
+        // A module's `ui.state` and `ui.persist` keys are its own (see
+        // `module_key`): its templates name those first.
+        let state = prefix
+            .as_ref()
+            .and_then(|prefix| {
+                let own = format!("{prefix}{name}");
+                env.store
+                    .get(&own)
+                    .or_else(|| env.persist.get(&script(), &own))
+            })
+            .or_else(|| env.store.get(name))
+            .or_else(|| env.persist.get(&script(), name))
             .or_else(|| env.shared.get(name))
             .ok_or_else(|| {
                 mlua::Error::runtime(format!("text `{text}` names unknown state `{name}`"))
@@ -1114,6 +1239,10 @@ const WIDGET_FIELDS: &[&str] = &[
     "exit",
     "mode",
     "initial",
+    "placeholder",
+    "placeholder_color",
+    "select_on_focus",
+    "animate",
 ];
 
 fn set_handler(events: &mut Events, key: &str, value: mlua::Value) -> mlua::Result<bool> {
@@ -1176,6 +1305,7 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
     let Some(table) = table else {
         return Ok(node);
     };
+    let mut layout_given = false;
     for pair in table.pairs::<mlua::Value, mlua::Value>() {
         let (key, value) = pair?;
         let mlua::Value::String(key) = key else {
@@ -1208,6 +1338,7 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                 }
             },
             "focusable" => node.focusable = Some(lua.unpack(value)?),
+            "window_drag" => node.window_drag = lua.unpack(value)?,
             "bg_shader" => {
                 let mlua::Value::UserData(ud) = &value else {
                     return Err(mlua::Error::runtime("`bg_shader` takes a ui.shader"));
@@ -1283,17 +1414,20 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                     offset,
                 });
             }
+            "layout_id" => node.layout_id = Some(lua.unpack::<String>(value)?.into()),
             "layout" => {
-                let (width, height) = match &value {
-                    mlua::Value::Boolean(true) => (false, true),
-                    mlua::Value::Boolean(false) | mlua::Value::Nil => (false, false),
+                layout_given = true;
+                let (width, height, position) = match &value {
+                    mlua::Value::Boolean(true) => (false, true, false),
+                    mlua::Value::Boolean(false) | mlua::Value::Nil => (false, false, false),
                     mlua::Value::String(s) => match &*s.to_string_lossy() {
-                        "height" => (false, true),
-                        "width" => (true, false),
-                        "size" => (true, true),
+                        "height" => (false, true, false),
+                        "width" => (true, false, false),
+                        "size" => (true, true, false),
+                        "position" => (false, false, true),
                         other => {
                             return Err(mlua::Error::runtime(format!(
-                                "layout is \"height\", \"width\" or \"size\", not `{other}`"
+                                "layout is \"height\", \"width\", \"size\" or \"position\", not `{other}`"
                             )));
                         }
                     },
@@ -1307,6 +1441,7 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                 let layout = node.layout.get_or_insert(LayoutAnim {
                     width,
                     height,
+                    position,
                     duration: None,
                     ease: None,
                     enter: false,
@@ -1314,7 +1449,8 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                 });
                 layout.width = width;
                 layout.height = height;
-                if !width && !height {
+                layout.position = position;
+                if !width && !height && !position {
                     node.layout = None;
                 }
             }
@@ -1322,6 +1458,7 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                 let layout = node.layout.get_or_insert(LayoutAnim {
                     width: false,
                     height: true,
+                    position: false,
                     duration: None,
                     ease: None,
                     enter: false,
@@ -1332,7 +1469,9 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                 } else if key == "layout_clip" {
                     layout.clip = lua.unpack::<bool>(value)?;
                 } else if key == "layout_duration" {
-                    layout.duration = Some(lua.unpack::<f64>(value)?);
+                    let ms = lua.unpack::<f64>(value)?;
+                    crate::check_duration(lua, "layout_duration", ms, false);
+                    layout.duration = Some(ms);
                 } else {
                     layout.ease = match value {
                         mlua::Value::String(s) => Some(
@@ -1383,6 +1522,18 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                 }
                 node.events.context_menu_style = Some(lits.into());
             }
+            "theme" => {
+                node.theme = Some(if let Some(state) = state_of(&value) {
+                    ThemeSpec::State(state)
+                } else if let mlua::Value::Function(f) = value {
+                    ThemeSpec::Computed(f)
+                } else {
+                    let value = lua.unpack::<Value>(value)?;
+                    ThemeSpec::Fixed(
+                        crate::theme::override_of(&value).map_err(mlua::Error::runtime)?,
+                    )
+                });
+            }
             "hover" | "active" | "focus" | "disabled" => {
                 let pseudo = match key.as_str() {
                     "hover" => Pseudo::Hover,
@@ -1418,6 +1569,15 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                     .push((prop, source(lua, prop.ty(), name, value)?));
             }
         }
+    }
+    // With a `layout_id`, `layout_duration` and `layout_ease` alone time its
+    // moves; they do not ask for a size box.
+    if node.layout_id.is_some()
+        && !layout_given
+        && let Some(layout) = &mut node.layout
+    {
+        layout.height = false;
+        layout.position = true;
     }
     let mut kids = Vec::new();
     children(lua, &node.owner, table, &mut kids)?;
@@ -1458,8 +1618,8 @@ fn span(lua: &Lua, arg: mlua::Value) -> mlua::Result<Span> {
     };
     if let Some(t) = table {
         let value = |k: &str| t.get::<Value>(k);
-        span.color = color_of(&value("color")?);
-        span.background = color_of(&value("bg")?);
+        span.color = themed_color(&value("color")?);
+        span.background = themed_color(&value("bg")?);
         span.size = value("text_size")?.as_f64().map(|v| v as f32);
         span.weight = value("weight")?
             .as_f64()
@@ -1635,26 +1795,33 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "checkbox",
         widget(|label, value, _| Ok(Kind::Checkbox { label, value }))?,
     )?;
-    ui.set(
-        "input",
-        widget(|label, value, t| {
-            Ok(Kind::Input {
-                label,
-                value,
-                multiline: t.get::<Option<bool>>("multiline")?.unwrap_or(false),
-            })
-        })?,
-    )?;
-    ui.set(
-        "textarea",
-        widget(|label, value, _| {
-            Ok(Kind::Input {
-                label,
-                value,
-                multiline: true,
-            })
-        })?,
-    )?;
+    for (name, always_multiline) in [("input", false), ("textarea", true)] {
+        ui.set(
+            name,
+            lua.create_function(move |lua, table: Table| {
+                let label: Option<String> = table.get("label")?;
+                let value = expect_state(&table.get("value")?, "`value`")?;
+                let optional = |key: &str, ty: Ty| -> mlua::Result<Option<Source>> {
+                    match table.get::<mlua::Value>(key)? {
+                        mlua::Value::Nil => Ok(None),
+                        value => source(lua, ty, key, value).map(Some),
+                    }
+                };
+                let kind = Kind::Input {
+                    label: label.unwrap_or_default(),
+                    value,
+                    multiline: always_multiline
+                        || table.get::<Option<bool>>("multiline")?.unwrap_or(false),
+                    placeholder: optional("placeholder", Ty::Str)?,
+                    placeholder_color: optional("placeholder_color", Ty::Color)?,
+                    select_on_focus: table
+                        .get::<Option<bool>>("select_on_focus")?
+                        .unwrap_or(false),
+                };
+                node_ud(lua, fill(lua, Node::new(owner(lua)?, kind), Some(&table))?)
+            })?,
+        )?;
+    }
     ui.set(
         "progress",
         widget(|label, value, _| Ok(Kind::Progress { label, value }))?,
@@ -1704,17 +1871,22 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(
             |lua, (items, build, table): (mlua::Value, Function, Option<Table>)| {
                 let items = expect_state(&items, "ui.each's list")?;
-                let key = match &table {
-                    Some(t) => t.get::<Option<Function>>("key")?,
-                    None => None,
+                let (key, motion) = match &table {
+                    Some(t) => (
+                        t.get::<Option<Function>>("key")?,
+                        crate::motion::each_motion(t)?,
+                    ),
+                    None => (None, None),
+                };
+                let kind = Kind::Each {
+                    items,
+                    build,
+                    key,
+                    motion,
                 };
                 node_ud(
                     lua,
-                    fill(
-                        lua,
-                        Node::new(owner(lua)?, Kind::Each { items, build, key }),
-                        table.as_ref(),
-                    )?,
+                    fill(lua, Node::new(owner(lua)?, kind), table.as_ref())?,
                 )
             },
         )?,
@@ -1956,13 +2128,51 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // Timers: `ui.every(ms, fn)` calls `fn` every `ms`, `ui.after(ms, fn)`
+    // once; each returns a function that stops it. Returning false from
+    // `fn` stops it too. They live as long as what made them (an effect's
+    // owner: a component, a builder, the script).
+    for (name, repeat) in [("every", true), ("after", false)] {
+        ui.set(
+            name,
+            lua.create_function(move |lua, (ms, f): (f64, Function)| {
+                let env = env(lua)?;
+                if !(ms.is_finite() && ms >= 0.) {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.{name}: a number of milliseconds"
+                    )));
+                }
+                let vm = env.vm.clone();
+                let period = std::time::Duration::from_secs_f64((ms / 1000.).max(0.001));
+                let stop = env.timers.start(period, repeat, move || {
+                    let Some(vm) = vm.upgrade() else { return false };
+                    match vm.call::<Option<bool>>(&f, ()) {
+                        Ok(keep) => keep != Some(false),
+                        Err(e) => {
+                            vm.report(e);
+                            true
+                        }
+                    }
+                });
+                let handle = stop.handle();
+                retain(&env, Box::new(stop));
+                lua.create_function(move |_, ()| {
+                    handle.set(false);
+                    Ok(())
+                })
+            })?,
+        )?;
+    }
     ui.set(
         "computed",
         lua.create_function(|lua, f: Function| {
             let env = env(lua)?;
             let signal = env.runtime.signal(Value::Nil);
             let (vm, out) = (env.vm.clone(), signal.clone());
-            let effect = env.runtime.effect(move || {
+            // Its value is there as soon as it is made, even while a
+            // component builds (inside a flush), where an effect would run
+            // only after the build and its `on_mount`s.
+            let effect = env.runtime.effect_now(move || {
                 if let Some(vm) = vm.upgrade() {
                     match vm.call::<Value>(&f, ()) {
                         Ok(v) => {
@@ -2007,7 +2217,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     ui.set(
         "ref",
-        lua.create_function(|_, ()| Ok(RefUd(Rc::default())))?,
+        lua.create_function(|lua, ()| Ok(RefUd(Ref::new(&env(lua)?.runtime))))?,
     )?;
     ui.set(
         "webview",
@@ -2191,19 +2401,23 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "state",
         lua.create_function(|lua, (key, initial): (String, Value)| {
             let env = env(lua)?;
-            // A required module's keys are its own: two modules' "open" are
-            // two states. The script's own keys stay as they are.
-            let chunk = lua
-                .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
-                .flatten();
-            let script = env.vm.upgrade().map(|vm| format!("@{}", vm.name));
-            let key = match chunk {
-                Some(chunk) if Some(&chunk) != script.as_ref() && chunk.starts_with('@') => {
-                    format!("{}::{key}", &chunk[1..])
-                }
-                _ => key,
-            };
+            let key = module_key(lua, &env, key);
             Ok(State(env.store.state(&key, initial)))
+        })?,
+    )?;
+    // `ui.persist(key, initial)`: state saved in the host's storage and
+    // restored on the next run (and kept across reloads, like `ui.state`).
+    ui.set(
+        "persist",
+        lua.create_function(|lua, (key, initial): (String, Value)| {
+            let env = env(lua)?;
+            let script = env
+                .vm
+                .upgrade()
+                .map(|vm| vm.name.clone())
+                .unwrap_or_default();
+            let key = module_key(lua, &env, key);
+            Ok(State(env.persist.state(&script, &key, initial)))
         })?,
     )?;
     ui.set(
@@ -2236,13 +2450,15 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 )));
             }
         };
-        let seconds = opts.get::<Option<f32>>("duration")?;
+        let duration = opts.get::<Option<f64>>("duration")?;
+        if let Some(ms) = duration {
+            let looping = matches!(default, Curve::Loop { .. });
+            crate::check_duration(lua, "duration", ms, looping);
+        }
+        let duration = duration.map(|ms| ms as f32);
         let curve = match default {
-            Curve::Tween {
-                seconds: s,
-                ease: e,
-            } => Curve::Tween {
-                seconds: seconds.unwrap_or(s),
+            Curve::Tween { ms, ease: e } => Curve::Tween {
+                ms: duration.unwrap_or(ms),
                 ease: ease.unwrap_or(e),
             },
             Curve::Spring { stiffness, damping } => Curve::Spring {
@@ -2250,19 +2466,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 damping: opts.get::<Option<f32>>("damping")?.unwrap_or(damping),
             },
             Curve::Loop {
-                seconds: s,
+                ms,
                 ease: e,
                 yoyo,
                 fps,
             } => Curve::Loop {
-                seconds: seconds.unwrap_or(s),
+                ms: duration.unwrap_or(ms),
                 ease: ease.unwrap_or(e),
                 yoyo: opts.get::<Option<bool>>("yoyo")?.unwrap_or(yoyo),
                 fps: opts.get::<Option<f64>>("fps")?.or(fps),
             },
         };
-        if let Curve::Tween { seconds, .. } | Curve::Loop { seconds, .. } = curve
-            && !(seconds.is_finite() && seconds > 0.)
+        if let Curve::Tween { ms, .. } | Curve::Loop { ms, .. } = curve
+            && !(ms.is_finite() && ms > 0.)
         {
             return Err(mlua::Error::runtime("duration must be positive"));
         }
@@ -2285,7 +2501,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "tween",
         lua.create_function(move |lua, (state, opts): (mlua::Value, Option<Table>)| {
             let curve = Curve::Tween {
-                seconds: 0.25,
+                ms: 250.,
                 ease: Ease::Curve(Mode::Out, Base::Power(3.)),
             };
             anim(
@@ -2315,7 +2531,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "loop",
         lua.create_function(move |lua, opts: Option<Table>| {
             let curve = Curve::Loop {
-                seconds: 1.,
+                ms: 1000.,
                 ease: Ease::Curve(Mode::InOut, Base::Power(2.)),
                 yoyo: true,
                 fps: None,
@@ -2360,6 +2576,26 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     // Read-only once the host's own parts are in (see `ScriptHost::run`).
     lua.globals().set("ui", ui)
+}
+
+/// A state key as the calling chunk names it: a required module's keys are
+/// its own (two modules' "open" are two states); the script's own keys stay
+/// as they are.
+fn module_key(lua: &Lua, env: &Env, key: String) -> String {
+    match module_prefix(lua, env) {
+        Some(prefix) => prefix + &key,
+        None => key,
+    }
+}
+/// What the calling chunk's state keys start with: `ui/card.luau::` in a
+/// required module, nothing in the script itself.
+fn module_prefix(lua: &Lua, env: &Env) -> Option<String> {
+    let chunk = lua
+        .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
+        .flatten()?;
+    let path = chunk.strip_prefix('@')?;
+    let script = env.vm.upgrade().is_some_and(|vm| vm.name == path);
+    (!script).then(|| format!("{path}::"))
 }
 
 /// Keeps `resource` for the component being built, or for the script.

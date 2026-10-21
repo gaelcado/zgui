@@ -3,15 +3,13 @@
 //! Edit `examples/notes/app.luau` and save to reload it; notes are kept.
 //!
 //! Rust owns what a script can't reach: the native menu bar (its commands
-//! arrive in the script as `ui.shared("command")`) and the notes file (the
-//! script edits `ui.shared("notes")`, Rust writes it to disk on change).
-#[cfg(target_os = "macos")]
-#[path = "../../zgui-desktop/examples/support/glass.rs"]
-mod glass;
-
-use std::{path::PathBuf, rc::Rc, time::Duration};
+//! arrive in the script as `ui.shared("command")`). The script saves its
+//! notes itself, with `ui.persist`.
+use std::time::Duration;
 use zgui::input::{Key, Modifiers};
-use zgui_desktop::{AppMenu, AppMenuEntry, Application, MenuAccelerator, WindowOptions};
+use zgui_desktop::{
+    AppMenu, AppMenuEntry, Application, Glass, MenuAccelerator, Titlebar, WindowOptions,
+};
 use zgui_script::{ScriptHost, Value};
 
 const TITLE: &str = "zgui · notes";
@@ -49,44 +47,6 @@ fn menus() -> Vec<AppMenu> {
     ]
 }
 
-fn store() -> PathBuf {
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    home.join(".zgui-notes.json")
-}
-
-fn to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Nil => serde_json::Value::Null,
-        Value::Bool(b) => (*b).into(),
-        Value::Num(n) => (*n).into(),
-        Value::Str(s) => s.as_ref().into(),
-        Value::List(items) => items.iter().map(to_json).collect(),
-        Value::Map(entries) => entries
-            .iter()
-            .map(|(k, v)| (k.to_string(), to_json(v)))
-            .collect::<serde_json::Map<_, _>>()
-            .into(),
-    }
-}
-
-fn from_json(json: &serde_json::Value) -> Value {
-    match json {
-        serde_json::Value::Null => Value::Nil,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => Value::Num(n.as_f64().unwrap_or(0.)),
-        serde_json::Value::String(s) => Value::Str(s.as_str().into()),
-        serde_json::Value::Array(items) => Value::List(items.iter().map(from_json).collect()),
-        serde_json::Value::Object(entries) => {
-            let mut entries: Vec<(Rc<str>, Value)> = entries
-                .iter()
-                .map(|(k, v)| (k.as_str().into(), from_json(v)))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            Value::Map(entries.into())
-        }
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/notes/app.luau");
     Application::new()
@@ -95,26 +55,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: TITLE.into(),
             width: WIDTH,
             height: HEIGHT,
-            transparent: true,
             decorations: cfg!(target_os = "macos"),
             min_size: Some((760., 480.)),
+            titlebar: Titlebar::Inset,
+            glass: Some(Glass::default()),
             ..Default::default()
         })
         .run(move |cx| {
-            let host = ScriptHost::new(&cx.ui.runtime, script);
-
-            // Saved notes, or nil: the script seeds its welcome notes.
-            let saved = std::fs::read_to_string(store())
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .map_or(Value::Nil, |json| from_json(&json));
-            let notes = host.shared("notes", saved);
-            let save = cx.ui.runtime.effect(move || {
-                let value = notes.get();
-                if !matches!(value, Value::Nil) {
-                    let _ = std::fs::write(store(), to_json(&value).to_string());
-                }
-            });
+            // The script keeps its notes with `ui.persist`, in this app's
+            // data directory.
+            let host = ScriptHost::new(&cx.ui.runtime, script).app_id("zgui-notes");
+            import_old_notes(&host);
 
             // The preview's state is shared, so the menu's check mark follows
             // the script's toolbar button too.
@@ -131,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let command = host.shared("command", Value::Nil);
             let mut seq = 0.;
             cx.on_menu_action(move |action| {
-                let _keep = (&save, &check);
+                let _keep = &check;
                 if action.0 == "preview" {
                     preview.set(Value::Bool(!preview.with_untracked(Value::truthy)));
                     return;
@@ -146,26 +97,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             });
 
-            let radius = host.shared("window_radius", 10.);
-            #[cfg(target_os = "macos")]
-            {
-                let window = cx.window.clone();
-                cx.tasks.spawn(async move {
-                    zgui::timer::sleep(Duration::from_millis(1)).await;
-                    if glass::inset_titlebar(TITLE) {
-                        window.set_inner_size(WIDTH, HEIGHT);
-                    }
-                    if let Some(r) = glass::corner_radius(TITLE) {
-                        radius.set(r.into());
-                    }
-                });
-            }
-            #[cfg(not(target_os = "macos"))]
-            let _ = radius;
-            let window = cx.window.clone();
-            host.action("drag_window", move |_| window.drag_window());
             let _ = host.reload();
             cx.tasks.spawn(host.watch(Duration::from_millis(250)));
+            // Edits from the last 250 ms, before the window goes.
+            let saving = host.clone();
+            cx.on_closed(move || saving.save());
             cx.render(host.view());
         })
+}
+
+/// Notes saved before the script kept them itself (`~/.zgui-notes.json`)
+/// become its saved `notes`, once: only while it has none. The old file stays.
+fn import_old_notes(host: &ScriptHost) {
+    let (Some(dir), Some(home)) = (host.storage_dir(), std::env::var_os("HOME")) else {
+        return;
+    };
+    let old = std::path::Path::new(&home).join(".zgui-notes.json");
+    let new = dir.join("app.luau").join("notes.json");
+    if old.is_file() && !new.exists() {
+        let copied =
+            std::fs::create_dir_all(new.parent().unwrap()).and_then(|()| std::fs::copy(&old, &new));
+        if let Err(e) = copied {
+            eprintln!("notes: could not import {}: {e}", old.display());
+        }
+    }
 }

@@ -310,6 +310,132 @@ pub enum PointerRoute {
     Ui,
 }
 
+/// What zgui hears of a pointer move, by where it went (see [`NativePointer`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerStep {
+    /// The move, as ever (over zgui, or held by a press of zgui's).
+    Move,
+    /// The pointer just came over the native view of this node, which takes
+    /// input there: a `PointerLeave`, so zgui's hovered nodes have theirs.
+    Leave(NodeId),
+    /// Still over that native view: nothing.
+    Over(NodeId),
+}
+/// The pages to tell where the pointer is after a move (see
+/// [`NativePointer::moved`]): apply with [`PageReport::apply`].
+#[derive(Default)]
+pub struct PageReport {
+    /// A page the pointer left: its pointer is `None` now.
+    pub left: Option<crate::web_view::WebView>,
+    /// The page under the pointer and the point, from its top left.
+    pub at: Option<(crate::web_view::WebView, (f32, f32))>,
+}
+impl PageReport {
+    pub fn is_empty(&self) -> bool {
+        self.left.is_none() && self.at.is_none()
+    }
+    /// Set the pages' pointers (from a delivery or the host's own event
+    /// handling: where no zgui state is borrowed).
+    pub fn apply(self) {
+        if let Some(web) = self.left {
+            web.set_pointer(None);
+        }
+        if let Some((web, point)) = self.at {
+            web.set_pointer(Some(point));
+        }
+    }
+}
+/// The pointer over a window's native views, as its host follows it.
+///
+/// Over a native view that takes input there (see [`PlaneSplit::route`]),
+/// zgui hears one `PointerLeave` and then nothing until the pointer is back
+/// over zgui, so whatever it hovered has its leave (the DOM's semantics: a
+/// page is no part of the zgui nodes around it). Pages hear where the
+/// pointer is over their visible box (zgui content drawn on them included),
+/// as [`crate::web_view::WebView::pointer`]; terminals report their own.
+/// Costs nothing in a window without native views.
+#[derive(Default)]
+pub struct NativePointer {
+    over: Cell<Option<NodeId>>,
+    page: RefCell<Option<crate::web_view::WeakWebView>>,
+}
+impl NativePointer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Whether the pointer is over a native view taking input (zgui had its
+    /// leave): the native view shows its own cursor.
+    pub fn over(&self) -> Option<NodeId> {
+        self.over.get()
+    }
+    /// The pointer moved to window point `(x, y)`, where `route` sends
+    /// input; `held`: a press of zgui's follows the pointer (it hears every
+    /// move, wherever). What zgui hears, and the pages to tell.
+    pub fn moved(
+        &self,
+        natives: &NativeViews,
+        route: PointerRoute,
+        held: bool,
+        x: f32,
+        y: f32,
+    ) -> (PointerStep, PageReport) {
+        let report = self.report(natives, x, y);
+        let step = match route {
+            PointerRoute::Native(node) if !held => {
+                if self.over.replace(Some(node)).is_some() {
+                    PointerStep::Over(node)
+                } else {
+                    PointerStep::Leave(node)
+                }
+            }
+            _ => {
+                self.over.set(None);
+                PointerStep::Move
+            }
+        };
+        (step, report)
+    }
+    /// The pointer left the window (or the window went to the back): no
+    /// native view has it, no page does.
+    pub fn left(&self) -> PageReport {
+        self.over.set(None);
+        PageReport {
+            left: self.page.take().and_then(|page| page.upgrade()),
+            at: None,
+        }
+    }
+    fn report(&self, natives: &NativeViews, x: f32, y: f32) -> PageReport {
+        let split = natives.split();
+        // The front-most page whose visible box holds the point.
+        let under = split.natives().iter().rev().find_map(|placement| {
+            let visible = placement.visible()?;
+            let inside = x >= visible.x
+                && y >= visible.y
+                && x < visible.x + visible.width
+                && y < visible.y + visible.height;
+            if !inside {
+                return None;
+            }
+            match natives.content(placement.node)? {
+                NativeContent::Web(web) => {
+                    Some((web, (x - placement.frame.x, y - placement.frame.y)))
+                }
+                _ => None,
+            }
+        });
+        let mut page = self.page.borrow_mut();
+        let previous = page.as_ref().and_then(|page| page.upgrade());
+        let left = previous.filter(|old| under.as_ref().is_none_or(|(web, _)| web != old));
+        *page = under.as_ref().map(|(web, _)| web.downgrade());
+        PageReport {
+            left,
+            // A page nothing follows the pointer over hears nothing: its
+            // host need not wake for it.
+            at: under.filter(|(web, _)| web.wants_pointer()),
+        }
+    }
+}
+
 /// One frame's division of paint between the base plane (under native
 /// views) and the overlay plane (above them), with native views' and overlay
 /// backdrops' placements. Empty (no native views) costs nothing.
@@ -807,7 +933,11 @@ impl PlaneSplit {
             return plane == Plane::Base;
         }
         match (item.isolated, plane) {
-            (true, Plane::Base) => self.base_layers.contains(&item.id),
+            // A layer the split did not visit (out of reach of native views
+            // and overlay paint) holds base paint only.
+            (true, Plane::Base) => {
+                self.base_layers.contains(&item.id) || !self.overlay_layers.contains(&item.id)
+            }
             (true, Plane::Overlay) => self.overlay_layers.contains(&item.id),
             (false, Plane::Base) => !self.overlay.contains_key(&item.id),
             (false, Plane::Overlay) => self.overlay.contains_key(&item.id),

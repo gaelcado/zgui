@@ -5,7 +5,35 @@ local function icon(paths: string): string
 		.. "</svg>"
 end
 
-return {
+-- The icons by name: a pane's comes from what runs in it (names.luau).
+export type Name =
+	"terminal"
+	| "editor"
+	| "claude"
+	| "openai"
+	| "agent"
+	| "globe"
+	| "gauge"
+	| "branch"
+	| "box"
+	| "run"
+	| "code"
+	| "check"
+	| "doc"
+	| "database"
+	| "back"
+	| "forward"
+	| "refresh"
+	| "stop"
+	| "search"
+	| "browser"
+	| "drag_handle"
+	| "plus"
+	| "close"
+	| "split_right"
+	| "split_down"
+
+local icons: { [Name]: string } = {
 	terminal = icon('<rect x="3" y="4.5" width="18" height="15" rx="3.5"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 15h4"/>'),
 	editor = icon('<path d="M15 5l4 4L9.5 18.5H5.5v-4z"/><path d="M13 7l4 4"/>'),
 	-- Claude's mark (filled, unlike the line icons).
@@ -23,6 +51,7 @@ return {
 	box = icon('<path d="M12 3.5l7.5 4.2v8.6L12 20.5l-7.5-4.2V7.7z"/><path d="M4.5 7.7L12 12l7.5-4.3M12 12v8.5"/>'),
 	run = icon('<path d="M8 5.5v13l10.5-6.5z"/>'),
 	code = icon('<path d="M8.5 7l-5 5 5 5M15.5 7l5 5-5 5"/>'),
+	check = icon('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
 	doc = icon('<path d="M7 3.5h7l4 4v13H7z"/><path d="M14 3.5v4h4M10 12.5h5M10 16h5"/>'),
 	database = icon(
 		'<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/>'
@@ -45,3 +74,5 @@ return {
 	split_right = icon('<rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M12 5v14"/>'),
 	split_down = icon('<rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 12h17"/>'),
 }
+
+return icons

@@ -57,8 +57,15 @@ impl TextSpan {
         self
     }
 
-    pub fn background(mut self, color: Color) -> Self {
-        self.background = Some(color);
+    /// A colour or a colour token (`tok::SELECTION`).
+    pub fn background(mut self, color: impl Into<crate::theme::Themed<Color>>) -> Self {
+        match color.into() {
+            crate::theme::Themed::Value(color) => self.background = Some(color),
+            crate::theme::Themed::Token(token) => {
+                self.background = None;
+                self.styles = std::mem::take(&mut self.styles).bg(token);
+            }
+        }
         self
     }
     pub fn underline(mut self, decoration: crate::rich_text::Decoration) -> Self {
@@ -69,8 +76,9 @@ impl TextSpan {
         self.strikethrough = Some(decoration);
         self
     }
-    pub fn text_color(mut self, color: Color) -> Self {
-        self.styles.text_color = Some(color);
+    /// A colour or a colour token (`tok::TEXT_SECONDARY`).
+    pub fn text_color(mut self, color: impl Into<crate::theme::Themed<Color>>) -> Self {
+        self.styles = std::mem::take(&mut self.styles).text_color(color);
         self
     }
     pub fn text_size(mut self, size: f32) -> Self {
@@ -175,6 +183,7 @@ pub(crate) fn mount_links(
     let bounds = ui.observe_bounds(paragraph);
     let owner_bounds = ui.observe_bounds(owner);
     let engine = ui.observe_text_geometry_revision();
+    let theme = ui.theme_scope();
     let weak = ui.downgrade();
     let mut mounted: Vec<Mounted> = Vec::new();
     let mut geometry_key = None;
@@ -252,6 +261,7 @@ pub(crate) fn mount_links(
                     hover.clone(),
                 );
                 let weak = ui.downgrade();
+                let ring = theme.clone();
                 ui.on_event(node, true, move |cx| {
                     if cx.phase == EventPhase::Capture
                         || (cx.default_prevented()
@@ -291,7 +301,7 @@ pub(crate) fn mount_links(
                     }
                     let quad = QuadStyle {
                         border_width: border,
-                        border_color: ui.theme.accent,
+                        border_color: ring.color_untracked(crate::theme::tok::FOCUS_RING),
                         ..Default::default()
                     };
                     scene.set_kind(
@@ -330,10 +340,8 @@ pub(crate) fn mount_links(
             let mut style = ui.scene.borrow().style(entry.node);
             style.width = Some(first.width);
             style.height = Some(first.height);
-            let owner_style = ui.scene.borrow().style(owner);
-            let padding = owner_style
-                .padding_edges
-                .unwrap_or(crate::scene::Insets::all(owner_style.padding));
+            // Placed from the owner's content box: inside its padding and border.
+            let padding = ui.scene.borrow().content_insets(owner);
             style.margin.left = bounds.x - owner_bounds.x + first.x - padding.left;
             style.margin.top = bounds.y - owner_bounds.y + first.y - padding.top;
             ui.scene.borrow_mut().set_style(entry.node, style);
@@ -351,7 +359,7 @@ pub(crate) fn mount_links(
                 } else {
                     0.
                 },
-                border_color: ui.theme.accent,
+                border_color: theme.color(crate::theme::tok::FOCUS_RING),
                 ..Default::default()
             };
             for (i, rect) in rects.iter().skip(1).enumerate() {

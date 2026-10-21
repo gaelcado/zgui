@@ -14,6 +14,8 @@ pub struct ForegroundProcess {
     /// At rest: the session's shell itself is in front, nothing running in
     /// it that closing would end.
     pub idle: bool,
+    /// What the program reports it is doing (OSC 7501), when it reports.
+    pub status: Option<zgui::terminal::ProgramStatus>,
 }
 
 type Resolver = Box<dyn Fn(u32) -> Option<ForegroundProcess>>;

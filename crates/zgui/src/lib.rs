@@ -39,6 +39,7 @@ mod compose_scrollbar;
 mod compose_style;
 mod compose_virtual_keyboard;
 pub mod style;
+pub mod theme;
 
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/composition.md")]
@@ -64,6 +65,8 @@ pub mod decoration;
 pub mod svg;
 
 pub mod cursor;
+
+pub mod inspect;
 
 mod compose_context_menu;
 mod compose_drag;

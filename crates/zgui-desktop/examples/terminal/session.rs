@@ -157,11 +157,34 @@ pub fn resolve(pid: u32) -> Option<zgui_desktop::ForegroundProcess> {
     if !info["exists"].as_bool()? {
         return None;
     }
+    let status = info["status"].as_object().and_then(|s| {
+        let text = |key: &str| s.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+        Some(zgui::terminal::ProgramStatus {
+            state: zgui::terminal::ProgramState::parse(s.get("state")?.as_str()?)?,
+            kind: text("kind"),
+            progress: s.get("progress").and_then(|v| v.as_u64()).map(|p| p as u8),
+            app: text("app"),
+            title: text("title"),
+            msg: text("msg"),
+            child_blocked: s
+                .get("child_blocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            since_ms: s.get("since_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        })
+    });
     Some(zgui_desktop::ForegroundProcess {
         name: info["name"].as_str()?.to_owned(),
         pid: info["pid"].as_u64()? as u32,
         idle: info["idle"].as_bool()?,
+        status,
     })
+}
+/// Now, in Unix milliseconds.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 thread_local! {
@@ -174,12 +197,96 @@ fn attached_session(pid: u32) -> Option<String> {
             .borrow_mut()
             .entry(pid)
             .or_insert_with(|| {
-                let args = arguments(pid as i32)?;
-                let at = args.iter().position(|a| a == "--attach")?;
-                args.get(at + 1).cloned()
+                // Ghostty's foreground group is `login`'s, whose arguments
+                // are root's and unreadable: the client is its child.
+                std::iter::once(pid as libc::pid_t)
+                    .chain(children(pid as libc::pid_t))
+                    .find_map(|pid| session_in(&arguments(pid)?))
             })
             .clone()
     })
+}
+/// `pid`'s child processes.
+fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut pids = vec![0 as libc::pid_t; 16];
+    let bytes = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
+    let filled = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), bytes) };
+    // A count of pids on macOS (the man page says bytes; the kernel returns
+    // entries).
+    let count = (filled.max(0) as usize).min(pids.len());
+    pids.truncate(count);
+    pids.retain(|&child| child > 0);
+    pids
+}
+/// The session an attach client's arguments name. The terminal's foreground
+/// process may be the client or what started it: Ghostty runs
+/// `login … bash -c "exec -l client --attach 'p4' …"`, and the client stays in
+/// login's process group, so the group is login's and the session is inside
+/// one argument there.
+fn session_in(args: &[String]) -> Option<String> {
+    if let Some(at) = args.iter().position(|a| a == "--attach") {
+        return args.get(at + 1).cloned();
+    }
+    args.iter().find_map(|arg| {
+        let (_, rest) = arg.split_once("--attach ")?;
+        let rest = rest.trim_start();
+        let quoted = rest.strip_prefix('\'').and_then(|r| r.split_once('\''));
+        let id = match quoted {
+            Some((id, _)) => id,
+            None => rest.split_whitespace().next()?,
+        };
+        (!id.is_empty()).then(|| id.to_owned())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Live, Recorder, SCROLLBACK, session_in};
+    #[test]
+    fn a_panic_in_the_screen_model_starts_it_over_and_keeps_the_session() {
+        let mut live = Live {
+            screen: vt100::Parser::new_with_callbacks(30, 100, SCROLLBACK, Recorder::default()),
+            client: None,
+            closed: false,
+        };
+        live.with_screen(|screen| screen.process(b"\x1b]2;build\x07hello"));
+        // vt100 panics on some wrapping after a resize; stand in for it.
+        let result: Option<()> = live.with_screen(|_| panic!("vt100"));
+        assert!(result.is_none());
+        let screen = live.screen.screen();
+        assert_eq!(screen.size(), (30, 100), "the same size");
+        assert_eq!(screen.contents(), "", "blank");
+        assert_eq!(
+            live.screen.callbacks().title.as_deref(),
+            Some(&b"build"[..])
+        );
+        // And it goes on.
+        live.with_screen(|screen| screen.process(b"again")).unwrap();
+        assert_eq!(live.screen.screen().contents(), "again");
+    }
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn finds_the_session_from_the_client_or_from_login() {
+        let client = args(&["-/app/terminal", "--attach", "p24", "--cwd", "/x"]);
+        assert_eq!(session_in(&client).as_deref(), Some("p24"));
+        let login = args(&[
+            "/usr/bin/login",
+            "-q",
+            "-flp",
+            "wing",
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "exec -l '/app/terminal' --attach 'p24' --cwd '/Users/wing'",
+        ]);
+        assert_eq!(session_in(&login).as_deref(), Some("p24"));
+        let bare = args(&["sh", "-c", "exec client --attach p7 --cwd /"]);
+        assert_eq!(session_in(&bare).as_deref(), Some("p7"));
+        assert_eq!(session_in(&args(&["/bin/zsh", "-l"])), None);
+    }
 }
 
 // The attach client --------------------------------------------------------------
@@ -297,14 +404,33 @@ fn raw_mode() -> Option<libc::termios> {
 struct Recorder {
     title: Option<Vec<u8>>,
     pwd: Option<Vec<u8>>,
+    /// What programs report of themselves (OSC 7501).
+    status: crate::program_status::Records,
+    /// The foreground process group while this output was written, and now.
+    group: i32,
+    now_ms: u64,
+    /// Replies owed to the program (a status feature query).
+    reply: Vec<u8>,
 }
 impl vt100::Callbacks for Recorder {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
         self.title = Some(title.to_vec());
     }
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
-        if params.first() == Some(&&b"7"[..]) {
-            self.pwd = Some(params[1..].join(&b';'));
+        match params.first().copied() {
+            Some(b"7") => self.pwd = Some(params[1..].join(&b';')),
+            Some(b"7501") => {
+                let payload = params[1..].join(&b';');
+                if self.status.report(&payload, self.group, self.now_ms) {
+                    self.reply
+                        .extend_from_slice(crate::program_status::QUERY_REPLY);
+                }
+            }
+            // A shell prompt begins (OSC 133 A): busy reports end.
+            Some(b"133") if params.get(1).is_some_and(|p| p.starts_with(b"A")) => {
+                self.status.prompt(self.now_ms)
+            }
+            _ => {}
         }
     }
 }
@@ -316,10 +442,54 @@ struct Session {
     master: RawFd,
     child: libc::pid_t,
     live: Mutex<Live>,
+    /// The reader saw the terminal close (all the output is relayed).
+    drained: AtomicBool,
+    /// Its reader and its waiter that have finished: the last closes
+    /// `master`.
+    finished: std::sync::atomic::AtomicU8,
 }
 struct Live {
     screen: vt100::Parser<Recorder>,
     client: Option<(u64, UnixStream)>,
+    /// `master` is closed: nothing may write to it (its number may be
+    /// another file's by now).
+    closed: bool,
+}
+impl Session {
+    /// Its live state, even after a thread panicked holding it: a session
+    /// outlives a bug in one of its threads.
+    fn live(&self) -> std::sync::MutexGuard<'_, Live> {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    /// One of its two threads is done; the second closes the terminal.
+    fn finish(&self) {
+        if self.finished.fetch_add(1, Ordering::AcqRel) == 1 {
+            let mut live = self.live();
+            live.closed = true;
+            unsafe { libc::close(self.master) };
+        }
+    }
+}
+impl Live {
+    /// Work on the screen model. `vt100` can panic on some sequences after a
+    /// resize (a wide character wrapping): then the model starts over, blank
+    /// at its size with its records kept, and the session goes on (the
+    /// shell's output still reaches the terminal; only the replay of what
+    /// came before is lost).
+    fn with_screen<R>(&mut self, f: impl FnOnce(&mut vt100::Parser<Recorder>) -> R) -> Option<R> {
+        let screen = &mut self.screen;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(screen))) {
+            Ok(result) => Some(result),
+            Err(_) => {
+                let (rows, cols) = self.screen.screen().size();
+                let records = std::mem::take(self.screen.callbacks_mut());
+                self.screen = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, records);
+                None
+            }
+        }
+    }
 }
 #[derive(Default)]
 struct Server {
@@ -353,7 +523,9 @@ pub fn daemon() -> ! {
         thread::spawn(move || {
             loop {
                 thread::sleep(Duration::from_secs(1));
-                let server = server.lock().unwrap();
+                let server = server
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if server
                     .empty_since
                     .is_some_and(|since| since.elapsed() > IDLE_EXIT)
@@ -372,7 +544,12 @@ pub fn daemon() -> ! {
 }
 
 fn session(server: &Shared, id: &str) -> Option<Arc<Session>> {
-    server.lock().unwrap().sessions.get(id).cloned()
+    server
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sessions
+        .get(id)
+        .cloned()
 }
 
 fn serve(mut stream: UnixStream, server: Shared) {
@@ -388,11 +565,27 @@ fn serve(mut stream: UnixStream, server: Shared) {
                 Some(session) => {
                     let front = unsafe { libc::tcgetpgrp(session.master) };
                     let pid = if front > 0 { front } else { session.child };
+                    let status = {
+                        let mut live = session.live();
+                        let records = &mut live.screen.callbacks_mut().status;
+                        records.foreground(front, unix_ms());
+                        records.status()
+                    };
                     serde_json::json!({
                         "exists": true,
                         "pid": pid,
                         "name": process_name(pid),
                         "idle": pid == session.child,
+                        "status": status.map(|s| serde_json::json!({
+                            "state": s.state.name(),
+                            "kind": s.kind,
+                            "progress": s.progress,
+                            "app": s.app,
+                            "title": s.title,
+                            "msg": s.msg,
+                            "child_blocked": s.child_blocked,
+                            "since_ms": s.since_ms,
+                        })),
                     })
                 }
                 None => serde_json::json!({ "exists": false }),
@@ -419,10 +612,12 @@ fn serve(mut stream: UnixStream, server: Shared) {
     }
 }
 
-/// Hang up the shells of the sessions `which` picks (their reader threads
+/// Hang up the shells of the sessions `which` picks (their waiter threads
 /// tidy up when they exit).
 fn end(server: &Shared, which: impl Fn(&str) -> bool) {
-    let server = server.lock().unwrap();
+    let server = server
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (id, session) in &server.sessions {
         if which(id) {
             let child = session.child;
@@ -440,7 +635,9 @@ fn attach_client(mut stream: UnixStream, server: Shared, id: &str, hello: &serde
     let rows = hello["rows"].as_u64().unwrap_or(24).clamp(1, 1000) as u16;
     let token = TOKENS.fetch_add(1, Ordering::Relaxed);
     let session = {
-        let mut guard = server.lock().unwrap();
+        let mut guard = server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match guard.sessions.get(id) {
             Some(session) => session.clone(),
             None => {
@@ -451,16 +648,20 @@ fn attach_client(mut stream: UnixStream, server: Shared, id: &str, hello: &serde
                 let session = Arc::new(session);
                 guard.sessions.insert(id.to_owned(), session.clone());
                 guard.empty_since = None;
-                let (server, id, reading) = (server.clone(), id.to_owned(), session.clone());
-                thread::spawn(move || read_session(server, id, reading));
+                let reading = session.clone();
+                thread::spawn(move || read_session(reading));
+                let (server, id, waiting) = (server.clone(), id.to_owned(), session.clone());
+                thread::spawn(move || wait_session(server, id, waiting));
                 session
             }
         }
     };
     {
-        let mut live = session.live.lock().unwrap();
+        let mut live = session.live();
         resize(&session, &mut live, cols, rows);
-        let replay = replay(&mut live.screen);
+        let replay = live
+            .with_screen(replay)
+            .unwrap_or_else(|| replay(&mut live.screen));
         if write_frame(&mut stream, OUTPUT, &replay).is_err() {
             return;
         }
@@ -472,11 +673,16 @@ fn attach_client(mut stream: UnixStream, server: Shared, id: &str, hello: &serde
     }
     loop {
         match read_frame(&mut stream) {
-            Ok((INPUT, bytes)) => write_all(session.master, &bytes),
+            Ok((INPUT, bytes)) => {
+                let live = session.live();
+                if !live.closed {
+                    write_all(session.master, &bytes);
+                }
+            }
             Ok((RESIZE, size)) if size.len() == 4 => {
                 let cols = u16::from_le_bytes([size[0], size[1]]);
                 let rows = u16::from_le_bytes([size[2], size[3]]);
-                let mut live = session.live.lock().unwrap();
+                let mut live = session.live();
                 resize(&session, &mut live, cols, rows);
             }
             Ok(_) => {}
@@ -484,7 +690,7 @@ fn attach_client(mut stream: UnixStream, server: Shared, id: &str, hello: &serde
         }
     }
     // Detached: the shell runs on.
-    let mut live = session.live.lock().unwrap();
+    let mut live = session.live();
     if live.client.as_ref().is_some_and(|(t, _)| *t == token) {
         live.client = None;
     }
@@ -494,14 +700,16 @@ fn resize(session: &Session, live: &mut Live, cols: u16, rows: u16) {
     if live.screen.screen().size() == (rows, cols) {
         return;
     }
-    live.screen.screen_mut().set_size(rows, cols);
+    live.with_screen(|screen| screen.screen_mut().set_size(rows, cols));
     let size = libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    unsafe { libc::ioctl(session.master, libc::TIOCSWINSZ, &size) };
+    if !live.closed {
+        unsafe { libc::ioctl(session.master, libc::TIOCSWINSZ, &size) };
+    }
 }
 
 /// What redraws a session for a terminal that attaches: its scrollback
@@ -545,7 +753,9 @@ fn replay(screen: &mut vt100::Parser<Recorder>) -> Vec<u8> {
 
 /// The shell's output: into the screen copy and to the attached terminal.
 /// When it exits, the session ends and its terminal is told the code.
-fn read_session(server: Shared, id: String, session: Arc<Session>) {
+/// Relay a session's output to its terminal and keep its screen model,
+/// until the terminal closes (every process holding it has gone).
+fn read_session(session: Arc<Session>) {
     let mut buf = vec![0u8; 65536];
     loop {
         let n = unsafe { libc::read(session.master, buf.as_mut_ptr().cast(), buf.len()) };
@@ -553,33 +763,71 @@ fn read_session(server: Shared, id: String, session: Arc<Session>) {
             break;
         }
         let bytes = &buf[..n as usize];
-        let mut live = session.live.lock().unwrap();
-        live.screen.process(bytes);
+        let mut live = session.live();
+        {
+            let recorder = live.screen.callbacks_mut();
+            recorder.group = unsafe { libc::tcgetpgrp(session.master) };
+            recorder.now_ms = unix_ms();
+        }
+        live.with_screen(|screen| screen.process(bytes));
+        let reply = std::mem::take(&mut live.screen.callbacks_mut().reply);
+        if !reply.is_empty() {
+            write_all(session.master, &reply);
+        }
         if let Some((_, client)) = &mut live.client
             && write_frame(client, OUTPUT, bytes).is_err()
         {
             live.client = None;
         }
     }
+    session.drained.store(true, Ordering::Release);
+    session.finish();
+}
+
+/// End a session when its shell exits, whatever still holds its terminal
+/// (a background job the shell left keeps it open, so the reader would
+/// never hear the end): it goes from the server and its terminal hears the
+/// exit code, after the shell's last output.
+fn wait_session(server: Shared, id: String, session: Arc<Session>) {
     let mut status = 0;
-    unsafe { libc::waitpid(session.child, &mut status, 0) };
+    while unsafe { libc::waitpid(session.child, &mut status, 0) } < 0
+        && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+    {}
     let code = if libc::WIFEXITED(status) {
         libc::WEXITSTATUS(status)
     } else {
         1
     };
+    // The reader relays what the shell wrote last, if the terminal closes.
+    for _ in 0..20 {
+        if session.drained.load(Ordering::Acquire) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     {
-        let mut guard = server.lock().unwrap();
-        guard.sessions.remove(&id);
+        let mut guard = server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only this session: the pane may have a new one by now.
+        if guard
+            .sessions
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            guard.sessions.remove(&id);
+        }
         if guard.sessions.is_empty() {
             guard.empty_since = Some(Instant::now());
         }
     }
-    let mut live = session.live.lock().unwrap();
-    if let Some((_, client)) = &mut live.client {
-        let _ = write_frame(client, EXIT, &[code as u8]);
+    {
+        let mut live = session.live();
+        if let Some((_, client)) = &mut live.client {
+            let _ = write_frame(client, EXIT, &[code as u8]);
+        }
     }
-    unsafe { libc::close(session.master) };
+    session.finish();
 }
 
 fn write_all(fd: RawFd, mut bytes: &[u8]) {
@@ -668,9 +916,12 @@ fn spawn(hello: &serde_json::Value, cols: u16, rows: u16) -> Option<Session> {
     Some(Session {
         master,
         child,
+        drained: AtomicBool::new(false),
+        finished: Default::default(),
         live: Mutex::new(Live {
             screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, Recorder::default()),
             client: None,
+            closed: false,
         }),
     })
 }

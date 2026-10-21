@@ -30,7 +30,6 @@ impl App {
         let h = Harness::new(move |runtime| {
             let host = ScriptHost::new(runtime, APP);
             for name in [
-                "drag_window",
                 "zoom_window",
                 "close_window",
                 "set_title",
@@ -54,7 +53,10 @@ impl App {
             host
         });
         assert_eq!(h.host.error().get(), None);
-        Self { h, actions, saved }
+        let mut app = Self { h, actions, saved };
+        // The test window is 400 points wide: panes get all of it.
+        app.run("toggle_sidebar");
+        app
     }
     fn run(&mut self, id: &str) {
         assert!(self.h.host.run_command(id), "no command `{id}`");
@@ -372,6 +374,51 @@ fn a_browser_pane_opens_beside_with_its_address_bar_focused_and_closes() {
 }
 
 #[test]
+fn resizing_the_window_moves_the_panes_without_running_script() {
+    // The panes' frames are percentages and points zgui resolves itself:
+    // the script works them out when the split changes, not when the area
+    // does (a window drag, the sidebar easing open).
+    let mut app = App::new();
+    app.run("split_right");
+    app.run("split_down");
+    let before = app.panes();
+    let calls = app.h.host.script_calls();
+    app.h.ui.scene.borrow_mut().resize(600., 300.);
+    app.settle();
+    let after = app.panes();
+    assert_eq!(app.h.host.script_calls(), calls, "a resize ran script");
+    assert_eq!(after.len(), 3);
+    // Each pane kept its place in the split, wider by its share of 200.
+    let grew: f32 = after
+        .iter()
+        .zip(&before)
+        .map(|(a, b)| a.width - b.width)
+        .sum();
+    assert!((grew - 300.).abs() < 2., "{before:?} -> {after:?}");
+    assert!(
+        (after[0].width - after[1].width).abs() < 2. && after[1].x > after[0].x + after[0].width,
+        "{after:?}"
+    );
+}
+
+#[test]
+fn the_agents_sidebar_opens_beside_the_panes() {
+    let mut app = App::new();
+    let wide = app.panes();
+    assert!(!app.texts().iter().any(|t| t == "Agents"));
+    app.run("toggle_sidebar");
+    let texts = app.texts();
+    assert!(texts.iter().any(|t| t == "Agents"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "No agents running"), "{texts:?}");
+    let narrow = app.panes();
+    assert!(
+        narrow[0].x >= wide[0].x + 200. && narrow[0].width < wide[0].width - 200.,
+        "{wide:?} -> {narrow:?}"
+    );
+    assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
 fn a_long_address_stays_inside_its_browser_pane() {
     use zgui::input::InputEvent;
     let mut app = App::new();
@@ -428,4 +475,129 @@ fn the_layout_is_saved_and_a_launch_opens_it_again() {
         "{:?}",
         again.actions.borrow()
     );
+}
+
+#[test]
+fn clicking_a_blank_page_focuses_its_address_bar_without_an_error() {
+    use zgui::input::{InputEvent, PointerButton};
+    use zgui::scene::NodeKind;
+    let mut app = App::new();
+    app.run("new_browser");
+    // The page has no address yet: its start says where to begin.
+    app.h.ui.prepare_frame();
+    let hint = {
+        let scene = app.h.ui.scene.borrow();
+        let mut stack = vec![scene.root()];
+        let mut found = None;
+        while let Some(n) = stack.pop() {
+            if matches!(scene.kind(n), NodeKind::Text { text, .. } if &**text == "Search or enter an address above")
+            {
+                found = Some(scene.bounds(n));
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        found.expect("the blank page's hint")
+    };
+    let (x, y) = (hint.x + hint.width / 2., hint.y + hint.height / 2.);
+    app.h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    app.h.ui.dispatch(InputEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    app.settle();
+    assert_eq!(app.h.host.error().get(), None);
+    let focused = app.h.ui.input.focused().expect("something focused");
+    assert!(
+        !app.h.natives.contains(focused),
+        "zgui's address input has focus"
+    );
+}
+
+/// Every fill and text colour in the scene.
+fn colors(ui: &zgui::widgets::Ui) -> Vec<zgui::scene::Color> {
+    use zgui::scene::NodeKind;
+    let scene = ui.scene.borrow();
+    let mut out = Vec::new();
+    let mut stack = vec![scene.root()];
+    while let Some(id) = stack.pop() {
+        match scene.kind(id) {
+            NodeKind::Panel { quad, .. } => out.push(quad.fill),
+            NodeKind::Text { color, .. } => out.push(*color),
+            _ => {}
+        }
+        stack.extend(scene.children(id).iter().copied());
+    }
+    out
+}
+/// The window's pixels, drawn as a window would (and written to
+/// `target/theme-snapshots/<name>.ppm` to look at).
+fn snapshot(ui: &zgui::widgets::Ui, name: &str) -> Vec<u8> {
+    let mut gpu = zgui_gpu::GpuRenderer::new(400, 300).expect("a GPU");
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    ui.prepare_frame();
+    let full = [zgui::scene::Rect::new(0., 0., 400., 300.)];
+    ui.scene.borrow_mut().flush();
+    gpu.render(&ui.scene.borrow(), &full).unwrap();
+    let pixels = gpu.readback().unwrap();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/theme-snapshots");
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let mut ppm = b"P6 400 300 255\n".to_vec();
+        for p in pixels.chunks(4) {
+            ppm.extend_from_slice(&p[..3]);
+        }
+        let _ = std::fs::write(dir.join(format!("{name}.ppm")), ppm);
+    }
+    pixels
+}
+
+#[test]
+fn any_theme_styles_it_the_light_theme_too() {
+    use zgui::scene::Color;
+    let mut app = App::new();
+    app.settle();
+    // Its own theme: exactly the palette theme.luau used to hold.
+    assert_eq!(&*app.h.ui.theme().current(), "terminal-glass");
+    let glass = colors(&app.h.ui);
+    assert!(
+        glass.contains(&Color(0x13, 0x14, 0x18, 0x73)),
+        "the glass tint"
+    );
+    assert!(glass.contains(&Color(0x0a, 0x0b, 0x0e, 0x4d)), "the pane");
+    assert!(glass.contains(&Color(255, 255, 255, 0xeb)), "the text");
+    let dark = snapshot(&app.h.ui, "terminal-glass");
+    // The built-in light theme knows nothing of the terminal, yet styles it:
+    // its own tokens default to standard ones.
+    app.h.ui.theme().set(zgui::theme::LIGHT).unwrap();
+    app.settle();
+    let light = colors(&app.h.ui);
+    assert!(
+        light.contains(&Color(0xf5, 0xf6, 0xf8, 0xb3)),
+        "light glass"
+    );
+    assert!(
+        light.contains(&Color(0xec, 0xee, 0xf2, 255)),
+        "panes on the sunken surface"
+    );
+    assert!(light.contains(&Color(0x1a, 0x1f, 0x29, 255)), "dark text");
+    assert!(
+        !light.contains(&Color(255, 255, 255, 0xeb)),
+        "no glass text left"
+    );
+    let lit = snapshot(&app.h.ui, "terminal-light");
+    // Beside the panes, only the window's tint shows: it is light now.
+    let at = |pixels: &[u8]| {
+        let i = (150 * 400 + 2) * 4;
+        pixels[i] as u32 + pixels[i + 1] as u32 + pixels[i + 2] as u32
+    };
+    assert!(at(&lit) > at(&dark) + 200, "{} vs {}", at(&lit), at(&dark));
+    // Back to its own theme, as it was.
+    app.h.ui.theme().set("terminal-glass").unwrap();
+    app.settle();
+    assert_eq!(colors(&app.h.ui).len(), glass.len());
+    assert!(colors(&app.h.ui).contains(&Color(0x0a, 0x0b, 0x0e, 0x4d)));
 }

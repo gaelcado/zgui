@@ -7,30 +7,59 @@
 type Note = { id: string, title: string, body: string, pinned: boolean, updated: number }
 type Block = { kind: string, text: string, done: boolean?, tone: string? }
 
--- Rust loads these from ~/.zgui-notes.json and writes them back on change.
-local notes = ui.shared("notes", nil)
-local command = ui.shared("command", nil)
+-- Saved in the app's data directory, and loaded again on the next run.
+-- Nil until the first run seeds it.
+local notes = ui.persist("notes", nil :: { Note }?)
+-- Menu bar commands from Rust (notes.rs): `{ name, seq }`.
+local command = ui.shared("command", nil :: { name: string, seq: number }?)
 local preview = ui.shared("preview", true)
 
-local selected = ui.state("selected", "welcome")
+local selected = ui.state("selected", "welcome" :: string?)
 local query = ui.state("query", "")
 local title = ui.state("title", "")
 local body = ui.state("body", "")
 local confirm = ui.state("confirm", false)
 local more = ui.state("more", false)
 
--- Dark glass, as in the web view example: translucent whites take on the
--- colour of what's behind the window.
-local text = "#ffffffeb"
-local secondary = "#ffffffa6"
-local tertiary = "#ffffff66"
-local line = "#ffffff14"
-local wash = "#ffffff10"
-local accent = "#f5b70a"
+-- Colours are theme tokens, so any theme styles the notes: the standard
+-- ones, and the notes' own below, whose defaults are written in terms of the
+-- standard ones. glass.json is their own look (dark glass, as in the web
+-- view example); `ui.theme.set("zgui-light")` restyles everything live.
+ui.theme.tokens {
+	notes = {
+		-- The search field and code spans.
+		wash = "{hover}",
+		-- The dialog's secondary button.
+		button = "{button.bg}",
+		code = "{warning}",
+		-- A note's row under the pointer, and the selected note's pill.
+		row = { hover = "alpha({hover}, 0.5)" },
+		selected = {
+			bg = "alpha({accent}, 0.24)",
+			border = "alpha({accent}, 0.25)",
+			shadow = "0 4 14 0 alpha({accent}, 0.12)",
+		},
+		alert = {
+			bg = "alpha({success}, 0.08)",
+			border = "alpha({success}, 0.35)",
+			text = "{success}",
+		},
+		editor = "{surface.base}",
+		preview = "{surface.base}",
+		header = "alpha({surface.base}, 0.6)",
+	},
+}
+ui.theme.default(ui.theme.load("glass.json"))
+local text = "$text.primary"
+local secondary = "$text.secondary"
+local tertiary = "$text.tertiary"
+local line = "$border.subtle"
+local wash = "$notes.wash"
+local accent = "$accent"
 local clear = "#00000000"
 
 if notes:peek() == nil then
-	notes:set({
+	notes:set {
 		{
 			id = "welcome",
 			title = "Welcome to Notes",
@@ -56,11 +85,11 @@ if notes:peek() == nil then
 			updated = os.time() - 86400,
 			body = "- Oat milk\n- Coffee beans\n- Lemons\n- Sourdough",
 		},
-	})
+	}
 end
 
 local function all(): { Note }
-	return (notes:get() or {}) :: { Note }
+	return notes:get() or {}
 end
 local function find_in(list: { Note }?, id: string?): Note?
 	for _, n in list or {} do
@@ -77,27 +106,23 @@ local function peek(id: string?): Note?
 	return find_in(notes:peek(), id)
 end
 
-local function update(id: string, patch: { [string]: any })
-	local list = table.clone(notes:peek() or {})
-	for i, n in list do
-		if n.id == id then
-			local copy = table.clone(n)
-			for k, v in patch do
-				copy[k] = v
+-- `change` edits a mutable copy of the note.
+local function update(id: string, change: (note: Note) -> ())
+	notes:update(function(list)
+		for _, n in list or {} do
+			if n.id == id then
+				change(n)
+				n.updated = os.time()
 			end
-			copy.updated = os.time()
-			list[i] = copy
 		end
-	end
-	notes:set(list)
+		return list
+	end)
 end
 
 local made = 0
 local function add(note: Note)
-	local list = table.clone(notes:peek() or {})
-	table.insert(list, 1, note)
 	ui.batch(function()
-		notes:set(list)
+		notes:insert(1, note)
 		query:set("")
 		selected:set(note.id)
 	end)
@@ -107,26 +132,28 @@ local function fresh(): string
 	return `n{os.time()}-{made}`
 end
 local function new_note()
-	add({ id = fresh(), title = "", body = "", pinned = false, updated = os.time() })
+	add { id = fresh(), title = "", body = "", pinned = false, updated = os.time() }
 end
 local function duplicate()
 	local n = peek(selected:peek())
 	if n then
 		local name = if n.title == "" then "Untitled" else n.title
-		add({ id = fresh(), title = `{name} copy`, body = n.body, pinned = false, updated = os.time() })
+		add { id = fresh(), title = `{name} copy`, body = n.body, pinned = false, updated = os.time() }
 	end
 end
 local function toggle_pin()
 	local n = peek(selected:peek())
 	if n then
-		update(n.id, { pinned = not n.pinned })
+		update(n.id, function(note)
+			note.pinned = not note.pinned
+		end)
 	end
 end
 
 -- Pinned first, then the newest.
 local visible = ui.computed(function()
 	local q = string.lower(query:get())
-	local out = {}
+	local out: { Note } = {}
 	for _, n in all() do
 		if
 			q == ""
@@ -136,7 +163,7 @@ local visible = ui.computed(function()
 			table.insert(out, n)
 		end
 	end
-	table.sort(out, function(a, b)
+	table.sort(out, function(a: Note, b: Note)
 		if a.pinned ~= b.pinned then
 			return a.pinned
 		end
@@ -150,7 +177,7 @@ end)
 
 local function delete_selected()
 	local id = selected:peek()
-	local list = {}
+	local list: { Note } = {}
 	for _, n in notes:peek() or {} do
 		if n.id ~= id then
 			table.insert(list, n)
@@ -177,12 +204,15 @@ ui.effect(function()
 	local t, b = title:get(), body:get()
 	local n = peek(selected:peek())
 	if n and (n.title ~= t or n.body ~= b) then
-		update(n.id, { title = t, body = b })
+		update(n.id, function(note)
+			note.title, note.body = t, b
+		end)
 	end
 end)
 
 -- Menu bar commands from Rust, each once (not again on reload).
-local seen = (command:peek() or {}).seq
+local last = command:peek()
+local seen = if last then last.seq else nil
 ui.effect(function()
 	local c = command:get()
 	if not c or c.seq == seen then
@@ -234,10 +264,11 @@ local function parse(src: string): { Block }
 		local box, task = string.match(l, "^%s*[-*]%s+%[([ xX])%]%s+(.*)")
 		local bullet = string.match(l, "^%s*[-*]%s+(.*)")
 		local quote = string.match(l, "^>%s?(.*)")
-		if hashes then
+		-- A pattern's captures match together.
+		if hashes and heading then
 			flush()
 			table.insert(out, { kind = `h{math.min(#hashes, 3)}`, text = heading })
-		elseif box then
+		elseif box and task then
 			flush()
 			table.insert(out, { kind = "task", text = task, done = box ~= " " })
 		elseif bullet then
@@ -264,12 +295,15 @@ local function parse(src: string): { Block }
 	return out
 end
 
-local function inline(src: string, props: { [string]: any }): any
-	local node: { [any]: any } = { text_size = 15, line_height = 24, color = text, wrap = true }
-	for k, v in props do
-		node[k] = v
+-- A paragraph of rich text: `**bold**` and `code` spans. `fill` lets it take
+-- the rest of a row.
+local function inline(src: string, color: string?, fill: boolean?): Node
+	local size = 15
+	local node: RichProps = { text_size = size, line_height = 24, color = color or text, wrap = true }
+	if fill then
+		node.grow, node.shrink, node.min_w = 1, 1, 0
 	end
-	local color, size = node.color, node.text_size
+	color = color or text
 	local rest = src
 	while #rest > 0 do
 		local b = string.find(rest, "**", 1, true)
@@ -292,14 +326,14 @@ local function inline(src: string, props: { [string]: any }): any
 		if mark == "**" then
 			table.insert(node, ui.span { inner, bold = true, color = color, text_size = size })
 		else
-			table.insert(node, ui.span { inner, font = "Menlo", text_size = 13, bg = wash, color = "#ffd27a" })
+			table.insert(node, ui.span { inner, font = "mono", text_size = 13, bg = wash, color = "$notes.code" })
 		end
 		rest = string.sub(rest, close + #mark)
 	end
 	return ui.rich(node)
 end
 
-local function block(b: Block): any
+local function block(b: Block): Node
 	if b.kind == "h1" then
 		return ui.text { b.text, text_size = 26, weight = 700, color = text, mt = 4 }
 	elseif b.kind == "h2" then
@@ -323,44 +357,42 @@ local function block(b: Block): any
 			gap = 10,
 			items = "start",
 			mark,
-			inline(b.text, { grow = 1, shrink = 1, min_w = 0, color = if b.done then tertiary else text }),
+			inline(b.text, if b.done then tertiary else text, true),
 		}
 	elseif b.kind == "quote" then
 		return ui.row {
 			gap = 12,
 			ui.div { w = 3, rounded = 2, bg = line, shrink = 0 },
-			inline(b.text, { grow = 1, shrink = 1, min_w = 0, color = secondary }),
+			inline(b.text, secondary, true),
 		}
 	elseif b.kind == "alert" then
 		return ui.column {
 			p = 14,
 			gap = 4,
 			rounded = 10,
-			bg = "#3fb95014",
+			bg = "$notes.alert.bg",
 			border = 1,
-			border_color = "#3fb95059",
-			ui.text { b.tone or "NOTE", text_size = 12, weight = 700, color = "#5fd27a" },
-			inline(b.text, {}),
+			border_color = "$notes.alert.border",
+			ui.text { b.tone or "NOTE", text_size = 12, weight = 700, color = "$notes.alert.text" },
+			inline(b.text),
 		}
 	end
-	return inline(b.text, {})
+	return inline(b.text)
 end
 local blocks = ui.computed(function()
 	return parse(body:get())
 end)
 
 -- Pieces.
-local function drag(props: { [string]: any }?)
-	local spacer: { [any]: any } = { h_full = true, on_press = ui.action("drag_window") }
-	for k, v in props or {} do
-		spacer[k] = v
-	end
+local function drag(props: ContainerProps?)
+	local spacer: ContainerProps = if props then table.clone(props) else {}
+	spacer.h_full = true
+	spacer.window_drag = true
 	return ui.div(spacer)
 end
 
-local function tool(label: string, glyph: string, on_click: any, on: (() -> boolean)?)
+local function tool(glyph: string, on_click: Handler | Action, on: (() -> boolean)?)
 	return ui.button {
-		label = label,
 		h = 28,
 		px = 9,
 		shrink = 0,
@@ -368,9 +400,9 @@ local function tool(label: string, glyph: string, on_click: any, on: (() -> bool
 		items = "center",
 		justify = "center",
 		bg = function()
-			return if on and on() then "#ffffff1f" else clear
+			return if on and on() then "$pressed" else clear
 		end,
-		hover = { bg = "#ffffff14" },
+		hover = { bg = "$hover" },
 		focus = { border = 0 },
 		on_click = on_click,
 		ui.text { glyph, text_size = if #glyph > 3 then 12 else 17, color = secondary },
@@ -386,8 +418,8 @@ local function item(label: string, on_click: () -> ())
 		text_size = 13,
 		color = text,
 		bg = clear,
-		hover = { bg = "#ffffff14" },
-		focus = { bg = "#ffffff14", border = 0 },
+		hover = { bg = "$hover" },
+		focus = { bg = "$hover", border = 0 },
 		on_click = function()
 			more:set(false)
 			on_click()
@@ -395,37 +427,43 @@ local function item(label: string, on_click: () -> ())
 	}
 end
 
--- A clear input with a hint under it while it's empty.
-local function field(state: any, hint: string, props: { [string]: any }, multiline: boolean?)
-	local input: { [any]: any } = {
+-- A clear input; its placeholder shows while it's empty.
+type FieldStyle = {
+	h: number?,
+	h_full: boolean?,
+	wrap: boolean?,
+	text_size: number?,
+	weight: number?,
+	line_height: number?,
+	color: string?,
+}
+local function field(state: State<string>, hint: string, style: FieldStyle, multiline: boolean?)
+	local input: InputProps = {
 		label = hint,
 		value = state,
+		placeholder = hint,
+		placeholder_color = tertiary,
 		w_full = true,
 		bg = clear,
 		border = 0,
 		focus = { border = 0 },
 	}
-	for k, v in props do
-		input[k] = v
-	end
+	input.h, input.text_size, input.weight = style.h, style.text_size, style.weight
+	input.line_height, input.color = style.line_height, style.color
+	input.h_full, input.wrap = style.h_full, style.wrap
 	return ui.overlay {
 		w_full = true,
 		grow = if multiline then 1 else 0,
-		ui.show(function()
-			return state:get() == ""
-		end, ui.text { hint, text_size = props.text_size, weight = props.weight, color = tertiary, px = props.px }),
 		if multiline then ui.textarea(input) else ui.input(input),
 	}
 end
 
--- Sidebar motion. Rows have one height, so a row's place is its index.
-local ROW_H = 52
-local STEP = ROW_H + 2
+-- Sidebar motion.
 local SPRING = anime.spring { bounce = 0.32, duration = 520 }
 local SOFT = anime.spring { bounce = 0.12, duration = 420 }
 
 local function index_of(id: string?): number?
-	for i, n in visible:get() do
+	for i, n in visible:peek() do
 		if n.id == id then
 			return i
 		end
@@ -433,54 +471,48 @@ local function index_of(id: string?): number?
 	return nil
 end
 
--- The selection is one highlight that springs from row to row, stretching
--- a little as it travels, rather than a background on each row.
-local pill = ui.ref()
-local pill_at: number? = nil
-ui.effect(function()
-	local i = index_of(selected:get())
-	if i == nil then
-		anime.animate(pill, { opacity = 0, scale = 0.94, duration = 180, ease = "outQuad" })
-		pill_at = nil
-		return
-	end
-	local y = (i - 1) * STEP
-	if pill_at == nil then
-		-- Appearing: in place, popping up from slightly small.
-		anime.animate(pill, { y = { y, y }, opacity = { 0, 1 }, scale = { 0.92, 1 }, duration = 360, ease = SOFT })
-	elseif pill_at ~= i then
-		local far = math.min(math.abs(i - pill_at), 4)
-		anime.animate(pill, {
-			y = y,
-			opacity = 1,
-			scale = 1,
+-- The selection is one highlight that springs from row to row (a
+-- `layout_id` hands it from the row it leaves to the one it lands in),
+-- stretching a little as it travels, rather than a background on each row.
+local pill_last: string? = nil
+local function pill(id: string)
+	return ui.div {
+		layout_id = "selection",
+		layout_ease = SPRING,
+		layout_duration = 520,
+		h_full = true,
+		rounded = 9,
+		bg = "$notes.selected.bg",
+		border = 1,
+		border_color = "$notes.selected.border",
+		shadow = "$notes.selected.shadow",
+		on_mount = function(el)
+			local from = if pill_last ~= id then index_of(pill_last) else nil
+			local to = index_of(id)
+			pill_last = id
+			if from == nil or to == nil then
+				-- Appearing: in place, popping up from slightly small.
+				anime.animate(el, { opacity = { 0, 1 }, scale = { 0.92, 1 }, duration = 360, ease = SOFT })
+				return
+			end
+			local far = math.min(math.abs(to - from), 4)
 			-- Squash across, stretch along the way it moves, more for longer trips.
-			scale_y = { 1, 1 + 0.06 * far, 1 },
-			scale_x = { 1, 1 - 0.025 * far, 1 },
-			duration = 520,
-			ease = SPRING,
-		})
-	end
-	pill_at = i
-end)
+			anime.animate(el, {
+				scale_y = { 1, 1 + 0.06 * far, 1 },
+				scale_x = { 1, 1 - 0.025 * far, 1 },
+				duration = 520,
+				ease = SPRING,
+			})
+		end,
+	}
+end
 
 local function row(n: Note, first_index: number)
 	local id = n.id
 	local el = ui.ref()
 	local dot = ui.ref()
 
-	-- Reorders (pinning, an edited note rising to the top, a new note
-	-- pushing the rest down) play as rows sliding from where they were.
-	local last: number? = nil
-	ui.effect(function()
-		local i = index_of(id)
-		if last ~= nil and i ~= nil and i ~= last then
-			anime.animate(el, { y = { (last - i) * STEP, 0 }, duration = 560, ease = SPRING })
-		end
-		last = i
-	end)
-
-	return ui.column {
+	local content = ui.column {
 		ref = el,
 		on_click = function()
 			selected:set(id)
@@ -503,13 +535,13 @@ local function row(n: Note, first_index: number)
 			})
 		end,
 		w_full = true,
-		h = ROW_H,
+		min_h = 52,
 		px = 10,
 		gap = 2,
 		justify = "center",
 		rounded = 8,
 		cursor = "pointer",
-		hover = { bg = "#ffffff0a" },
+		hover = { bg = "$notes.row.hover" },
 		ui.row {
 			items = "center",
 			-- The dot's own margin, not a gap: hidden, it takes no room.
@@ -553,6 +585,17 @@ local function row(n: Note, first_index: number)
 			truncate = true,
 		},
 	}
+	-- The highlight sits under the row, not in it: hovering and pressing
+	-- move the row, not the highlight.
+	return ui.overlay {
+		w_full = true,
+		ui.presence(function()
+			return if selected:get() == id then "selected" else nil
+		end, function()
+			return pill(id)
+		end, { absolute = true, top = 0, left = 0, right = 0, bottom = 0 }),
+		content,
+	}
 end
 
 local sidebar = ui.column {
@@ -571,14 +614,13 @@ local sidebar = ui.column {
 			local plus = ui.ref()
 			local turns = 0
 			return ui.button {
-				label = "New Note",
 				w = 30,
 				h = 28,
 				rounded = 7,
 				items = "center",
 				justify = "center",
 				bg = clear,
-				hover = { bg = "#ffffff14" },
+				hover = { bg = "$hover" },
 				focus = { border = 0 },
 				on_click = function()
 					turns += 1
@@ -602,30 +644,17 @@ local sidebar = ui.column {
 	ui.scroll {
 		grow = 1,
 		ui.column {
-			w = 260,
 			px = 8,
 			pb = 12,
 			gap = 2,
-			relative = true,
 			items = "stretch",
-			ui.div {
-				ref = pill,
-				absolute = true,
-				top = 0,
-				left = 8,
-				right = 8,
-				h = ROW_H,
-				rounded = 9,
-				opacity = 0,
-				bg = "#f5b70a3d",
-				border = 1,
-				border_color = "#f5b70a40",
-				shadow = { y = 4, blur = 14, color = "#f5b70a1f" },
-			},
+			-- Reorders (pinning, an edited note rising to the top, a new note
+			-- pushing the rest down) play as rows sliding from where they were.
 			ui.each(visible, row, {
 				key = function(n)
 					return n.id
 				end,
+				animate = { ease = SPRING, duration = 560 },
 			}),
 		},
 	},
@@ -661,16 +690,16 @@ local toolbar = ui.row {
 	},
 	ui.menu {
 		open = more,
-		anchor = tool("More", "⋯", ui.toggle(more)),
+		anchor = tool("⋯", ui.toggle(more)),
 		w = 200,
 		p = 6,
 		gap = 2,
 		rounded = 12,
-		bg = "#1c1c2099",
+		bg = "$menu.bg",
 		backdrop_blur = 24,
 		border = 1,
-		border_color = "#ffffff1f",
-		shadow = { y = 12, blur = 32, color = "#00000066" },
+		border_color = "$border",
+		shadow = "$shadow.lg",
 		items = "stretch",
 		item("Pin / Unpin", toggle_pin),
 		item("Duplicate", duplicate),
@@ -678,7 +707,7 @@ local toolbar = ui.row {
 			confirm:set(true)
 		end),
 	},
-	tool("Preview", "Preview", ui.toggle(preview), function()
+	tool("Preview", ui.toggle(preview), function()
 		return preview:get() == true
 	end),
 }
@@ -689,7 +718,7 @@ local editor = ui.column {
 	basis = 0,
 	min_w = 0,
 	items = "stretch",
-	bg = "#1b1c20d9",
+	bg = "$notes.editor",
 	toolbar,
 	ui.column {
 		grow = 1,
@@ -698,7 +727,12 @@ local editor = ui.column {
 		gap = 6,
 		items = "stretch",
 		field(title, "Title", { text_size = 26, weight = 700, color = text, h = 40 }),
-		field(body, "Start writing…", { h_full = true, wrap = true, text_size = 15, line_height = 23, color = text }, true),
+		field(
+			body,
+			"Start writing…",
+			{ h_full = true, wrap = true, text_size = 15, line_height = 23, color = text },
+			true
+		),
 		ui.text {
 			function()
 				if find(selected:get()) == nil then
@@ -722,7 +756,7 @@ local preview_pane = ui.column {
 	shrink = 0,
 	relative = true,
 	items = "stretch",
-	bg = "#1b1c20f0",
+	bg = "$notes.preview",
 	border_sides = { 0, 0, 0, 1 },
 	border_color = line,
 	ui.scroll {
@@ -747,18 +781,17 @@ local preview_pane = ui.column {
 		h = 52,
 		px = 20,
 		items = "center",
-		bg = "#1b1c2099",
+		bg = "$notes.header",
 		backdrop_blur = 20,
 		border_sides = { 0, 0, 1, 0 },
 		border_color = line,
-		on_press = ui.action("drag_window"),
+		window_drag = true,
 		ui.text { "Preview", text_size = 13, weight = 600, color = text },
 	},
 }
 
 local function button(label: string, on_click: () -> (), fill: string)
 	return ui.button {
-		label = label,
 		h = 30,
 		px = 16,
 		rounded = 8,
@@ -779,10 +812,10 @@ local dialog = ui.modal {
 	p = 20,
 	gap = 12,
 	rounded = 14,
-	bg = "#24252bf0",
+	bg = "$surface.overlay",
 	backdrop_blur = 24,
 	border = 1,
-	border_color = "#ffffff1f",
+	border_color = "$border",
 	shadow = { y = 18, blur = 48, color = "#00000080" },
 	items = "stretch",
 	ui.text {
@@ -807,8 +840,8 @@ local dialog = ui.modal {
 		mt = 6,
 		button("Cancel", function()
 			confirm:set(false)
-		end, "#ffffff1a"),
-		button("Delete", delete_selected, "#e5484d"),
+		end, "$notes.button"),
+		button("Delete", delete_selected, "$danger"),
 	},
 }
 
@@ -816,7 +849,7 @@ return ui.row {
 	w_full = true,
 	h_full = true,
 	items = "stretch",
-	bg = "#1214166b",
+	bg = "$glass.tint",
 	sidebar,
 	editor,
 	-- The preview, toggled by its button and the View menu. (`layout =

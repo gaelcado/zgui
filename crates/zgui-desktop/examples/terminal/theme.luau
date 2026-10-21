@@ -1,28 +1,42 @@
--- Dark glass, as the browser example: the window's blur shows through the
--- tint, and foregrounds are translucent white so they take the colour of
--- what is behind the glass, as AppKit's vibrant labels do.
+-- The terminal's colours are theme tokens, so any theme styles it: the
+-- standard ones, and the app's own below, whose defaults are written in
+-- terms of the standard ones. Its own look is glass.json, a theme that sets
+-- both; `ui.theme.set("zgui-light")` (or any other theme) restyles it live.
+ui.theme.tokens {
+	terminal = {
+		-- Each terminal's card.
+		pane = "{surface.sunken}",
+		-- A selected tab, a dialog's button.
+		wash = "{pressed}",
+		-- The focused pane's border, when there are several.
+		ring = "{border.strong}",
+		-- Claude's colour, whatever the theme.
+		claude = "#d97757",
+	},
+}
+ui.theme.default(ui.theme.load("glass.json"))
+
 return {
-	tint = "#13141873",
-	-- Each terminal's card: a little darker than the window, still glass.
-	pane = "#0a0b0e4d",
-	wash = "#ffffff0f",
-	hover = "#ffffff0a",
-	line = "#ffffff0d",
-	ring = "#ffffff26",
-	text = "#ffffffeb",
-	secondary = "#ffffffa6",
-	tertiary = "#ffffff66",
-	quaternary = "#ffffff38",
-	accent = "#a99cff",
-	bell = "#f5c46b",
-	claude = "#d97757",
-	danger = "#ff7a6b",
+	tint = "$glass.tint",
+	pane = "$terminal.pane",
+	wash = "$terminal.wash",
+	hover = "$hover",
+	line = "$border.subtle",
+	ring = "$terminal.ring",
+	text = "$text.primary",
+	secondary = "$text.secondary",
+	tertiary = "$text.tertiary",
+	quaternary = "$text.disabled",
+	accent = "$accent",
+	bell = "$warning",
+	claude = "$terminal.claude",
+	danger = "$danger",
+	clear = "#00000000",
+	font = "$font.sans",
 
 	-- Space between the window's edge and the panes, and between panes
 	-- (less: two borders meet there, which reads as more space).
 	inset = 6,
-	-- The interface's typeface (the host registers it).
-	font = "Geist",
 	gap = 4,
 	titlebar = 40,
 }

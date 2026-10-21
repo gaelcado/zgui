@@ -247,6 +247,10 @@ impl EventContext {
     pub(crate) fn capture_requested(&self) -> bool {
         self.capture.is_some()
     }
+    /// What a listener so far asked capture for: `Some(None)` a release.
+    pub(crate) fn capture_target(&self) -> Option<Option<NodeId>> {
+        self.capture
+    }
     pub fn capture_pointer(&mut self) {
         self.capture = Some(Some(self.current_target));
     }
@@ -333,7 +337,9 @@ struct State {
     focused: Option<NodeId>,
     captured: Option<NodeId>,
     capture_button: Option<PointerButton>,
-    hovered: Option<NodeId>,
+    /// The hovered node (the pointer's hit target) and its ancestors, up to
+    /// the active modal root: each has had its enter, none its leave yet.
+    hover: Vec<NodeId>,
     /// Where the pointer last was over the window (None: outside it).
     pointer: Option<(f32, f32)>,
     file_hovered: Option<NodeId>,
@@ -385,9 +391,6 @@ impl Drop for InputBinding {
                 if s.captured == Some(self.node) {
                     s.captured = None;
                     s.capture_button = None;
-                }
-                if s.hovered == Some(self.node) {
-                    s.hovered = None;
                 }
                 if s.pressed == Some(self.node) {
                     s.pressed = None;
@@ -745,9 +748,6 @@ impl InputDispatcher {
             s.captured = None;
             s.capture_button = None;
         }
-        if s.hovered == Some(node) {
-            s.hovered = None;
-        }
         if s.pressed == Some(node) {
             s.pressed = None;
         }
@@ -761,34 +761,121 @@ impl InputDispatcher {
     pub fn focused(&self) -> Option<NodeId> {
         self.state.borrow().focused
     }
+    /// The node under the pointer that takes input (its hit target), while
+    /// it still listens.
     pub fn hovered(&self) -> Option<NodeId> {
-        self.state.borrow().hovered
+        let state = self.state.borrow();
+        state
+            .hover
+            .first()
+            .copied()
+            .filter(|id| state.entries.contains_key(id))
     }
     /// Hover what is under the resting pointer now that layout moved: a
     /// button that slid away from it stops being hovered (and what slid
     /// under it starts) without waiting for the pointer to move. Nothing
     /// changes while a press holds the pointer or a drag is under way.
     pub fn refresh_hover(&self, scene: &Rc<RefCell<Scene>>) {
-        let (pointer, old) = {
+        let pointer = {
             let state = self.state.borrow();
             if state.captured.is_some() || state.drag.is_some() {
                 return;
             }
-            (state.pointer, state.hovered)
+            state.pointer
         };
         let Some((x, y)) = pointer else {
             return;
         };
         let hit = self.hit_target(&scene.borrow(), x, y);
-        if hit == old {
+        self.set_hover(scene, hit);
+    }
+    /// Move hover to `hit` and its ancestors, as the DOM's `mouseenter` and
+    /// `mouseleave` do: a node hears `PointerLeave` once the pointer is
+    /// outside it and all its descendants, and `PointerEnter` once it comes
+    /// inside; moving between descendants tells it nothing. Each node hears
+    /// its own, at the target phase (they do not bubble): the nodes left,
+    /// deepest first, then the nodes entered, outermost first. Costs a walk
+    /// up from `hit` when the hit target changes, nothing when it does not.
+    fn set_hover(&self, scene: &Rc<RefCell<Scene>>, hit: Option<NodeId>) {
+        if self.state.borrow().hover.first().copied() == hit {
             return;
         }
-        self.state.borrow_mut().hovered = hit;
-        if let Some(id) = old.filter(|id| scene.borrow().contains(*id)) {
-            self.route(scene, id, InputEvent::PointerLeave);
+        let mut next = Vec::new();
+        {
+            let scene = scene.borrow();
+            let scope = self.focus_scope();
+            let mut node = hit.filter(|id| scene.contains(*id));
+            while let Some(id) = node {
+                next.push(id);
+                if Some(id) == scope {
+                    break;
+                }
+                node = scene.parent(id);
+            }
         }
-        if let Some(id) = hit {
-            self.route(scene, id, InputEvent::PointerEnter);
+        let entering = {
+            let mut state = self.state.borrow_mut();
+            let old = std::mem::take(&mut state.hover);
+            let common = old
+                .iter()
+                .rev()
+                .zip(next.iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let entering: Vec<NodeId> = next[..next.len() - common].to_vec();
+            state.hover = next;
+            drop(state);
+            for &id in &old[..old.len() - common] {
+                self.hover_event(scene, id, InputEvent::PointerLeave);
+            }
+            entering
+        };
+        // A leave handler that moved hover again (it dispatched) owns it now.
+        if self.state.borrow().hover.first().copied() != hit {
+            return;
+        }
+        for &id in entering.iter().rev() {
+            self.hover_event(scene, id, InputEvent::PointerEnter);
+        }
+    }
+    /// Deliver an enter or leave to `node`'s own listeners only.
+    fn hover_event(&self, scene: &Rc<RefCell<Scene>>, node: NodeId, event: InputEvent) {
+        if !scene.borrow().contains(node) {
+            return;
+        }
+        let callbacks: Vec<_> = {
+            let state = self.state.borrow();
+            let Some(entries) = state.entries.get(&node) else {
+                return;
+            };
+            // A disabled node is entered no more; leaving still cleans up.
+            if matches!(event, InputEvent::PointerEnter)
+                && state.options.get(&node).is_some_and(|o| o.disabled)
+            {
+                return;
+            }
+            entries
+                .iter()
+                .map(|e| (e.token, e.callback.clone()))
+                .collect()
+        };
+        let mut ctx = EventContext::new(event, node);
+        for (token, callback) in callbacks {
+            let attached = self
+                .state
+                .borrow()
+                .entries
+                .get(&node)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.token == token));
+            if !attached || !scene.borrow().contains(node) {
+                continue;
+            }
+            if let Ok(mut callback) = callback.try_borrow_mut() {
+                callback(&mut ctx);
+            }
+            if ctx.immediate {
+                break;
+            }
         }
     }
     pub fn is_enabled(&self, scene: &Scene, node: NodeId) -> bool {
@@ -1328,16 +1415,7 @@ impl InputDispatcher {
             event,
             InputEvent::PointerMove { .. } | InputEvent::PointerLeave
         ) {
-            let old = self.state.borrow().hovered;
-            if old != hit {
-                self.state.borrow_mut().hovered = hit;
-                if let Some(id) = old.filter(|id| scene.borrow().contains(*id)) {
-                    self.route(scene, id, InputEvent::PointerLeave);
-                }
-                if let Some(id) = hit {
-                    self.route(scene, id, InputEvent::PointerEnter);
-                }
-            }
+            self.set_hover(scene, hit);
         }
         let target = match &event {
             InputEvent::PointerDown { .. }

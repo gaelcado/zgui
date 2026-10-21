@@ -121,6 +121,46 @@ fn virtual_lists_mount_only_visible_rows() {
 }
 
 #[test]
+fn virtual_list_rows_own_their_state_and_effects() {
+    // A row is built as a component is: `ui.use_state` is its own, and the
+    // effects it makes end when it scrolls away (they ran on, one more per
+    // row ever shown, for as long as the script).
+    let mut h = Harness::inline(
+        r##"local offset = ui.state("offset", 0)
+        local tick = ui.state("tick", 0)
+        local runs = ui.state("runs", 0)
+        return ui.column {
+            ui.button { id = "tick", on_click = ui.add(tick), "tick" },
+            ui.button { id = "far", on_click = ui.set(offset, 20000), "far" },
+            ui.text { id = "runs", "{runs}" },
+            ui.list { count = 100000, height = 20, w = 200, h = 100, offset = offset,
+                row = function(i)
+                    local mine = ui.use_state(i)
+                    ui.effect(function()
+                        tick:get()
+                        runs:set(runs:peek() + 1)
+                    end)
+                    return ui.text("row " .. mine:get())
+                end },
+        }"##,
+    );
+    assert_eq!(h.host.error().get(), None);
+    let visible = h.count_text("row ");
+    assert!(visible > 3 && visible < 20, "{visible} rows");
+    h.click("far");
+    h.ui.prepare_frame();
+    h.settle();
+    let before: usize = h.text("runs").parse().unwrap();
+    h.click("tick");
+    let after: usize = h.text("runs").parse().unwrap();
+    assert_eq!(
+        after - before,
+        h.count_text("row "),
+        "only the mounted rows' effects run"
+    );
+}
+
+#[test]
 fn switch_shows_the_matching_case() {
     let mut h = Harness::inline(
         r##"local tab = ui.state("tab", "one")
@@ -189,6 +229,43 @@ fn key_and_hover_events_reach_scripts() {
     });
     h.ui.dispatch(InputEvent::PointerMove { x: 300., y: 290. });
     assert_eq!(h.text("log"), "[p30a!]");
+}
+
+#[test]
+fn a_parents_handlers_run_once_for_events_on_its_children() {
+    // A parent hears its children's events as they bubble up, once (it ran
+    // in the capture phase too).
+    let mut h = Harness::inline(
+        r##"local log = ui.state("log", "")
+        local function note(s: string) log:set(log:peek() .. s) end
+        return ui.column {
+            on_press = function() note("p") end,
+            on_release = function() note("r") end,
+            on_key = function(e) note(e.key) return false end,
+            ui.div { id = "child", w = 100, h = 50, focusable = true },
+            ui.text { "{log}", id = "log" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    h.ui.dispatch(InputEvent::PointerDown {
+        x: 20.,
+        y: 20.,
+        button: zgui::input::PointerButton::Primary,
+    });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: 20.,
+        y: 20.,
+        button: zgui::input::PointerButton::Primary,
+    });
+    let node = h.find("child").unwrap();
+    let scene = h.ui.scene.clone();
+    h.ui.input.focus(&scene, Some(node));
+    h.ui.dispatch(InputEvent::KeyDown {
+        key: Key::Character("k".into()),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    assert_eq!(h.text("log"), "prk");
 }
 
 #[test]

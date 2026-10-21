@@ -6,6 +6,7 @@ use crate::{
     semantics::{Role, SemanticNode, Semantics},
     text_edit::TextEditor,
     text_layout::{FontStyle, TextAffinity, TextLayout, TextPosition},
+    theme::{ColorToken, ThemeScope, Themes, tok},
 };
 use std::{
     any::Any,
@@ -16,41 +17,14 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Theme {
-    pub background: Color,
-    pub surface: Color,
-    pub hover: Color,
-    pub text: Color,
-    pub muted: Color,
-    pub accent: Color,
-    pub selection: Color,
-    pub font_size: f32,
-    pub control_height: f32,
-    pub radius: f32,
-}
-impl Default for Theme {
-    fn default() -> Self {
-        Self {
-            background: Color(16, 20, 28, 255),
-            surface: Color(35, 46, 64, 255),
-            hover: Color(47, 64, 88, 255),
-            text: Color(229, 237, 247, 255),
-            muted: Color(138, 154, 176, 255),
-            accent: Color(94, 165, 255, 255),
-            selection: Color(56, 98, 158, 170),
-            font_size: 16.,
-            control_height: 36.,
-            radius: 6.,
-        }
-    }
-}
 #[derive(Default)]
 struct Owned {
     effects: Vec<Effect>,
     bindings: Vec<InputBinding>,
     resources: Vec<Box<dyn Any>>,
 }
+/// An editor's box size, style, shaper revision and content insets.
+type EditorGeometry = (Rect, Style, u64, Insets);
 #[derive(Clone)]
 pub struct EditorHandle {
     multiline: bool,
@@ -66,9 +40,78 @@ pub struct EditorHandle {
     preferred_x: Rc<Cell<Option<f32>>>,
     text: NodeId,
     scene: Rc<RefCell<Scene>>,
-    geometry: Rc<RefCell<Option<(Rect, Style, u64)>>>,
+    /// What the last refresh laid the text out for: the box's size, its
+    /// style, the shaper revision and its content insets (which a border
+    /// in its kind changes too).
+    geometry: Rc<RefCell<Option<EditorGeometry>>>,
+    position: Rc<Cell<TextPosition>>,
+    hint: Rc<EditorHint>,
+}
+/// What an editor shows while it is empty, and whether focus selects all.
+#[derive(Default)]
+struct EditorHint {
+    /// The placeholder and its colour (`None`: the theme's `muted`).
+    placeholder: RefCell<Option<(std::sync::Arc<str>, Option<Color>)>>,
+    select_on_focus: Cell<bool>,
 }
 impl EditorHandle {
+    /// The selection as UTF-8 byte offsets into the committed text,
+    /// `(anchor, focus)`: equal for a caret, `focus` where the caret is.
+    pub fn selection(&self) -> (usize, usize) {
+        let selection = self.editor.borrow().selection();
+        (selection.anchor, selection.focus)
+    }
+    /// Select from `anchor` to `focus` (UTF-8 byte offsets, clamped to the
+    /// text and moved back to a grapheme boundary), as a drag would.
+    pub fn set_selection(&self, anchor: usize, focus: usize) {
+        let focus = {
+            let mut editor = self.editor.borrow_mut();
+            editor.set_selection(anchor, focus);
+            editor.selection().focus
+        };
+        self.position.set(TextPosition {
+            byte_offset: focus,
+            affinity: TextAffinity::After,
+        });
+        self.preferred_x.set(None);
+        self.refresh();
+    }
+    /// Select the whole text.
+    pub fn select_all(&self) {
+        let end = self.editor.borrow().text().len();
+        self.set_selection(0, end);
+    }
+    /// Select all whenever the editor takes keyboard focus (a click, Tab,
+    /// a program), as a browser's address bar does: the first click selects
+    /// everything, a second places the caret. A window coming back to the
+    /// front keeps the selection it had.
+    pub fn set_select_on_focus(&self, select: bool) {
+        self.hint.select_on_focus.set(select);
+    }
+    /// Text shown, never edited, while the editor is empty: in its own
+    /// typography, coloured `color` (`None`: the theme's `muted`). It is
+    /// not part of the value and does not change the editor's size;
+    /// assistive technology reads it as the placeholder.
+    pub fn set_placeholder(&self, text: Option<&str>, color: Option<Color>) {
+        let next = text
+            .filter(|text| !text.is_empty())
+            .map(|text| (std::sync::Arc::<str>::from(text), color));
+        let mut current = self.hint.placeholder.borrow_mut();
+        if *current == next {
+            return;
+        }
+        *current = next;
+        drop(current);
+        self.refresh();
+    }
+    /// The placeholder, if any.
+    pub fn placeholder(&self) -> Option<String> {
+        self.hint
+            .placeholder
+            .borrow()
+            .as_ref()
+            .map(|(text, _)| text.to_string())
+    }
     /// Whether user editing is blocked. Selection, copying and model writes remain available.
     pub fn is_read_only(&self) -> bool {
         self.read_only.get()
@@ -108,7 +151,8 @@ impl EditorHandle {
         }
         let metrics_changed = wrap_changed || previous.1 != next.1 || previous.2 != next.2;
         *self.typography.borrow_mut() = next;
-        if metrics_changed {
+        // A placeholder showing keeps its own colour: draw it again.
+        if metrics_changed || self.hint.placeholder.borrow().is_some() {
             self.preferred_x.set(None);
             self.refresh();
         } else {
@@ -142,6 +186,7 @@ impl EditorHandle {
             Rect::new(0., 0., bounds.width, bounds.height),
             scene.style(self.node),
             scene.text_shaper_revision(),
+            scene.content_insets(self.node),
         );
         let changed = self.geometry.borrow().as_ref() != Some(&next);
         drop(scene);
@@ -213,7 +258,6 @@ pub struct Ui {
     pub scene: Rc<RefCell<Scene>>,
     pub input: InputDispatcher,
     pub semantics: Rc<RefCell<Semantics>>,
-    pub theme: Theme,
     storage: Rc<UiStorage>,
 }
 // One focused-editor snapshot per document. Large or unaccounted custom layouts
@@ -332,6 +376,9 @@ impl EditorDrag {
 }
 struct UiStorage {
     runtime: Runtime,
+    themes: Rc<Themes>,
+    /// The theme scope of the element being mounted (`Ui::enter_theme`).
+    mount_theme: RefCell<Option<Rc<ThemeScope>>>,
     text_geometry_revision: Signal<u64>,
     presented: Signal<bool>,
     scene: Rc<RefCell<Scene>>,
@@ -346,20 +393,48 @@ struct UiStorage {
     content_sizes: RefCell<HashMap<NodeId, Signal<(f32, f32)>>>,
     observed_bounds: RefCell<HashMap<NodeId, Signal<Rect>>>,
     observed_visibility: RefCell<HashMap<NodeId, Signal<bool>>>,
+    /// Run once after the next frame preparation's layout.
+    after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
+    /// Run after every layout pass that changes the layout, by owning node.
+    layout_listeners: RefCell<HashMap<NodeId, Vec<LayoutListener>>>,
     mount_initialization: RefCell<Option<Rc<MountInitialization>>>,
     interaction: RefCell<Option<InteractionDeadline>>,
     advancing_interaction: Cell<bool>,
+    window_gesture: Cell<Option<WindowGesture>>,
 }
+/// A press in a window drag region (`View::window_drag`), for the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowGesture {
+    /// Move the window with the pointer: the press is still down.
+    Drag,
+    /// The second press of a double click: zoom or minimize the window, as
+    /// the platform's setting for its title bar says.
+    DoubleClick,
+}
+type LayoutListener = Rc<RefCell<Box<dyn FnMut()>>>;
 #[derive(Clone)]
 pub(crate) struct WeakUi {
     storage: Weak<UiStorage>,
-    theme: Theme,
 }
 impl WeakUi {
     pub(crate) fn upgrade(&self) -> Option<Ui> {
-        self.storage
-            .upgrade()
-            .map(|storage| Ui::from_storage(storage, self.theme))
+        self.storage.upgrade().map(Ui::from_storage)
+    }
+}
+/// Restores the previous mount theme scope (`Ui::enter_theme`), unless
+/// entering changed nothing (the usual case: a child of an element mounts
+/// in its parent's scope).
+pub(crate) struct ThemeGuard {
+    restore: Option<(Weak<UiStorage>, Option<Rc<ThemeScope>>)>,
+}
+impl Drop for ThemeGuard {
+    fn drop(&mut self) {
+        if let Some((storage, previous)) = self.restore.take()
+            && let Some(storage) = storage.upgrade()
+        {
+            let restored = storage.mount_theme.replace(previous);
+            drop(restored);
+        }
     }
 }
 /// Ownership cleanup for the initial bindings of one public component mount.
@@ -441,6 +516,8 @@ impl Ui {
     pub fn new(width: f32, height: f32) -> Self {
         let runtime = Runtime::new();
         let storage = Rc::new(UiStorage {
+            themes: Themes::of(&runtime),
+            mount_theme: RefCell::new(None),
             text_geometry_revision: runtime.signal(0),
             presented: runtime.signal(true),
             runtime,
@@ -456,20 +533,53 @@ impl Ui {
             content_sizes: RefCell::new(HashMap::new()),
             observed_bounds: RefCell::new(HashMap::new()),
             observed_visibility: RefCell::new(HashMap::new()),
+            after_layout: RefCell::new(Vec::new()),
+            layout_listeners: RefCell::new(HashMap::new()),
             mount_initialization: RefCell::new(None),
             interaction: RefCell::new(None),
             advancing_interaction: Cell::new(false),
+            window_gesture: Cell::new(None),
         });
-        Self::from_storage(storage, Theme::default())
+        Self::from_storage(storage)
     }
-    fn from_storage(storage: Rc<UiStorage>, theme: Theme) -> Self {
+    fn from_storage(storage: Rc<UiStorage>) -> Self {
         Self {
             runtime: storage.runtime.clone(),
             scene: storage.scene.clone(),
             input: storage.input.clone(),
             semantics: storage.semantics.clone(),
-            theme,
             storage,
+        }
+    }
+    /// The runtime's themes: switch, load and register themes, declare app
+    /// tokens (see [`crate::theme`]).
+    pub fn theme(&self) -> &Rc<Themes> {
+        &self.storage.themes
+    }
+    /// The theme scope widgets mounting now style themselves from: the
+    /// enclosing `theme_scope`'s, else the root.
+    pub fn theme_scope(&self) -> Rc<ThemeScope> {
+        self.storage
+            .mount_theme
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| self.storage.themes.root().clone())
+    }
+    /// Mount under `scope` until the guard drops.
+    pub(crate) fn enter_theme(&self, scope: &Rc<ThemeScope>) -> ThemeGuard {
+        let current = self.storage.mount_theme.borrow();
+        if current
+            .as_ref()
+            .is_some_and(|current| Rc::ptr_eq(current, scope))
+        {
+            return ThemeGuard { restore: None };
+        }
+        drop(current);
+        ThemeGuard {
+            restore: Some((
+                Rc::downgrade(&self.storage),
+                self.storage.mount_theme.replace(Some(scope.clone())),
+            )),
         }
     }
     pub(crate) fn begin_mount_initialization(&self) -> Rc<MountInitialization> {
@@ -480,12 +590,11 @@ impl Ui {
         })
     }
     pub(crate) fn shared(&self) -> Self {
-        Self::from_storage(self.storage.clone(), self.theme)
+        Self::from_storage(self.storage.clone())
     }
     pub(crate) fn downgrade(&self) -> WeakUi {
         WeakUi {
             storage: Rc::downgrade(&self.storage),
-            theme: self.theme,
         }
     }
     pub(crate) fn retain(&mut self, owner: NodeId, resource: impl Any) {
@@ -513,12 +622,13 @@ impl Ui {
     }
     pub fn label(&mut self, parent: NodeId, text: impl Into<String>, style: Style) -> NodeId {
         let text = text.into();
+        let theme = self.theme_scope();
         let n = self.scene.borrow_mut().append(
             parent,
             NodeKind::Text {
                 text: text.clone().into(),
-                color: self.theme.text,
-                font_size: self.theme.font_size,
+                color: theme.color_untracked(tok::TEXT_PRIMARY),
+                font_size: theme.number_untracked(tok::FONT_SIZE_MD),
             },
             style,
         );
@@ -605,13 +715,32 @@ impl Ui {
         s.set_transform(id, Transform { x, y });
         id
     }
-    fn control(&mut self, parent: NodeId, width: f32, height: f32) -> (NodeId, NodeId) {
+    /// A control's root and background. The background shows `rest`, or
+    /// what the returned state selects (`HOVERED`, `ACCENTED`), from the
+    /// theme, and follows theme changes.
+    fn control(
+        &mut self,
+        parent: NodeId,
+        width: f32,
+        height: f32,
+        rest: ColorToken,
+    ) -> (NodeId, NodeId, Signal<u8>) {
         let root = self.container(parent, Layout::Overlay, fixed(width, height));
-        let bg = self.rect(root, self.theme.surface, width, height, 0., 0.);
-        self.scene
-            .borrow_mut()
-            .set_kind(bg, surface(self.theme, self.theme.surface));
-        (root, bg)
+        let theme = self.theme_scope();
+        let bg = self.rect(root, theme.color_untracked(rest), width, height, 0., 0.);
+        let state = self.signal(RESTING);
+        let scene = self.scene.clone();
+        let read = state.clone();
+        self.bind(root, move || {
+            let color = match read.get() {
+                RESTING => rest,
+                HOVERED => tok::BUTTON_HOVER,
+                _ => tok::ACCENT,
+            };
+            let kind = surface(&theme, theme.color(color));
+            scene.borrow_mut().set_kind(bg, kind);
+        });
+        (root, bg, state)
     }
     pub fn button(
         &mut self,
@@ -621,8 +750,8 @@ impl Ui {
         mut clicked: impl FnMut() + 'static,
     ) -> NodeId {
         let label = label.into();
-        let height = self.theme.control_height;
-        let (root, bg) = self.control(parent, width, height);
+        let height = self.theme_scope().number_untracked(tok::CONTROL_HEIGHT);
+        let (root, _, state) = self.control(parent, width, height, tok::BUTTON_BG);
         let text = self.label(root, &label, fixed((width - 20.).max(0.), height - 8.));
         self.scene
             .borrow_mut()
@@ -631,8 +760,6 @@ impl Ui {
         self.semantics
             .borrow_mut()
             .set(root, SemanticNode::new(Role::Button, label));
-        let scene = self.scene.clone();
-        let theme = self.theme;
         let focused = Rc::new(RefCell::new(false));
         self.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Target {
@@ -641,30 +768,18 @@ impl Ui {
             match cx.event {
                 InputEvent::Activate if !cx.default_prevented() => clicked(),
                 InputEvent::PointerEnter => {
-                    scene.borrow_mut().set_kind(bg, surface(theme, theme.hover))
+                    state.set(HOVERED);
                 }
-                InputEvent::PointerLeave => scene.borrow_mut().set_kind(
-                    bg,
-                    surface(
-                        theme,
-                        if *focused.borrow() {
-                            theme.accent
-                        } else {
-                            theme.surface
-                        },
-                    ),
-                ),
+                InputEvent::PointerLeave => {
+                    state.set(if *focused.borrow() { ACCENTED } else { RESTING });
+                }
                 InputEvent::Focus => {
                     *focused.borrow_mut() = true;
-                    scene
-                        .borrow_mut()
-                        .set_kind(bg, surface(theme, theme.accent));
+                    state.set(ACCENTED);
                 }
                 InputEvent::Blur => {
                     *focused.borrow_mut() = false;
-                    scene
-                        .borrow_mut()
-                        .set_kind(bg, surface(theme, theme.surface));
+                    state.set(RESTING);
                 }
                 _ => {}
             }
@@ -679,7 +794,8 @@ impl Ui {
         width: f32,
     ) -> NodeId {
         let label = label.into();
-        let (root, bg) = self.control(parent, width, self.theme.control_height);
+        let height = self.theme_scope().number_untracked(tok::CONTROL_HEIGHT);
+        let (root, _, state) = self.control(parent, width, height, tok::INPUT_BG);
         let text = self.label(root, "", fixed(width - 16., 28.));
         self.scene
             .borrow_mut()
@@ -699,8 +815,6 @@ impl Ui {
             );
             a.borrow_mut().update(root, |s| s.checked = Some(checked));
         });
-        let scene = self.scene.clone();
-        let theme = self.theme;
         self.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Target {
                 return;
@@ -709,10 +823,12 @@ impl Ui {
                 InputEvent::Activate if !cx.default_prevented() => {
                     value.update(|v| *v = !*v);
                 }
-                InputEvent::Focus => scene.borrow_mut().set_kind(bg, surface(theme, theme.hover)),
-                InputEvent::Blur => scene
-                    .borrow_mut()
-                    .set_kind(bg, surface(theme, theme.surface)),
+                InputEvent::Focus => {
+                    state.set(HOVERED);
+                }
+                InputEvent::Blur => {
+                    state.set(RESTING);
+                }
                 _ => {}
             }
         });
@@ -740,10 +856,24 @@ impl Ui {
                 .clamp(0., 1.);
             (min as f64 + fraction * span).clamp(min as f64, max as f64) as f32
         };
-        let (root, bg) = self.control(parent, width, self.theme.control_height);
+        let theme = self.theme_scope();
+        let height = theme.number_untracked(tok::CONTROL_HEIGHT);
+        let (root, bg, state) = self.control(parent, width, height, tok::INPUT_BG);
         let dimensions = self.observe_content_size(root);
-        let fill = self.rect(root, self.theme.accent, 0., 4., 8., 16.);
-        let knob = self.rect(root, self.theme.text, 10., 20., 8., 8.);
+        let fill = self.rect(root, theme.color_untracked(tok::ACCENT), 0., 4., 8., 16.);
+        let knob = self.rect(
+            root,
+            theme.color_untracked(tok::TEXT_PRIMARY),
+            10.,
+            20.,
+            8.,
+            8.,
+        );
+        self.theme_rects(
+            root,
+            theme,
+            &[(fill, tok::ACCENT), (knob, tok::TEXT_PRIMARY)],
+        );
         let mut sem = SemanticNode::new(Role::Slider, label);
         sem.min = Some(min as f64);
         sem.max = Some(max as f64);
@@ -784,7 +914,6 @@ impl Ui {
                 .update(root, |n| n.numeric_value = Some(val as f64));
         });
         let scene = self.scene.clone();
-        let theme = self.theme;
         let mut dragging = false;
         self.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Target {
@@ -861,12 +990,12 @@ impl Ui {
                         cx.prevent_default();
                     }
                 }
-                InputEvent::Focus => scene.borrow_mut().set_kind(bg, surface(theme, theme.hover)),
+                InputEvent::Focus => {
+                    state.set(HOVERED);
+                }
                 InputEvent::Blur => {
                     dragging = false;
-                    scene
-                        .borrow_mut()
-                        .set_kind(bg, surface(theme, theme.surface));
+                    state.set(RESTING);
                 }
                 _ => {}
             }
@@ -880,9 +1009,11 @@ impl Ui {
         value: Signal<f32>,
         width: f32,
     ) -> NodeId {
-        let (root, bg) = self.control(parent, width, 8.);
+        let (root, bg, _) = self.control(parent, width, 8., tok::INPUT_BG);
         let dimensions = self.observe_content_size(root);
-        let fill = self.rect(root, self.theme.accent, 0., 8., 0., 0.);
+        let theme = self.theme_scope();
+        let fill = self.rect(root, theme.color_untracked(tok::ACCENT), 0., 8., 0., 0.);
+        self.theme_rects(root, theme, &[(fill, tok::ACCENT)]);
         let mut sem = SemanticNode::new(Role::Progress, label);
         sem.min = Some(0.);
         sem.max = Some(1.);
@@ -974,6 +1105,57 @@ impl Ui {
         self.storage.bounds_geometry_revision.set(None);
         signal
     }
+    /// Run `f` once after the next frame preparation lays out, before the
+    /// frame is drawn, whether or not the layout changed.
+    pub(crate) fn after_layout(&self, f: Box<dyn FnOnce()>) {
+        self.storage.after_layout.borrow_mut().push(f);
+    }
+    /// Run `f` after every layout pass that changes the layout, until `node`
+    /// is removed.
+    pub(crate) fn on_layout(&self, node: NodeId, f: Box<dyn FnMut()>) {
+        self.storage
+            .layout_listeners
+            .borrow_mut()
+            .entry(node)
+            .or_default()
+            .push(Rc::new(RefCell::new(f)));
+    }
+    /// Whether any after-layout work ran.
+    fn run_after_layout(&self) -> bool {
+        let pending = std::mem::take(&mut *self.storage.after_layout.borrow_mut());
+        if pending.is_empty() {
+            return false;
+        }
+        self.runtime.batch(|| {
+            for f in pending {
+                f();
+            }
+        });
+        true
+    }
+    fn run_layout_listeners(&self) {
+        let listeners: Vec<(NodeId, LayoutListener)> = {
+            let listeners = self.storage.layout_listeners.borrow();
+            if listeners.is_empty() {
+                return;
+            }
+            listeners
+                .iter()
+                .flat_map(|(node, list)| list.iter().map(|f| (*node, f.clone())))
+                .collect()
+        };
+        self.runtime.batch(|| {
+            for (node, listener) in listeners {
+                // One an earlier listener removed stays quiet; one already
+                // running (it reentered a layout pass) is not called again.
+                if self.scene.borrow().contains(node)
+                    && let Ok(mut f) = listener.try_borrow_mut()
+                {
+                    f();
+                }
+            }
+        });
+    }
     /// Inform retained media that its native window can currently present.
     /// Headless hosts default to presented; hidden/suspended hosts should set false.
     pub fn set_presented(&self, presented: bool) {
@@ -1021,7 +1203,10 @@ impl Ui {
             let geometry_changed =
                 self.storage.bounds_geometry_revision.get() != Some(geometry_revision);
             if !layout_changed && !geometry_changed {
-                return Ok(());
+                if !self.run_after_layout() {
+                    return Ok(());
+                }
+                continue;
             }
             let hidden_focus = self
                 .input
@@ -1103,7 +1288,9 @@ impl Ui {
                 for editor in editors {
                     editor.refresh_if_resized();
                 }
+                self.run_layout_listeners();
             }
+            self.run_after_layout();
             // Internal geometry bindings are constrained by their viewport.
             // A second pass also prepares editors mounted by virtual rows.
         }
@@ -1125,10 +1312,26 @@ impl Ui {
             editor.refresh();
         }
     }
+    /// Whether `id` is a text editor's root (an input or text area).
+    pub fn is_editor(&self, id: NodeId) -> bool {
+        self.storage.editors.borrow().contains_key(&id)
+    }
     pub fn focused_editor(&self) -> Option<EditorHandle> {
         self.input
             .focused()
             .and_then(|id| self.storage.editors.borrow().get(&id).cloned())
+    }
+    /// The editor whose root is `node`, if it is one.
+    pub fn editor(&self, node: NodeId) -> Option<EditorHandle> {
+        self.storage.editors.borrow().get(&node).cloned()
+    }
+    /// What the last press in a `View::window_drag` region asked of the
+    /// window, once: the desktop host takes it after each pointer press.
+    pub fn take_window_gesture(&self) -> Option<WindowGesture> {
+        self.storage.window_gesture.take()
+    }
+    pub(crate) fn request_window_gesture(&self, gesture: WindowGesture) {
+        self.storage.window_gesture.set(Some(gesture));
     }
     pub fn dispatch(&mut self, event: InputEvent) -> crate::input::DispatchResult {
         self.try_dispatch(event)
@@ -1319,6 +1522,11 @@ impl Ui {
             self.storage.content_sizes.borrow_mut().remove(&id);
             self.storage.observed_bounds.borrow_mut().remove(&id);
             self.storage.observed_visibility.borrow_mut().remove(&id);
+            if !self.storage.layout_listeners.borrow().is_empty() {
+                // Dropped outside the borrow: a listener's captures may reenter.
+                let listeners = self.storage.layout_listeners.borrow_mut().remove(&id);
+                drop(listeners);
+            }
             self.input.unregister(id);
             self.semantics.borrow_mut().remove(id);
         }
@@ -1382,23 +1590,30 @@ impl Ui {
         multiline: bool,
         styled: bool,
     ) -> EditorHandle {
+        let theme = self.theme_scope();
         let height = if multiline {
             156.
         } else {
-            self.theme.control_height
+            theme.number_untracked(tok::CONTROL_HEIGHT)
         };
-        let (root, bg) = if styled {
+        let (root, bg, bg_state) = if styled {
             let mut style = fixed(width, height);
+            // As a CSS form control in flex: its width is a fixed intrinsic
+            // one, never its text's (which scrolls inside it); a stretching
+            // parent widens it, and a row too narrow for it shrinks it, to
+            // nothing if need be.
+            style.intrinsic_width = true;
+            style.flex_shrink = 1.;
             style.padding_edges = Some(Insets {
                 left: 8.,
                 right: 8.,
                 top: 6.,
                 bottom: 6.,
             });
-            (self.container(parent, Layout::Overlay, style), None)
+            (self.container(parent, Layout::Overlay, style), None, None)
         } else {
-            let (root, bg) = self.control(parent, width, height);
-            (root, Some(bg))
+            let (root, bg, state) = self.control(parent, width, height, tok::INPUT_BG);
+            (root, Some(bg), Some(state))
         };
         let mut clip_style = fixed(width - 16., height - 12.);
         clip_style.clip = true;
@@ -1422,9 +1637,9 @@ impl Ui {
         let preedit_nodes = Rc::new(RefCell::new(Vec::new()));
         let caret = self.rect(
             viewport,
-            self.theme.text,
+            theme.color_untracked(tok::TEXT_PRIMARY),
             1.,
-            self.theme.font_size * 1.4,
+            theme.number_untracked(tok::FONT_SIZE_MD) * 1.4,
             0.,
             0.,
         );
@@ -1452,10 +1667,9 @@ impl Ui {
         let draw_reveal_caret = reveal_caret.clone();
         let scroll_limit = Rc::new(Cell::new((0f32, 0f32)));
         let draw_scroll_limit = scroll_limit.clone();
-        let theme = self.theme;
         let typography = Rc::new(RefCell::new((
-            theme.text,
-            theme.font_size,
+            theme.color_untracked(tok::TEXT_PRIMARY),
+            theme.number_untracked(tok::FONT_SIZE_MD),
             FontStyle::default(),
         )));
         let wrap = Rc::new(Cell::new(false));
@@ -1474,6 +1688,8 @@ impl Ui {
         let draw_read_only = read_only.clone();
         let gesture = Rc::new(EditorDrag::default());
         let draw_gesture = gesture.clone();
+        let hint = Rc::new(EditorHint::default());
+        let draw_hint = hint.clone();
         let refresh: Rc<dyn Fn()> = Rc::new(move || {
             let e = edit.borrow();
             let selection = e.selection();
@@ -1501,9 +1717,10 @@ impl Ui {
                 Rect::new(0., 0., bounds.width, bounds.height),
                 root_style.clone(),
                 s.text_shaper_revision(),
+                s.content_insets(root),
             ));
             let padding = if styled {
-                s.padding(root)
+                s.content_insets(root)
             } else {
                 Insets {
                     left: 8.,
@@ -1521,16 +1738,27 @@ impl Ui {
                 s.set_style(bg, fixed(bounds.width, bounds.height));
             }
             let (color, size, font) = draw_typography.borrow().clone();
+            // Empty, the text node shows the placeholder instead (laid out
+            // as the empty text it stands for: it sizes nothing).
+            let placeholder = draw_hint.placeholder.borrow();
+            let shown = placeholder.as_ref().filter(|_| display.is_empty());
+            let (shown_text, shown_color) = match shown {
+                Some((hint, hint_color)) => (
+                    hint.as_ref(),
+                    hint_color.unwrap_or(theme.color_untracked(tok::TEXT_TERTIARY)),
+                ),
+                None => (display.as_ref(), color),
+            };
             // Selection and policy changes retain the same immutable paint text.
             let paint_text = match s.kind(text) {
-                NodeKind::Text { text, .. } if text.as_ref() == display.as_ref() => text.clone(),
-                _ => std::sync::Arc::from(display.as_ref()),
+                NodeKind::Text { text, .. } if text.as_ref() == shown_text => text.clone(),
+                _ => std::sync::Arc::from(shown_text),
             };
             s.set_kind(
                 text,
                 NodeKind::Text {
                     text: paint_text,
-                    color,
+                    color: shown_color,
                     font_size: size,
                 },
             );
@@ -1586,7 +1814,15 @@ impl Ui {
                 (line_height - inner_height) / 2.
             };
             s.set_style(caret, fixed(1., line_height));
-            let mut text_style = fixed(wrap_width.unwrap_or(tw.max(inner_width) + 2.), th);
+            let mut text_style = fixed(
+                wrap_width.unwrap_or(tw.max(inner_width) + 2.),
+                // A wrapped placeholder may take more lines than the text.
+                if shown.is_some() {
+                    th.max(inner_height)
+                } else {
+                    th
+                },
+            );
             text_style.text_wrap = draw_wrap.get();
             s.set_style(text, text_style);
             s.set_transform(
@@ -1639,7 +1875,7 @@ impl Ui {
             while nodes.len() < rects.len() {
                 nodes.push(s.append(
                     selection_layer,
-                    NodeKind::Rect(theme.selection),
+                    NodeKind::Rect(theme.color_untracked(tok::SELECTION)),
                     Style::default(),
                 ));
             }
@@ -1667,7 +1903,7 @@ impl Ui {
             while underline.len() < lines.len() {
                 underline.push(s.append(
                     preedit_layer,
-                    surface(theme, theme.accent),
+                    surface(&theme, theme.color_untracked(tok::ACCENT)),
                     Style::default(),
                 ));
             }
@@ -1675,12 +1911,14 @@ impl Ui {
                 s.set_style(*id, fixed(w, 1.));
                 s.set_transform(*id, Transform { x, y });
             }
-            sem.borrow_mut().update_text_input(
+            let mut semantics = sem.borrow_mut();
+            semantics.update_text_input(
                 root,
                 e.text(),
                 (selection.anchor, selection.focus),
                 draw_read_only.get(),
             );
+            semantics.set_placeholder(root, placeholder.as_ref().map(|(hint, _)| hint.as_ref()));
         });
         // Geometry refresh may make an existing stationary drag scrollable.
         // The weak callback avoids refresh -> arm -> tick -> refresh ownership cycles.
@@ -1709,6 +1947,8 @@ impl Ui {
             text,
             scene: self.scene.clone(),
             geometry,
+            position: position.clone(),
+            hint: hint.clone(),
         };
         self.storage
             .editors
@@ -1929,6 +2169,7 @@ impl Ui {
         };
         *interaction_refresh.borrow_mut() = Some(Rc::downgrade(&arm));
         let draw = refresh.clone();
+        let window_blurred = Cell::new(false);
         self.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Target {
                 return;
@@ -1978,18 +2219,33 @@ impl Ui {
             match event {
                 InputEvent::Focus => {
                     *focused.borrow_mut() = true;
-                    if let Some(bg) = bg {
-                        scene.borrow_mut().set_kind(bg, surface(theme, theme.hover));
+                    if let Some(state) = &bg_state {
+                        state.set(HOVERED);
+                    }
+                    // Focus coming to it, not its window coming back.
+                    if hint.select_on_focus.get() && !window_blurred.replace(false) {
+                        let mut edit = editor.borrow_mut();
+                        edit.select_all();
+                        position.set(TextPosition {
+                            byte_offset: edit.selection().focus,
+                            affinity: TextAffinity::After,
+                        });
+                        // The press that focused it selects no range of its own.
+                        gesture.cancel();
                     }
                 }
                 InputEvent::Blur => {
+                    // Still focused: its window went to the back.
+                    window_blurred.set(
+                        input_storage
+                            .upgrade()
+                            .is_some_and(|storage| storage.input.focused() == Some(root)),
+                    );
                     *focused.borrow_mut() = false;
                     gesture.cancel();
                     editor.borrow_mut().cancel_preedit();
-                    if let Some(bg) = bg {
-                        scene
-                            .borrow_mut()
-                            .set_kind(bg, surface(theme, theme.surface));
+                    if let Some(state) = &bg_state {
+                        state.set(RESTING);
                     }
                 }
                 InputEvent::Scroll {
@@ -2464,10 +2720,39 @@ fn normalize_text(text: &str, multiline: bool) -> std::borrow::Cow<'_, str> {
     Cow::Owned(canonical)
 }
 
-fn surface(theme: Theme, color: Color) -> NodeKind {
+/// A legacy control's background states (`Ui::control`).
+const RESTING: u8 = 0;
+const HOVERED: u8 = 1;
+const ACCENTED: u8 = 2;
+impl Ui {
+    /// Keep plain rectangles' colours on their tokens as the theme changes.
+    fn theme_rects(
+        &mut self,
+        owner: NodeId,
+        theme: Rc<ThemeScope>,
+        rects: &[(NodeId, ColorToken)],
+    ) {
+        let rects = rects.to_vec();
+        let scene = self.scene.clone();
+        let mut first = true;
+        self.bind(owner, move || {
+            let colors: Vec<_> = rects.iter().map(|(_, t)| theme.color(*t)).collect();
+            if std::mem::take(&mut first) {
+                return;
+            }
+            let mut scene = scene.borrow_mut();
+            for ((node, _), color) in rects.iter().zip(colors) {
+                if scene.contains(*node) {
+                    scene.set_kind(*node, NodeKind::Rect(color));
+                }
+            }
+        });
+    }
+}
+fn surface(theme: &ThemeScope, color: Color) -> NodeKind {
     NodeKind::Quad(crate::scene::QuadStyle {
         fill: color,
-        radius: theme.radius,
+        radius: theme.number(tok::RADIUS_MD),
         border_color: Color(255, 255, 255, 18),
         border_width: 1.,
         shadow: None,
@@ -2610,7 +2895,7 @@ mod ownership_tests {
 
 fn allocated_content_size(scene: &Scene, node: NodeId) -> (f32, f32) {
     let bounds = scene.bounds(node);
-    let padding = scene.padding(node);
+    let padding = scene.content_insets(node);
     (
         (bounds.width - padding.left - padding.right).max(0.),
         (bounds.height - padding.top - padding.bottom).max(0.),
@@ -2783,7 +3068,7 @@ mod layout_feedback_tests {
 
 fn slider_content_bounds(scene: &Scene, root: NodeId) -> (f32, f32) {
     let bounds = scene.bounds(root);
-    let padding = scene.padding(root);
+    let padding = scene.content_insets(root);
     (
         bounds.x + padding.left,
         (bounds.width - padding.left - padding.right).max(0.),

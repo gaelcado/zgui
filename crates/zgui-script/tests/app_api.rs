@@ -131,6 +131,59 @@ fn terminal_sessions_outlive_reloads_and_end_when_closed() {
 }
 
 #[test]
+fn options_after_a_lookup_still_say_how_the_session_starts() {
+    // A list reading every pane's state looks a session up before the code
+    // owning it gives its command: the command still applies.
+    let mut h = Harness::inline(
+        r##"local first = ui.term("p1")
+        local _ = first.title
+        local term = ui.term("p1", { command = "attach p1" })
+        return ui.terminal { term = term, w = 200, h = 100 }"##,
+    );
+    let term = terminal(&mut h);
+    assert_eq!(term.options().command.as_deref(), Some("attach p1"));
+    // Once started, a terminal keeps how it started.
+    term.attach(std::rc::Rc::new(NoBackend));
+    assert!(!term.set_options(zgui::terminal::TerminalOptions::default()));
+    assert_eq!(term.options().command.as_deref(), Some("attach p1"));
+}
+#[test]
+fn reading_a_terminal_field_follows_that_field_alone() {
+    // A list of panes reads titles; a resize (columns, rows) must not rerun it.
+    let mut h = Harness::inline(
+        r##"local term = ui.term("p1", { command = "zsh" })
+        local runs = ui.state("runs", 0)
+        ui.effect(function()
+            local _ = term.title
+            runs:set(runs:peek() + 1)
+        end)
+        return ui.column {
+            ui.terminal { term = term, w = 200, h = 100 },
+            ui.text { id = "runs", function() return tostring(runs:get()) end },
+        }"##,
+    );
+    let term = terminal(&mut h);
+    h.settle();
+    let before = h.text("runs");
+    term.update_state(|state| {
+        state.columns = 120;
+        state.rows = 40;
+    });
+    h.settle();
+    assert_eq!(h.text("runs"), before, "a resize reran a title reader");
+    term.update_state(|state| state.title = "vim".into());
+    h.settle();
+    assert_ne!(h.text("runs"), before, "a title change reruns it");
+}
+struct NoBackend;
+impl zgui::terminal::TerminalBackend for NoBackend {
+    fn run(&self, _: zgui::terminal::TerminalCommand) {}
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
 fn terminal_handlers_follow_the_latest_run() {
     let mut h = Harness::inline(
         r##"local log = ui.state("log", "")

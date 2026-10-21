@@ -188,6 +188,8 @@ struct Inner {
     id: u64,
     options: WebViewOptions,
     state: Signal<WebViewState>,
+    /// The pointer over the page, in points from its top left.
+    pointer: Signal<Option<(f32, f32)>>,
     attached: Signal<bool>,
     backend: RefCell<Option<Rc<dyn WebViewBackend>>>,
     queued: RefCell<Vec<WebViewCommand>>,
@@ -245,6 +247,7 @@ impl WebView {
             id,
             options,
             state: runtime.signal(WebViewState::default()),
+            pointer: runtime.signal(None),
             attached: runtime.signal(false),
             backend: RefCell::new(None),
             queued: RefCell::new(Vec::new()),
@@ -287,6 +290,25 @@ impl WebView {
     }
     pub fn focused(&self) -> bool {
         self.0.state.with(|state| state.focused)
+    }
+    /// Where the pointer is over the page, in points from its top left;
+    /// `None` outside it (reactive, its own signal: following it does not
+    /// rerun what reads the rest of the state). Over the page zgui hears no
+    /// pointer moves (its nodes had their leave), so this is how to follow
+    /// the pointer there, as `Terminal::pointer` is over a terminal.
+    pub fn pointer(&self) -> Option<(f32, f32)> {
+        self.0.pointer.get()
+    }
+    /// Report the pointer (the platform's report; call from a delivery).
+    pub fn set_pointer(&self, pointer: Option<(f32, f32)>) {
+        if self.0.pointer.with_untracked(|p| *p != pointer) {
+            self.0.pointer.set(pointer);
+        }
+    }
+    /// Whether a report would change anything: something follows the
+    /// pointer, or it has one to clear.
+    pub(crate) fn wants_pointer(&self) -> bool {
+        self.0.pointer.is_observed() || self.0.pointer.with_untracked(Option::is_some)
     }
     /// Whether a platform page exists for it (reactive).
     pub fn is_attached(&self) -> bool {

@@ -1,0 +1,73 @@
+-- The app's state: every module that requires this one gets the same
+-- States. All of it survives a reload (ui.state keeps it by key, and these
+-- keys are this module's own), and the host saves the layout part for the
+-- next launch (see saved.luau).
+local layout = require("@lib/layout")
+
+export type Tab = { id: string, root: layout.Tree }
+export type Kind = "pane" | "tab"
+-- A pane's edge a drag would put something against.
+export type Zone = "left" | "right" | "top" | "bottom"
+-- Where a drag would land over a pane: `{ target, zone, kind, id }`, or {}.
+export type Drop = { target: string?, zone: Zone?, kind: Kind?, id: string? }
+-- What is being dragged: `{ kind, id }`, or {}.
+export type Dragging = { kind: Kind?, id: string? }
+-- A drag's payload.
+export type Payload = { kind: Kind, id: string }
+-- What a run saves for the next launch (saved.luau), as read back.
+export type SavedLayout = {
+	version: number?,
+	tabs: { Tab }?,
+	active: string?,
+	focus: { [string]: string }?,
+	ratios: { [string]: number }?,
+	zoom: { [string]: string }?,
+	kinds: { [string]: string }?,
+	next_id: number?,
+	-- Browser panes' addresses and terminal panes' directories, by pane.
+	pages: { [string]: string }?,
+	dirs: { [string]: string }?,
+}
+-- Where a dragged pane would open as a tab of its own: `{ pane, before }`
+-- (the tab it goes before, "" for the end), or {}.
+export type Slot = { pane: string?, before: string? }
+
+local M = {}
+
+-- What the host (terminal.rs) publishes.
+M.home = ui.shared("home", ""):peek()
+M.launch_dir = ui.shared("launch_dir", ""):peek()
+M.window_radius = ui.shared("window_radius", 10)
+-- The session server's client command: a pane's terminal runs it attached
+-- to its own session.
+M.attach = ui.shared("attach", ""):peek()
+-- The layout the last run saved, or nil.
+M.saved_layout = ui.shared("saved_layout", nil :: SavedLayout?)
+
+M.next_id = ui.state("next_id", 1)
+-- The tabs, in strip order.
+M.tabs = ui.state("tabs", {} :: { Tab })
+M.active = ui.state("active", "")
+-- Tab id -> its focused pane.
+M.focus = ui.state("focus", {} :: { [string]: string })
+-- Split id -> the first side's share (0 to 1).
+M.ratios = ui.state("ratios", {} :: { [string]: number })
+-- Tab id -> the pane shown alone.
+M.zoom = ui.state("zoom", {} :: { [string]: string })
+-- Pane id -> "browser" for a web page (a terminal otherwise). A pane keeps
+-- its kind for life.
+M.kinds = ui.state("kinds", {} :: { [string]: string })
+-- "pane:<id>" or "tab:<id>" awaiting confirmation to close.
+M.confirm = ui.state("confirm", "")
+M.hovered_tab = ui.state("hovered_tab", "")
+M.drop = ui.state("drop", {} :: Drop)
+M.dragging = ui.state("dragging", {} :: Dragging)
+-- The tab a dragged pane hovers (dropping moves it there).
+M.tab_drop = ui.state("tab_drop", "")
+M.tab_slot = ui.state("tab_slot", {} :: Slot)
+-- Browser panes waiting to have their address bar focused.
+M.address_focus = ui.state("address_focus", "")
+-- The agents sidebar is open.
+M.sidebar = ui.state("sidebar", true)
+
+return M

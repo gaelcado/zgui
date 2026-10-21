@@ -14,6 +14,7 @@ mod metal_frame;
 #[cfg(target_os = "macos")]
 mod native_surface;
 mod planes;
+pub mod present_log;
 mod surface;
 mod upload;
 pub use surface::PresentationStatus;
@@ -964,6 +965,10 @@ struct LayerPresent {
 }
 #[cfg(target_os = "macos")]
 impl LayerPresent {
+    /// For `ZGUI_PRESENT_LOG`: which plane this presents.
+    fn plane(&self) -> &'static str {
+        if self.plain_only { "overlay" } else { "base" }
+    }
     /// Per surface, whether the layer may still show it: the one on screen
     /// and any queued after it. Without word from the layer, the two latest.
     fn busy(&self) -> Vec<bool> {
@@ -5112,6 +5117,12 @@ impl GpuRenderer {
                 None,
             ));
             index = Some(present.buffers.len() - 1);
+            present_log::log(|| {
+                format!(
+                    "new-surface count={} budget={budget}",
+                    present.buffers.len()
+                )
+            });
         }
         // Still none: the layer moves on by its next refresh.
         let started = std::time::Instant::now();
@@ -5124,13 +5135,31 @@ impl GpuRenderer {
                 index = pick(present);
             }
         }
+        let waited = started.elapsed();
+        let forced = index.is_none();
         let index = index.unwrap_or_else(|| {
             (0..present.buffers.len())
                 .find(|&i| Some(i) != present.shown)
                 .expect("more than one surface")
         });
+        if forced || waited.as_micros() > 500 {
+            present_log::log(|| {
+                format!(
+                    "{} acquire index={index} waited_us={} forced_busy={forced} buffers={}",
+                    present.plane(),
+                    waited.as_micros(),
+                    present.buffers.len()
+                )
+            });
+        }
         let held = present.buffers[index].1;
         let latest = present.shown.and_then(|shown| present.buffers[shown].1);
+        present_log::log(|| {
+            format!(
+                "{} draw whole={whole} held={held:?} latest={latest:?}",
+                present.plane()
+            )
+        });
         present.catch_up = match (whole, latest) {
             (true, _) | (false, None) => Vec::new(),
             (false, Some(latest)) if held == Some(latest) => Vec::new(),
@@ -5202,16 +5231,29 @@ impl GpuRenderer {
             });
         }
         before_present();
-        let layer = present.layer.as_mut().expect("attached above");
-        let (buffer, opaque) = (&present.buffers[index].0, self.background.3 == 255);
-        if present
+        let plane = present.plane();
+        let opaque = self.background.3 == 255;
+        let plain = present
             .resized_at
             .is_some_and(|at| at.elapsed() < RESIZE_SETTLE)
             || present.plain_only
             || present
                 .plain_until
-                .is_some_and(|until| std::time::Instant::now() < until)
-        {
+                .is_some_and(|until| std::time::Instant::now() < until);
+        present_log::log(|| {
+            format!(
+                "{} present frame={} index={index} held={:?} path={} full_rate={} opaque={opaque} catch_up={}",
+                plane,
+                present.frame + 1,
+                present.buffers[index].1,
+                if plain { "plain" } else { "show" },
+                present.full_rate,
+                present.catch_up.len()
+            )
+        });
+        let layer = present.layer.as_mut().expect("attached above");
+        let buffer = &present.buffers[index].0;
+        if plain {
             layer.show_plain(buffer, opaque);
         } else {
             layer.show(buffer, opaque, present.full_rate);
@@ -5349,6 +5391,10 @@ impl GpuRenderer {
     /// its last frame; the next frame recreates whatever it uses. Call when a
     /// window has stopped presenting for a while.
     pub fn trim(&mut self) {
+        present_log::log(|| {
+            let plane = self.layer_present.as_ref().map_or("none", |p| p.plane());
+            format!("{plane} trim")
+        });
         self.flush_pending();
         self.blur_scratch = None;
         // Effect slots draw again from their layers when next damaged.

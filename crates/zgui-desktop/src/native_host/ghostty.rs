@@ -302,8 +302,12 @@ extern "C" fn action(
                 _ if report.progress < 0 => Some(-1.),
                 _ => Some(report.progress as f32 / 100.),
             };
+            let failed = report.state == g::GHOSTTY_PROGRESS_STATE_ERROR;
             deliver(surface, move |term| {
-                term.update_state(|state| state.progress = progress);
+                term.update_state(|state| {
+                    state.progress = progress;
+                    state.progress_error = failed;
+                });
             });
             true
         }
@@ -531,14 +535,13 @@ fn refresh_process(surface: usize) {
     } else {
         crate::terminal_process::resolve(pid as u32)
     };
-    let (process, pid) = match resolved {
+    let (process, pid, status) = match resolved {
         Some(front) => {
-            let key = (front.name.clone(), front.pid);
-            if view.ivars().front.borrow().as_ref() == Some(&key) {
+            if view.ivars().front.borrow().as_ref() == Some(&front) {
                 return;
             }
-            *view.ivars().front.borrow_mut() = Some(key);
-            (front.name, u64::from(front.pid))
+            *view.ivars().front.borrow_mut() = Some(front.clone());
+            (front.name, u64::from(front.pid), front.status)
         }
         None => {
             if pid == view.ivars().pid.replace(pid) {
@@ -549,20 +552,26 @@ fn refresh_process(surface: usize) {
             } else {
                 process_name(pid as i32)
             };
-            (process, pid)
+            (process, pid, None)
         }
     };
     let term = view.ivars().term.clone();
     zgui::native_view::post(move || {
         if let Some(term) = term.upgrade() {
+            let changed = term
+                .state()
+                .with_untracked(|state| state.process != process || state.pid != pid as u32);
             term.update_state(|state| {
                 state.process = process.clone();
                 state.pid = pid as u32;
+                state.status = status;
             });
-            term.emit(TerminalEvent::ProcessChanged {
-                process,
-                pid: pid as u32,
-            });
+            if changed {
+                term.emit(TerminalEvent::ProcessChanged {
+                    process,
+                    pid: pid as u32,
+                });
+            }
         }
     });
 }
@@ -756,12 +765,22 @@ pub(crate) struct ViewState {
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     pid: Cell<u64>,
     /// What a process resolver last saw in front (name, pid).
-    front: RefCell<Option<(String, u32)>>,
+    front: RefCell<Option<crate::terminal_process::ForegroundProcess>>,
     /// Focus asked for before the view was in a window (a tab switching in).
     pending_focus: Cell<bool>,
     /// The size Ghostty was last given, in points.
     size: Cell<(f64, f64)>,
+    /// When the view last took a new size, and the size it was asked for
+    /// since, waiting (`set_frame_size`).
+    resized_at: Cell<Option<std::time::Instant>>,
+    wanted: Cell<Option<(f64, f64)>>,
 }
+/// How often a size that changes every frame (an animated layout, a window
+/// drag) reaches the view: each one makes Ghostty draw into new surfaces and
+/// reflow its grid. In between, the view keeps its size where its pane
+/// placed it (the cut views clip it to the pane); the last size always
+/// arrives.
+const RESIZE_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 define_class!(
     #[unsafe(super(NSView, NSResponder, NSObject))]
@@ -793,8 +812,10 @@ define_class!(
         }
         #[unsafe(method(setFrameSize:))]
         fn set_frame_size(&self, size: NSSize) {
-            let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
-            self.size_changed();
+            let queued = self.ivars().wanted.replace(Some((size.width, size.height))).is_some();
+            if !queued {
+                self.take_size();
+            }
         }
         #[unsafe(method(viewDidChangeBackingProperties))]
         fn did_change_backing(&self) {
@@ -1103,6 +1124,8 @@ impl TerminalView {
             front: RefCell::new(None),
             pending_focus: Cell::new(false),
             size: Cell::new((0., 0.)),
+            resized_at: Cell::new(None),
+            wanted: Cell::new(None),
         });
         // A non-zero first size: Ghostty sizes its first frame from it.
         let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(800., 600.));
@@ -1173,6 +1196,31 @@ impl TerminalView {
     fn backing_scale(&self) -> f64 {
         self.window()
             .map_or(2., |window| window.backingScaleFactor())
+    }
+    /// Take the size asked for (`set_frame_size`), or wait out the rest of
+    /// `RESIZE_EVERY` since the last and take the latest then.
+    fn take_size(&self) {
+        let Some((width, height)) = self.ivars().wanted.get() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if let Some(at) = self.ivars().resized_at.get()
+            && now - at < RESIZE_EVERY
+        {
+            let view = self.retain();
+            after((RESIZE_EVERY - (now - at)).as_secs_f64(), move || {
+                view.take_size()
+            });
+            return;
+        }
+        self.ivars().wanted.set(None);
+        if self.frame().size == NSSize::new(width, height) {
+            return;
+        }
+        self.ivars().resized_at.set(Some(now));
+        let size = NSSize::new(width, height);
+        let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+        self.size_changed();
     }
     fn size_changed(&self) {
         let size = self.frame().size;

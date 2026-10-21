@@ -93,10 +93,7 @@ impl InputDispatcher {
             return;
         }
         self.cancel_pending_keys();
-        let hovered = self.state.borrow_mut().hovered.take();
-        if let Some(hovered) = hovered.filter(|id| scene.borrow().contains(*id)) {
-            self.route(scene, hovered, InputEvent::PointerLeave);
-        }
+        self.set_hover(scene, None);
         if !self.enabled(&scene.borrow(), source) {
             return;
         }
@@ -227,10 +224,7 @@ impl InputDispatcher {
         }
         if drop {
             let hovered = self.hit_target(&scene.borrow(), drag.x, drag.y);
-            self.state.borrow_mut().hovered = hovered;
-            if let Some(hovered) = hovered {
-                self.route(scene, hovered, InputEvent::PointerEnter);
-            }
+            self.set_hover(scene, hovered);
         }
     }
     pub(super) fn dispatch_drag(&self, scene: &Rc<RefCell<Scene>>, event: &InputEvent) -> bool {

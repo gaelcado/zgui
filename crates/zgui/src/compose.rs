@@ -2,11 +2,12 @@
 //! reactive properties update individual nodes without rebuilding their component.
 use crate::{
     compose_style::{Typography, Variants, mount_style_with_intrinsic},
-    input::{EventContext, EventPhase, InputEvent},
+    input::{EventContext, EventPhase, InputEvent, PointerButton},
     reactive::{Runtime, ServiceScope, Signal},
     scene::{Layout, NodeId, NodeKind},
     semantics::{Role, SemanticNode},
     style::{Styled, Styles},
+    theme::tok,
     widgets::{Ui, WeakUi},
 };
 use std::{
@@ -100,6 +101,8 @@ pub(crate) struct Environment {
     portal: Option<(NodeId, Signal<bool>)>,
     menu: Option<Rc<crate::compose_menu::MenuContext>>,
     measure: crate::rich_text::TextMeasure,
+    /// The theme scope styles in this subtree resolve tokens from.
+    pub(crate) theme: Rc<crate::theme::ThemeScope>,
 }
 /// Mount-time component context. State is allocated once; there are no positional hooks.
 pub struct Context {
@@ -155,6 +158,11 @@ impl Context {
     }
     pub fn frames(&self) -> crate::frame::FrameClock {
         (*self.service::<crate::frame::FrameClock>()).clone()
+    }
+    /// The theme scope this component mounts in: read tokens from it (in an
+    /// effect, to follow theme changes), or make a child scope.
+    pub fn theme(&self) -> Rc<crate::theme::ThemeScope> {
+        self.environment.theme.clone()
     }
     /// Captures the caller's providers. The receiver owns the mounted content;
     /// visual styles inherit at the insertion point, while lexical captures stay intact.
@@ -279,7 +287,14 @@ pub struct View {
     trigger_id: Option<String>,
     menu_trigger: Option<Signal<bool>>,
     menu_checked: Option<bool>,
+    contents: bool,
     mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
+    placeholder: Option<Box<dyn FnMut() -> String>>,
+    placeholder_color: Option<Box<dyn FnMut() -> crate::scene::Color>>,
+    select_on_focus: Option<bool>,
+    window_drag: bool,
+    /// Conditional children (`child_when`), mounted after the others.
+    conditional: Vec<RegionBuilder>,
 }
 impl View {
     /// Merge `styles` over this view's own (the crate's builders use it).
@@ -365,8 +380,26 @@ impl View {
             trigger_id: None,
             menu_trigger: None,
             menu_checked: None,
+            contents: false,
             mounted: Vec::new(),
+            placeholder: None,
+            placeholder_color: None,
+            select_on_focus: None,
+            window_drag: false,
+            conditional: Vec::new(),
         }
+    }
+    /// Lay this container out as its last child would in its place, as CSS
+    /// `display: contents` does: the child's size, flex and position
+    /// properties (percentages and `absolute` insets against this view's
+    /// parent) are this view's, and it fills this view's box. Of this
+    /// view's own styles only margins (added to the child's), paint and
+    /// clipping apply. Children before the last are placed over it at its
+    /// origin. For a region that shows one view at a time (`switch`) and
+    /// should not be a layout box of its own; see `Scene::set_contents`.
+    pub fn contents(mut self) -> Self {
+        self.contents = true;
+        self
     }
     /// Show an interactive overlay scrollbar on a scroll viewport or virtual list.
     pub fn scrollbar(mut self, visible: bool) -> Self {
@@ -400,6 +433,57 @@ impl View {
     }
     pub fn children(mut self, children: impl IntoIterator<Item = View>) -> Self {
         self.children.extend(children);
+        self
+    }
+    /// A child that exists only while `select` returns `Some`: built from
+    /// its value, mounted directly under this view after its other
+    /// children, and removed when it returns `None`. Unlike `switch` it
+    /// adds no region box, so while absent it costs no nodes (only the
+    /// subscription to what `select` reads). A changed value rebuilds the
+    /// child; an equal one keeps it. For overlays such as an error banner
+    /// (an `absolute` child paints over its siblings and takes no room).
+    pub fn child_when<K: PartialEq + Clone + 'static>(
+        mut self,
+        mut select: impl FnMut() -> Option<K> + 'static,
+        mut build: impl FnMut(K, &mut Context) -> View + 'static,
+    ) -> Self {
+        self.conditional
+            .push(Box::new(move |ui: &mut Ui, parent, environment| {
+                let weak = ui.downgrade();
+                let runtime = ui.runtime.clone();
+                let mut selected: Option<K> = None;
+                let mut mounted: Option<NodeId> = None;
+                ui.bind(parent, move || {
+                    let key = select();
+                    if selected == key {
+                        return;
+                    }
+                    let Some(mut ui) = weak.upgrade() else {
+                        return;
+                    };
+                    if !ui.scene.borrow().contains(parent) {
+                        return;
+                    }
+                    runtime.untracked(|| {
+                        let old = mounted.take();
+                        if let Some(key) = key.clone() {
+                            let mut cx = Context::new(runtime.clone(), environment.clone());
+                            let view = build(key, &mut cx);
+                            let mut transaction = MountTransaction::new(&ui, parent);
+                            let node = mount(&mut ui, parent, view, environment.clone());
+                            cx.finish(&mut ui, node);
+                            transaction.commit();
+                            mounted = Some(node);
+                        }
+                        if let Some(old) = old
+                            && ui.scene.borrow().contains(old)
+                        {
+                            ui.remove(old);
+                        }
+                    });
+                    selected = key;
+                });
+            }));
         self
     }
     pub fn id(mut self, id: impl Into<String>) -> Self {
@@ -491,6 +575,51 @@ impl View {
         self.reactive_style = Some(Box::new(style));
         self
     }
+    /// Text an editor shows while it is empty, as HTML's `placeholder`: in
+    /// the editor's typography, coloured the theme's `muted` (see
+    /// `placeholder_color`). It is not part of the value, never changes the
+    /// editor's size, and assistive technology reads it as the
+    /// placeholder. Only editor roots accept this.
+    pub fn placeholder(self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        self.placeholder_when(move || text.clone())
+    }
+    /// A placeholder that follows the reactive values it reads.
+    pub fn placeholder_when(mut self, text: impl FnMut() -> String + 'static) -> Self {
+        self.placeholder = Some(Box::new(text));
+        self
+    }
+    /// The placeholder's colour, instead of the theme's `muted`.
+    pub fn placeholder_color(self, color: crate::scene::Color) -> Self {
+        self.placeholder_color_when(move || color)
+    }
+    /// A placeholder colour that follows the reactive values it reads.
+    pub fn placeholder_color_when(
+        mut self,
+        color: impl FnMut() -> crate::scene::Color + 'static,
+    ) -> Self {
+        self.placeholder_color = Some(Box::new(color));
+        self
+    }
+    /// Select an editor's whole text whenever it takes focus, as a browser's
+    /// address bar does: the first click selects everything, the next places
+    /// the caret (see `EditorHandle::set_select_on_focus`). Only editor
+    /// roots accept this.
+    pub fn select_on_focus(mut self, select: bool) -> Self {
+        self.select_on_focus = Some(select);
+        self
+    }
+    /// Make the view a window drag region, like CSS's
+    /// `-webkit-app-region: drag`: a primary press on it, or on anything
+    /// inside it that does not take input itself, moves the window, and a
+    /// double click zooms or minimizes it as the platform's setting says.
+    /// Buttons, inputs and other focusable or pointer-capturing
+    /// descendants keep their presses. The desktop host performs it (see
+    /// `Ui::take_window_gesture`).
+    pub fn window_drag(mut self) -> Self {
+        self.window_drag = true;
+        self
+    }
     // Wrapper properties refine the component's actual root without an extra layout box.
     fn refine(self, mut inner: View) -> View {
         if self.trigger_id.is_some() {
@@ -525,6 +654,7 @@ impl View {
         if self.focusable.is_some() {
             inner.focusable = self.focusable;
         }
+        inner.contents |= self.contents;
         inner.styles.merge(&self.styles);
         inner.children.extend(self.children);
         fn merge_variant(base: &mut Option<Box<Styles>>, patch: Option<Box<Styles>>) {
@@ -561,7 +691,18 @@ impl View {
         if self.id.is_some() {
             inner.id = self.id;
         }
+        if self.placeholder.is_some() {
+            inner.placeholder = self.placeholder;
+        }
+        if self.placeholder_color.is_some() {
+            inner.placeholder_color = self.placeholder_color;
+        }
+        if self.select_on_focus.is_some() {
+            inner.select_on_focus = self.select_on_focus;
+        }
+        inner.window_drag |= self.window_drag;
         inner.mounted.extend(self.mounted);
+        inner.conditional.extend(self.conditional);
         inner
     }
 }
@@ -594,8 +735,46 @@ pub fn column() -> View {
 pub fn div() -> View {
     column()
 }
+/// Children stacked in one box, each laid out in all of it as CSS grid lays
+/// out items sharing one area: sized against the overlay's own box, aligned
+/// in it by `items` across and `justify` down, and by default stretched to
+/// fill it (`items_stretch().justify_stretch()`), except along an axis a
+/// child sizes itself on. Its size is its largest child's.
 pub fn overlay() -> View {
     View::new(Kind::Container(Layout::Overlay))
+        .items_stretch()
+        .justify_stretch()
+}
+/// A control's default focus ring: an accent border. Where the control has
+/// no border of its own it paints over the control (an inset stroke, taking
+/// no layout room), so focusing never moves its content; otherwise it
+/// colours the control's own border. (Made when first focused.)
+fn focus_ring(styles: &Styles) -> fn() -> Styles {
+    match bordered(styles) {
+        true => || widget_style(|w| &w.focus_recolor),
+        false => || widget_style(|w| &w.focus_ring),
+    }
+}
+/// A menu item's focus: its hover wash and the focus ring, as `focus_ring`.
+fn menu_focus(styles: &Styles) -> fn() -> Styles {
+    match bordered(styles) {
+        true => || widget_style(|w| &w.menu_focus_recolor),
+        false => || widget_style(|w| &w.menu_focus),
+    }
+}
+fn bordered(styles: &Styles) -> bool {
+    styles.border_width.is_some_and(|width| width > 0.)
+        || styles.border_edges.is_some_and(|edges| edges.is_some())
+}
+/// A scroll view's size when nothing else sizes it (`Style::intrinsic_width`).
+fn scroll_default_size() -> crate::scene::Style {
+    crate::scene::Style {
+        width: Some(320.),
+        height: Some(240.),
+        intrinsic_width: true,
+        intrinsic_height: true,
+        ..Default::default()
+    }
 }
 pub fn text(value: impl Into<String>) -> View {
     View::new(Kind::Text(value.into()))
@@ -850,6 +1029,42 @@ pub fn provide_with<T: 'static>(
         Box::new(child),
     ))
 }
+/// `child` under a theme scope that changes `over` (another theme, some
+/// tokens) and follows the enclosing scope otherwise: a light card in a
+/// dark app, a subtree with its own accent. Overlays the subtree opens
+/// (menus, popovers) inherit it.
+pub fn theme_scope(over: crate::theme::ThemeOverride, child: View) -> View {
+    View::new(Kind::Provider(
+        Box::new(move |cx| {
+            cx.environment.theme = cx.environment.theme.child(over);
+        }),
+        Box::new(child),
+    ))
+}
+/// As [`theme_scope`], with what is overridden computed and kept current
+/// (its reads are tracked): `|| ThemeOverride::new().theme(if dark.get() {..} else {..})`.
+pub fn theme_scope_with(
+    mut over: impl FnMut() -> crate::theme::ThemeOverride + 'static,
+    child: View,
+) -> View {
+    View::new(Kind::Provider(
+        Box::new(move |cx| {
+            let initial = over();
+            let scope = cx.environment.theme.child(initial);
+            let target = scope.clone();
+            let mut first = true;
+            let effect = cx.runtime.effect(move || {
+                let next = over();
+                if !std::mem::take(&mut first) {
+                    target.set_override(next);
+                }
+            });
+            cx.retain(effect);
+            cx.environment.theme = scope;
+        }),
+        Box::new(child),
+    ))
+}
 /// A vertical scrollbar for a scroll view, drawn apart from it: place it
 /// over the view's right edge, after anything that should not cover it (a
 /// frosted bar the view scrolls under). `offset` is the view's scroll offset
@@ -1069,6 +1284,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     return;
                 }
                 runtime.untracked(|| {
+                    let _theme = ui.enter_theme(&environment.theme);
                     let mut transaction = MountTransaction::new(&ui, content);
                     // Construct first: a failed row constructor leaves old rows intact.
                     let mut added = Vec::new();
@@ -1340,6 +1556,11 @@ fn mount_portal(
             } else {
                 crate::scene::Align::Start
             },
+            justify: if is_submenu {
+                crate::scene::Justify::Stretch
+            } else {
+                crate::scene::Justify::Start
+            },
             width: (!anchored).then_some(0.),
             height: (!anchored).then_some(0.),
             ..Default::default()
@@ -1392,8 +1613,12 @@ fn mount_portal(
     let mut defaults = Styles::new()
         .w(if anchored { 240. } else { 360. })
         .p(16.)
-        .bg(ui.theme.surface)
-        .rounded(ui.theme.radius)
+        .bg(if is_menu {
+            tok::MENU_BG
+        } else {
+            tok::SURFACE_OVERLAY
+        })
+        .rounded(tok::RADIUS_MD)
         .overflow_hidden();
     if is_menu {
         defaults = defaults.items_stretch();
@@ -1511,6 +1736,68 @@ fn mount_portal(
     );
     owner
 }
+/// The built-in widgets' default styles, built once per thread and cloned
+/// for each widget: their theme token bindings are shared, not allocated
+/// for every button.
+struct WidgetStyles {
+    /// Focus on a control without a border: an inset ring, taking no room,
+    /// so focusing moves nothing; with one, its border recoloured.
+    focus_ring: Styles,
+    focus_recolor: Styles,
+    menu_focus_recolor: Styles,
+    menu_item: Styles,
+    menu_hover: Styles,
+    menu_focus: Styles,
+    button: Styles,
+    button_hover: Styles,
+    button_pressed: Styles,
+    progress: Styles,
+    slider: Styles,
+    editor: Styles,
+}
+impl WidgetStyles {
+    fn new() -> Self {
+        Self {
+            focus_ring: Styles::new()
+                .border(1.)
+                .border_color(tok::FOCUS_RING)
+                .border_over(true),
+            focus_recolor: Styles::new().border_color(tok::FOCUS_RING),
+            menu_focus_recolor: Styles::new()
+                .bg(tok::MENU_HOVER)
+                .border_color(tok::FOCUS_RING),
+            menu_item: Styles::new().px(12.).py(8.).items_center().bg(tok::MENU_BG),
+            menu_hover: Styles::new().bg(tok::MENU_HOVER),
+            menu_focus: Styles::new()
+                .bg(tok::MENU_HOVER)
+                .border(1.)
+                .border_color(tok::FOCUS_RING)
+                .border_over(true),
+            button: Styles::new()
+                .px(12.)
+                .py(8.)
+                .gap(6.)
+                .items_center()
+                .bg(tok::BUTTON_BG)
+                .rounded(tok::RADIUS_MD),
+            button_hover: Styles::new().bg(tok::BUTTON_HOVER),
+            button_pressed: Styles::new().bg(tok::BUTTON_PRESSED),
+            progress: Styles::new().w(240.).h(8.).bg(tok::INPUT_BG),
+            slider: Styles::new()
+                .w(240.)
+                .h(tok::CONTROL_HEIGHT)
+                .px(8.)
+                .py(6.)
+                .bg(tok::INPUT_BG)
+                .rounded(tok::RADIUS_MD),
+            editor: Styles::new().bg(tok::INPUT_BG).rounded(tok::RADIUS_MD),
+        }
+    }
+}
+fn widget_style(pick: impl FnOnce(&WidgetStyles) -> &Styles) -> Styles {
+    thread_local! { static STYLES: WidgetStyles = WidgetStyles::new(); }
+    STYLES.with(|styles| pick(styles).clone())
+}
 fn mount_element(
     ui: &mut Ui,
     parent: NodeId,
@@ -1531,6 +1818,7 @@ fn mount_element(
         "keyboard_navigation is only supported on virtual_list views"
     );
     let keyboard_navigation = view.keyboard_navigation.unwrap_or(false);
+    let _theme = ui.enter_theme(&environment.theme);
     assert!(
         view.scrollbar.is_none() || matches!(kind, Kind::Scroll { .. } | Kind::VirtualList(_)),
         "scrollbar is only supported on scroll, scroll_x, and virtual_list views"
@@ -1584,6 +1872,14 @@ fn mount_element(
     assert!(
         view.read_only.is_none() || is_editor,
         "read_only is only supported on editor views"
+    );
+    assert!(
+        (view.placeholder.is_none() && view.placeholder_color.is_none()) || is_editor,
+        "placeholder is only supported on editor views"
+    );
+    assert!(
+        view.select_on_focus.is_none() || is_editor,
+        "select_on_focus is only supported on editor views"
     );
     if is_editor {
         assert!(
@@ -1689,23 +1985,14 @@ fn mount_element(
         Kind::Container(layout) => ui.container(parent, layout, Default::default()),
         Kind::MenuItem(label) => {
             assert!(view.children.is_empty(), "menu items own their label");
-            let mut defaults = Styles::new()
-                .px(12.)
-                .py(8.)
-                .items_center()
-                .bg(ui.theme.surface);
+            let mut defaults = widget_style(|w| &w.menu_item);
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.hover.is_none() {
-                view.variants.hover = Some(Box::new(Styles::new().bg(ui.theme.hover)));
+                view.variants.defaults[0] = Some(|| widget_style(|w| &w.menu_hover));
             }
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(
-                    Styles::new()
-                        .bg(ui.theme.hover)
-                        .border(1.)
-                        .border_color(ui.theme.accent),
-                ));
+                view.variants.defaults[2] = Some(menu_focus(&view.styles));
             }
             let root = ui.container(parent, Layout::Row, Default::default());
             let mut semantic = SemanticNode::new(Role::MenuItem, label.clone());
@@ -1719,22 +2006,17 @@ fn mount_element(
             root
         }
         Kind::Button => {
-            let mut defaults = Styles::new()
-                .px(12.)
-                .py(8.)
-                .gap(6.)
-                .items_center()
-                .bg(ui.theme.surface)
-                .rounded(ui.theme.radius);
+            let mut defaults = widget_style(|w| &w.button);
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.hover.is_none() {
-                view.variants.hover = Some(Box::new(Styles::new().bg(ui.theme.hover)));
+                view.variants.defaults[0] = Some(|| widget_style(|w| &w.button_hover));
+            }
+            if view.variants.active.is_none() {
+                view.variants.defaults[1] = Some(|| widget_style(|w| &w.button_pressed));
             }
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(
-                    Styles::new().border(1.).border_color(ui.theme.accent),
-                ));
+                view.variants.defaults[2] = Some(focus_ring(&view.styles));
             }
             ui.container(parent, Layout::Row, Default::default())
         }
@@ -1747,12 +2029,10 @@ fn mount_element(
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.hover.is_none() {
-                view.variants.hover = Some(Box::new(Styles::new().bg(ui.theme.hover)));
+                view.variants.defaults[0] = Some(|| widget_style(|w| &w.button_hover));
             }
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(
-                    Styles::new().border(1.).border_color(ui.theme.accent),
-                ));
+                view.variants.defaults[2] = Some(focus_ring(&view.styles));
             }
             let root = ui.container(parent, Layout::Row, Default::default());
             let mut semantics = SemanticNode::new(Role::CheckBox, label.clone());
@@ -1775,7 +2055,7 @@ fn mount_element(
         }
         Kind::Progress { label, value } => {
             assert!(view.children.is_empty(), "progress views own their fill");
-            let mut defaults = Styles::new().w(240.).h(8.).bg(ui.theme.surface);
+            let mut defaults = widget_style(|w| &w.progress);
             defaults.merge(&view.styles);
             view.styles = defaults;
             let root = ui.container(parent, Layout::Overlay, Default::default());
@@ -1795,19 +2075,11 @@ fn mount_element(
                 view.children.is_empty(),
                 "slider views own their rail and thumb"
             );
-            let mut defaults = Styles::new()
-                .w(240.)
-                .h(ui.theme.control_height)
-                .px(8.)
-                .py(6.)
-                .bg(ui.theme.surface)
-                .rounded(ui.theme.radius);
+            let mut defaults = widget_style(|w| &w.slider);
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(
-                    Styles::new().border(1.).border_color(ui.theme.accent),
-                ));
+                view.variants.defaults[2] = Some(focus_ring(&view.styles));
             }
             let root = ui.container(parent, Layout::Overlay, Default::default());
             let mut semantic = SemanticNode::new(Role::Slider, label);
@@ -1822,13 +2094,11 @@ fn mount_element(
             value,
             multiline,
         } => {
-            let mut defaults = Styles::new().bg(ui.theme.surface).rounded(ui.theme.radius);
+            let mut defaults = widget_style(|w| &w.editor);
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(
-                    Styles::new().border(1.).border_color(ui.theme.accent),
-                ));
+                view.variants.defaults[2] = Some(focus_ring(&view.styles));
             }
             let handle = ui.text_input_styled(parent, label, value, multiline);
             let root = handle.node;
@@ -1836,10 +2106,12 @@ fn mount_element(
             root
         }
         Kind::Scroll { offset, horizontal } => {
-            let mut defaults = Styles::new().w(320.).h(240.).overflow_hidden();
+            let mut defaults = Styles::new().overflow_hidden();
             defaults.merge(&view.styles);
             view.styles = defaults;
-            let root = ui.container(parent, Layout::Overlay, Default::default());
+            // 320 by 240 unless something sizes it: a parent stretching it
+            // across, `grow`, or its own `w`/`h` (which then hold).
+            let root = ui.container(parent, Layout::Overlay, scroll_default_size());
             let mut semantics = SemanticNode::new(Role::ScrollView, "");
             semantics.scroll_axis = Some(if horizontal {
                 crate::semantics::ScrollAxis::Horizontal
@@ -1859,9 +2131,7 @@ fn mount_element(
             defaults.merge(&view.styles);
             view.styles = defaults;
             if keyboard_navigation && view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(
-                    Styles::new().border(1.).border_color(ui.theme.accent),
-                ));
+                view.variants.defaults[2] = Some(focus_ring(&view.styles));
             }
             region = Some(Box::new(move |ui: &mut Ui, root, environment| {
                 build(ui, root, environment, scrollbar, keyboard_navigation)
@@ -1878,6 +2148,9 @@ fn mount_element(
         }
         _ => unreachable!(),
     };
+    if view.contents {
+        ui.scene.borrow_mut().set_contents(root, true);
+    }
     let focusable = view
         .focusable
         .unwrap_or(interactive || is_editor || is_slider || keyboard_navigation);
@@ -1894,6 +2167,9 @@ fn mount_element(
     for callback in view.events.into_iter().rev() {
         let binding = ui.input.listen_first(root, callback);
         ui.retain(root, binding);
+    }
+    if view.window_drag {
+        mount_window_drag(ui, root);
     }
     if !view.keymap.bindings.is_empty()
         || !view.keymap.contexts.is_empty()
@@ -1956,6 +2232,7 @@ fn mount_element(
         image_intrinsic,
         view.layout_target,
         image_fit.clone(),
+        Some(environment.theme.clone()),
     );
     if let Some(mut compute) = rich_compute {
         let paragraph = rich_paragraph.unwrap();
@@ -1966,15 +2243,20 @@ fn mount_element(
         crate::compose_rich::mount_links(ui, root, paragraph, content_state.clone());
         let weak = ui.downgrade();
         let typography = environment.typography.clone();
+        let theme = environment.theme.clone();
         ui.bind(root, move || {
             let base = typography.get();
             let spans = compute();
             let mut content = String::new();
             let mut runs = Vec::new();
             let mut links = Vec::new();
-            for span in spans {
+            for mut span in spans {
                 if span.text.is_empty() {
                     continue;
+                }
+                if span.styles.has_tokens() {
+                    crate::theme::resolve(&mut span.styles, &theme);
+                    span.background = span.background.or(span.styles.background);
                 }
                 let start = content.len();
                 content.push_str(&span.text);
@@ -1984,7 +2266,7 @@ fn mount_element(
                         action,
                     });
                 }
-                let mut font = base.font.clone();
+                let mut font = base.font_in(Some(&theme));
                 let rare = span.styles.rare();
                 let (fallbacks, features, spacing) = (
                     rare.font_fallbacks.clone(),
@@ -2018,8 +2300,14 @@ fn mount_element(
                     strikethrough: span.strikethrough,
                     range: start..content.len(),
                     font,
-                    font_size: span.styles.text_size.unwrap_or(base.size),
-                    color: span.styles.text_color.unwrap_or(base.color),
+                    font_size: span
+                        .styles
+                        .text_size
+                        .unwrap_or_else(|| base.size_in(Some(&theme))),
+                    color: span
+                        .styles
+                        .text_color
+                        .unwrap_or_else(|| base.color_in(Some(&theme))),
                 });
             }
             let rich = crate::rich_text::RichText::new(content.as_str(), runs)
@@ -2138,10 +2426,29 @@ fn mount_element(
             let editor = editor.clone();
             ui.bind(root, move || editor.set_read_only(read_only()));
         }
+        if let Some(select) = view.select_on_focus {
+            editor.set_select_on_focus(select);
+        }
+        let (mut text, mut color) = (view.placeholder.take(), view.placeholder_color.take());
+        if text.is_some() {
+            let editor = editor.clone();
+            ui.bind(root, move || {
+                let text = text.as_mut().map(|text| text());
+                let color = color.as_mut().map(|color| color());
+                editor.set_placeholder(text.as_deref(), color);
+            });
+        }
         let typography = environment.typography.clone();
+        let theme = environment.theme.clone();
         ui.bind(root, move || {
             let style = typography.get();
-            editor.set_text_style(style.color, style.size, style.font, style.wrap);
+            let theme = Some(&*theme);
+            editor.set_text_style(
+                style.color_in(theme),
+                style.size_in(theme),
+                style.font_in(theme),
+                style.wrap,
+            );
         });
     }
     if let Some(id) = view.id {
@@ -2178,6 +2485,9 @@ fn mount_element(
     let child_parent = scroll_nodes.map_or(root, |(_, content)| content);
     for child in view.children {
         mount(ui, child_parent, child, environment.clone());
+    }
+    for conditional in view.conditional {
+        conditional(ui, child_parent, environment.clone());
     }
     if is_submenu_trigger {
         let indicator = mount(ui, root, text("›"), environment.clone());
@@ -2221,6 +2531,56 @@ fn mount_element(
         });
     }
     root
+}
+/// `View::window_drag`: a primary press on `region`, or on a descendant
+/// that takes no input itself, asks the host to move the window (or, the
+/// second of a double click, to zoom it).
+fn mount_window_drag(ui: &mut Ui, region: NodeId) {
+    let weak = ui.downgrade();
+    ui.on_event(region, false, move |cx| {
+        if cx.phase == EventPhase::Capture
+            || cx.default_prevented()
+            || !matches!(
+                cx.event,
+                InputEvent::PointerDown {
+                    button: PointerButton::Primary,
+                    ..
+                }
+            )
+        {
+            return;
+        }
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        // A descendant following the pointer (a divider) keeps its press.
+        if cx.capture_target().is_some_and(|id| id != Some(region)) {
+            return;
+        }
+        // So does anything inside that takes input (a button, an input).
+        {
+            let scene = ui.scene.borrow();
+            let mut node = Some(cx.target);
+            while let Some(id) = node.filter(|id| *id != region) {
+                if ui
+                    .input
+                    .options(id)
+                    .is_some_and(|options| options.focusable)
+                {
+                    return;
+                }
+                node = scene.parent(id);
+            }
+        }
+        // Moving the window neither focuses nor presses what is under it.
+        cx.prevent_default();
+        cx.stop_propagation();
+        ui.request_window_gesture(if cx.click_count() == 2 {
+            crate::widgets::WindowGesture::DoubleClick
+        } else {
+            crate::widgets::WindowGesture::Drag
+        });
+    });
 }
 #[allow(clippy::too_many_arguments)]
 fn mount_scroll(
@@ -2573,10 +2933,12 @@ fn mount_progress(ui: &mut Ui, root: NodeId, value: Signal<f32>, typography: Sig
             ..Default::default()
         },
     );
-    let fill =
-        ui.scene
-            .borrow_mut()
-            .append(viewport, NodeKind::Rect(ui.theme.text), Style::default());
+    let fill = ui.scene.borrow_mut().append(
+        viewport,
+        NodeKind::Rect(typography.with_untracked(|t| t.color_in(None))),
+        Style::default(),
+    );
+    let theme = ui.theme_scope();
     let scene = ui.scene.clone();
     let semantics = ui.semantics.clone();
     ui.bind(root, move || {
@@ -2600,7 +2962,10 @@ fn mount_progress(ui: &mut Ui, root: NodeId, value: Signal<f32>, typography: Sig
             },
         );
         scene.set_style(fill, geometry);
-        scene.set_kind(fill, NodeKind::Rect(typography.get().color));
+        scene.set_kind(
+            fill,
+            NodeKind::Rect(typography.get().color_in(Some(&theme))),
+        );
         // A translated full-size fill stays clipped to the content viewport.
         // Value-only updates therefore avoid changing layout dimensions.
         scene.set_transform(
@@ -2629,10 +2994,12 @@ fn mount_slider(
     let (min, max) = (*range.start() as f64, *range.end() as f64);
     let span = max - min;
     let size = ui.observe_content_size(root);
-    let rail = ui
-        .scene
-        .borrow_mut()
-        .append(root, NodeKind::Rect(ui.theme.hover), Style::default());
+    let theme = ui.theme_scope();
+    let rail = ui.scene.borrow_mut().append(
+        root,
+        NodeKind::Rect(theme.color_untracked(tok::HOVER)),
+        Style::default(),
+    );
     let fill_viewport = ui.container(
         root,
         Layout::Overlay,
@@ -2643,13 +3010,24 @@ fn mount_slider(
     );
     let fill = ui.scene.borrow_mut().append(
         fill_viewport,
-        NodeKind::Rect(ui.theme.accent),
+        NodeKind::Rect(theme.color_untracked(tok::ACCENT)),
         Style::default(),
     );
-    let thumb = ui
-        .scene
-        .borrow_mut()
-        .append(root, NodeKind::Rect(ui.theme.text), Style::default());
+    let thumb = ui.scene.borrow_mut().append(
+        root,
+        NodeKind::Rect(typography.with_untracked(|t| t.color_in(None))),
+        Style::default(),
+    );
+    let thumb_theme = theme.clone();
+    // The rail and fill follow the theme: the effect reads their tokens.
+    {
+        let scene = ui.scene.clone();
+        ui.bind(root, move || {
+            let mut scene = scene.borrow_mut();
+            scene.set_kind(rail, NodeKind::Rect(theme.color(tok::HOVER)));
+            scene.set_kind(fill, NodeKind::Rect(theme.color(tok::ACCENT)));
+        });
+    }
     let scene = ui.scene.clone();
     let semantics = ui.semantics.clone();
     let observed_value = value.clone();
@@ -2713,7 +3091,10 @@ fn mount_slider(
                 y: (height - thumb_height) / 2.,
             },
         );
-        scene.set_kind(thumb, NodeKind::Rect(typography.get().color));
+        scene.set_kind(
+            thumb,
+            NodeKind::Rect(typography.get().color_in(Some(&thumb_theme))),
+        );
         semantics
             .borrow_mut()
             .update(root, |node| node.numeric_value = Some(val as f64));
@@ -2852,12 +3233,51 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_bounds(self.node))
     }
+    /// Run `f` once after the next frame's layout, before that frame is
+    /// drawn, whether or not anything moved: for reading where a change just
+    /// put things (and setting a translation to start a move from where they
+    /// were). It runs even if the node has gone by then.
+    pub fn after_layout(&self, f: impl FnOnce() + 'static) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.after_layout(Box::new(f));
+        }
+    }
+    /// Run `f` after every layout pass that changes the layout (not for
+    /// frames that only translate, fade or scroll), until the node is removed.
+    pub fn on_layout(&self, f: impl FnMut() + 'static) {
+        if let Some(ui) = self.ui.upgrade()
+            && ui.scene.borrow().contains(self.node)
+        {
+            ui.on_layout(self.node, Box::new(f));
+        }
+    }
     /// Give the node keyboard focus (an input, a button); whether it took it.
     pub fn focus(&self) -> bool {
         let Some(ui) = self.ui.upgrade() else {
             return false;
         };
         ui.input.focus(&ui.scene, Some(self.node)) || ui.input.focused() == Some(self.node)
+    }
+    /// The editor this node is (an input or a text area), if it is one.
+    pub fn editor(&self) -> Option<crate::widgets::EditorHandle> {
+        let ui = self.ui.upgrade()?;
+        ui.editor(self.node)
+    }
+    /// An editor's selection, `(anchor, focus)` in UTF-8 byte offsets
+    /// (see `EditorHandle::selection`); `None` for other nodes.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        self.editor().map(|editor| editor.selection())
+    }
+    /// Select an editor's text from `anchor` to `focus`, UTF-8 byte offsets
+    /// (see `EditorHandle::set_selection`); whether the node is an editor.
+    pub fn set_selection(&self, anchor: usize, focus: usize) -> bool {
+        self.editor()
+            .map(|editor| editor.set_selection(anchor, focus))
+            .is_some()
+    }
+    /// Select an editor's whole text; whether the node is an editor.
+    pub fn select_all(&self) -> bool {
+        self.editor().map(|editor| editor.select_all()).is_some()
     }
     /// Keep `resource` until the node is removed, then drop it.
     pub fn retain(&self, resource: impl Any) {
@@ -2903,19 +3323,25 @@ impl Ui {
     /// Mount a declarative tree under the document root. The document owns its lifetime.
     pub fn mount(&mut self, view: View) -> ViewHandle {
         let registry = Registry::default();
+        let theme = self.theme().root().clone();
+        // Text shows the theme's body colour, size and family unless a view
+        // says otherwise; each text node reads them from its own scope.
+        let typography = self.signal(Typography {
+            display: Default::default(),
+            color: crate::theme::Themed::Token(tok::TEXT_PRIMARY.into()),
+            size: crate::theme::Themed::Token(tok::FONT_SIZE_MD.into()),
+            wrap: false,
+            font: Default::default(),
+            family: Some(tok::FONT_SANS.into()),
+        });
         let environment = Environment {
             services: ServiceScope::new(),
-            typography: self.signal(Typography {
-                display: Default::default(),
-                color: self.theme.text,
-                size: self.theme.font_size,
-                wrap: false,
-                font: Default::default(),
-            }),
+            typography,
             registry: registry.clone(),
             portal: None,
             menu: None,
             measure: self.scene.borrow().text_measure(),
+            theme,
         };
         let runtime = self.runtime.clone();
         let mut ui = self.shared();
@@ -2960,6 +3386,7 @@ pub mod prelude {
     #[cfg(target_os = "macos")]
     pub use super::{native_surface, native_surface_signal};
     pub use super::{svg, svg_signal};
+    pub use super::{theme_scope, theme_scope_with};
     pub use crate::affine::Affine;
     pub use crate::canvas::{
         Brush, Canvas, FillRule, GradientStop, LineCap, LineJoin, Path, PathBuilder, Point, Stroke,
@@ -2970,6 +3397,7 @@ pub mod prelude {
     pub use crate::style::{ObjectFit, StrokeAlign, Styled, Styles, rgb, rgba};
     pub use crate::svg::SvgData;
     pub use crate::text_layout::{FontFamily, FontFeatures, TextAlign, TextOptions, TextOverflow};
+    pub use crate::theme::{ThemeOverride, tok};
     pub use crate::web_view::{native_view, web_view, web_view_src};
 }
 

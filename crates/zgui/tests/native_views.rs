@@ -482,3 +482,44 @@ fn commands_queue_until_a_page_attaches_and_events_arrive_when_delivered() {
         vec![WebViewEvent::TitleChanged { title: "B".into() }]
     );
 }
+
+#[test]
+fn a_layer_far_from_native_views_stays_on_the_base_plane() {
+    let mut ui = Ui::new(1000., 600.);
+    let natives = supported();
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    let view = ui.mount(provide(
+        natives.clone(),
+        row()
+            .w(1000.)
+            .h(600.)
+            .child(
+                // A spinner in a sidebar: a layer (it turns) away from the page.
+                div().w(200.).h(600.).child(
+                    div()
+                        .id("spinner")
+                        .w(10.)
+                        .h(10.)
+                        .bg(zgui::scene::Color(255, 0, 0, 255)),
+                ),
+            )
+            .child(web_view(&web).w(800.).h(600.)),
+    ));
+    ui.prepare_frame();
+    let (first, _) = split(&ui, &natives, &PlaneSplit::default());
+    // It becomes a layer after the first split: later splits walk only what
+    // reaches the page, so never visit it.
+    let spinner = view.find("spinner").unwrap();
+    ui.scene.borrow_mut().set_isolated(spinner, true);
+    ui.prepare_frame();
+    let (later, _) = split(&ui, &natives, &first);
+    let scene = ui.scene.borrow();
+    let item = scene
+        .layer_items(None)
+        .into_iter()
+        .find(|item| item.id == spinner)
+        .expect("painted");
+    assert!(item.isolated);
+    assert!(later.keeps(&item, Plane::Base));
+    assert!(!later.keeps(&item, Plane::Overlay));
+}

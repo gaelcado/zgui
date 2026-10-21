@@ -32,6 +32,20 @@ pub struct Harness {
 #[allow(dead_code)]
 impl Harness {
     pub fn new(host: impl FnOnce(&Runtime) -> ScriptHost) -> Self {
+        Self::wrapped(host, |view| view)
+    }
+    /// With the window's layout inspector, as a desktop window provides it.
+    pub fn inspected(
+        host: impl FnOnce(&Runtime) -> ScriptHost,
+        inspector: &zgui::inspect::Inspector,
+    ) -> Self {
+        let inspector = inspector.clone();
+        Self::wrapped(host, move |view| provide(inspector, view))
+    }
+    pub fn wrapped(
+        host: impl FnOnce(&Runtime) -> ScriptHost,
+        wrap: impl FnOnce(View) -> View,
+    ) -> Self {
         let mut ui = Ui::new(400., 300.);
         let host = host(&ui.runtime);
         host.reload().unwrap();
@@ -42,7 +56,7 @@ impl Harness {
             natives.clone(),
             provide(
                 TaskRunner::from_executor(executor.clone()),
-                provide(clock.clone(), host.view()),
+                provide(clock.clone(), wrap(host.view())),
             ),
         ));
         let harness = Self {
