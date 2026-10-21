@@ -26,7 +26,7 @@ pub struct DragEvent {
 }
 #[derive(Clone)]
 pub(super) struct DragSession {
-    source: NodeId,
+    pub(super) source: NodeId,
     payload: Action,
     x: f32,
     y: f32,
@@ -113,6 +113,7 @@ impl InputDispatcher {
         let pressed = {
             let mut state = self.state.borrow_mut();
             state.drag = Some(drag.clone());
+            state.drag_orphans.clear();
             let pressed = state.pressed.take();
             state.key_pressed = None;
             state.clicks.0 = None;
@@ -189,6 +190,7 @@ impl InputDispatcher {
         let Some(drag) = self.state.borrow_mut().drag.take() else {
             return;
         };
+        self.state.borrow_mut().drag_ending = Some(drag.source);
         {
             let mut state = self.state.borrow_mut();
             state.pressed = None;
@@ -206,8 +208,22 @@ impl InputDispatcher {
         if let Some(id) = drag.destination.filter(|id| scene.borrow().contains(*id)) {
             self.route(scene, id, drag.event(DragPhase::Leave, accepted));
         }
+        let orphans = {
+            let mut state = self.state.borrow_mut();
+            state.drag_ending = None;
+            std::mem::take(&mut state.drag_orphans)
+        };
         if scene.borrow().contains(drag.source) {
             self.route(scene, drag.source, drag.event(DragPhase::End, accepted));
+        } else {
+            // The source went during the drag: its own listeners still learn
+            // that it ended (and whether it was taken), at the target phase.
+            let mut cx = EventContext::new(drag.event(DragPhase::End, accepted), drag.source);
+            for callback in orphans {
+                if let Ok(mut callback) = callback.try_borrow_mut() {
+                    callback(&mut cx);
+                }
+            }
         }
         if drop {
             let hovered = self.hit_target(&scene.borrow(), drag.x, drag.y);

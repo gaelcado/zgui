@@ -1430,6 +1430,11 @@ impl Host {
         let window = Arc::new(
             event_loop.create_window(crate::window_info::attributes(&self.options, event_loop)?)?,
         );
+        #[cfg(target_os = "macos")]
+        {
+            content_never_moves_window();
+            mouse_down::watch();
+        }
         self.x11 = window.display_handle().is_ok_and(|handle| {
             matches!(
                 handle.as_raw(),
@@ -1578,6 +1583,10 @@ impl Host {
                 window.set_min_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)))
             }
             WindowCommand::Drag => {
+                #[cfg(target_os = "macos")]
+                if mouse_down::drag(window) {
+                    return;
+                }
                 self.context
                     .window_info
                     .last_request_error
@@ -2493,11 +2502,32 @@ impl ApplicationHandler<Event> for WindowManager {
             }
             #[cfg(target_os = "macos")]
             Event::NativeMenuAction(action) => {
+                // The key window: winit reports a window unfocused while a
+                // native view in it (a web page, a terminal) has first
+                // responder, so ask AppKit too.
                 let focused = self
                     .hosts
                     .iter()
                     .find(|(_, host)| host.native_focused && !host.context.window.is_closed())
-                    .map(|(token, _)| *token);
+                    .or_else(|| {
+                        self.hosts.iter().find(|(_, host)| {
+                            !host.context.window.is_closed()
+                                && host.window.as_ref().is_some_and(|w| is_key_window(w))
+                        })
+                    })
+                    .map(|(token, _)| *token)
+                    // No key window (the app is in the background, a menu
+                    // chosen through accessibility): its only window.
+                    .or_else(|| {
+                        let mut open = self
+                            .hosts
+                            .iter()
+                            .filter(|(_, host)| !host.context.window.is_closed());
+                        match (open.next(), open.next()) {
+                            (Some((token, _)), None) => Some(*token),
+                            _ => None,
+                        }
+                    });
                 if let Some(token) = focused {
                     self.menu_action(token, action);
                 }
@@ -2856,6 +2886,112 @@ fn release_freed_heap() {
         }
     }
 }
+/// zgui content never moves its window by itself (a custom titlebar's tabs
+/// and buttons drag and click; `WindowHandle::drag_window` moves it). AppKit
+/// otherwise moves the window from any press on a non-opaque view in a
+/// transparent titlebar, and a window made unmovable instead swallows the
+/// drag. winit's view gets `mouseDownCanMoveWindow` answering NO.
+#[cfg(target_os = "macos")]
+fn content_never_moves_window() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+    extern "C-unwind" fn no(_this: *mut AnyObject, _cmd: Sel) -> Bool {
+        Bool::NO
+    }
+    let Some(class) = AnyClass::get(c"WinitView") else {
+        return;
+    };
+    // Added once; later calls find it there and change nothing.
+    unsafe {
+        let imp: objc2::runtime::Imp =
+            std::mem::transmute(no as extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool);
+        objc2::ffi::class_addMethod(
+            class as *const AnyClass as *mut AnyClass,
+            objc2::sel!(mouseDownCanMoveWindow),
+            imp,
+            c"c@:".as_ptr(),
+        );
+    }
+}
+
+/// Window drags from the mouse-down that started them. `drag_window` is a
+/// command, run after the press was handled, and AppKit's window drag needs
+/// the original mouse-down event (`performWindowDragWithEvent:`), not
+/// whatever event is current by then.
+#[cfg(target_os = "macos")]
+mod mouse_down {
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSEvent, NSEventMask, NSView};
+    use std::{cell::RefCell, ptr::NonNull};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    thread_local! {
+        static LAST: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
+        static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    /// Keep each left mouse-down (once per process).
+    pub fn watch() {
+        if WATCHING.replace(true) {
+            return;
+        }
+        let block = block2::RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: AppKit passes a valid event, retained here to keep.
+            let kept = unsafe { Retained::retain(event.as_ptr()) };
+            LAST.with(|last| *last.borrow_mut() = kept);
+            event.as_ptr()
+        });
+        // The monitor lives as long as the app.
+        let monitor = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                NSEventMask::LeftMouseDown,
+                &block,
+            )
+        };
+        std::mem::forget(monitor);
+    }
+    /// Start a window drag from the last mouse-down, if the button is still
+    /// down; whether one started.
+    pub fn drag(window: &winit::window::Window) -> bool {
+        if NSEvent::pressedMouseButtons() & 1 == 0 {
+            return false;
+        }
+        let Some(event) = LAST.with(|last| last.borrow().clone()) else {
+            return false;
+        };
+        let Ok(handle) = window.window_handle() else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return false;
+        };
+        // SAFETY: the borrowed winit window keeps its view alive; main thread.
+        let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        let Some(ns_window) = view.window() else {
+            return false;
+        };
+        if event.windowNumber() != ns_window.windowNumber() {
+            return false;
+        }
+        ns_window.performWindowDragWithEvent(&event);
+        true
+    }
+}
+
+/// Whether AppKit has `window` as its key window.
+#[cfg(target_os = "macos")]
+fn is_key_window(window: &winit::window::Window) -> bool {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return false;
+    };
+    // SAFETY: the borrowed winit window keeps its NSView alive; this runs on
+    // the main thread, handling the event loop's events.
+    let view = unsafe { handle.ns_view.cast::<objc2_app_kit::NSView>().as_ref() };
+    view.window().is_some_and(|window| window.isKeyWindow())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

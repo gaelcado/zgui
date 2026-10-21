@@ -51,6 +51,7 @@ Elements take one table: string keys are properties, events and options; array e
 | `svg { src = "icon.svg" }`, `svg { code = "<svg…>" }` | `tint = color` (a state or function re-tints it) |
 | `canvas { draw = function(c, w, h) … end }` | runs again when its size or the state it reads changes |
 | `webview { src = "https://…", … }` | a native web page (WKWebView on macOS) laid out, rounded, clipped and faded like any node, with zgui content (frosted popovers too) drawn over it; see [Web views](#web-views) |
+| `terminal { term = ui.term(id) }` | a terminal session (a Ghostty surface, with the desktop host's `ghostty` feature) placed like a web view; see [Terminals](#terminals) |
 | `checkbox`, `input`, `textarea`, `progress`, `slider` | `{ label, value = state }`; `slider` takes `min`, `max` |
 | `show(cond, node, else)` | `cond`: state, function or boolean |
 | `switch(state, { key = node, … }, default)` | |
@@ -80,6 +81,33 @@ return ui.column {
 ```
 
 The controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused` and `error` are tracked like state. Its methods: `load(url)`, `html(html, base_url)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `zoom(z)`, `run(js)` and `eval(js, function(value, err) … end)`, which gets the script's value as Luau data. Events: `on_navigate({ kind, url })`, `on_load(url)`, `on_title(title)`, `on_message(value)`, `on_error(url, err)` and `on_new_window(url)`. Without a native host (headless, other platforms) the node shows a labelled box.
+
+### Terminals
+
+`ui.term(id, options)` returns the terminal session for `id`, starting it the first time: `command` (a command line; the login shell by default), `cwd` (`"~"` is home), `env` (a table) and `font_size`. Sessions belong to the host, not to a run: a reload keeps every shell running and the run that asks for `id` again gets the same session, its options' handlers replacing the previous run's (`ui.term(id)` without options only looks it up). Show one with `ui.terminal { term = t, … }`, sized and rounded like any node; moving the node elsewhere (another split, another tab) moves the terminal with its process.
+
+```lua
+local term = ui.term("p1", {
+    cwd = "~/src",
+    on_title = function(title) print(title) end,
+    on_close = function(alive) term:close() end,   -- the process exited (alive = false)
+})
+return ui.terminal { term = term, grow = 1, rounded = 10, on_focus = function() print("typing here") end }
+```
+
+The session's `title` (what the program set), `pwd` (the shell's directory), `process` (the foreground program's name), `pid`, `focused`, `bell`, `progress`, `exited`, `columns` and `rows` are tracked like state. Methods: `focus()`, `blur()`, `input(text)` (as typed), `paste(text)`, `binding(action)` (a Ghostty binding action: `"copy_to_clipboard"`, `"clear_screen"`, `"increase_font_size:1"`), `needs_confirm()` (whether closing ends something other than an idle shell) and `close()`. Events, as options: `on_title`, `on_pwd`, `on_process`, `on_exit(code)`, `on_close(alive)`, `on_bell`, `on_command(exit_code, ms)` (shell integration) and `on_notify(title, body)`. The terminal reads its own keyboard, IME and mouse; app shortcuts reach the app through its menus (see [Commands](#commands-and-host-actions)). `zgui-desktop/examples/terminal` is a multiplexer written this way.
+
+### Commands and host actions
+
+`ui.command { id, title, menu, key, run }` declares an app command: the host shows it as a menu item (`ScriptHost::commands`, in declaration order) with `key` as its shortcut (`"cmd+shift+d"`, `"cmd+alt+arrowleft"`, `"cmd+["`) and calls `run` when it is chosen (`ScriptHost::run_command`). Menu shortcuts work wherever focus is, a terminal or a web page included. `ui.command { menu = "View", separator = true }` adds a separator. Each successful load replaces the commands; a failed one keeps the last. `ui.invoke(name, arg)` calls a host action now, from any handler (`ui.action` binds one to a handler instead).
+
+### Drag and drop
+
+A node becomes a drag source with `on_drag = function() return payload end` (any plain value), dragged once the pointer moves 4 points; `drag_preview = function(payload) return node end` builds what follows the pointer, and `on_drag_end(payload, accepted)` reports how it ended. A destination takes `on_drop(payload, e)`, optionally `drop_when(payload)` to accept only some payloads, and `on_drag_over(payload, e)` / `on_drag_leave(payload)` to show where a drop would land; `e` is `{ x, y, local_x, local_y, w, h }`. The nearest accepting destination gets the drag. A node with `on_press` and `on_pointer_move` or `on_release` keeps the pointer from press to release, wherever it goes (a divider being dragged).
+
+### Context menus
+
+`context_menu = function(e) return { … } end` on any node shows what it returns (`ui.menu_item`s, `ui.submenu`s, separators such as a 1-point `ui.div`) as a menu at the pointer on a secondary click, or a control-click on macOS; returning nothing shows none and lets the click through. `e` is `{ x, y, local_x, local_y }`. The innermost node with a context menu takes the click. `context_menu_style = { … }` styles the menu's panel with plain values (`bg`, `backdrop_blur`, `rounded`, `p`, `w`, `border`, `shadow`). `context_menu_below = true` opens it under the node, from its left edge, as a tab's does, wherever the click was. Terminals hand right clicks their program does not use to the node, so a terminal's context menu opens over it. Rust views have the same in `View::context_menu`, `View::context_menu_style` and `View::context_menu_below`.
 
 ### Properties
 

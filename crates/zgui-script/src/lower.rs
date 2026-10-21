@@ -13,11 +13,12 @@ use crate::{
     },
     value::Value,
 };
+use mlua::FromLua;
 use std::{cell::OnceCell, collections::HashMap, rc::Rc, sync::Arc};
 use zgui::{
     compose::{Context, NodeHandle, TextSpan, View, prelude::*},
     image::ImageData,
-    input::{InputEvent, Key, PointerButton},
+    input::{EventPhase, InputEvent, Key, PointerButton},
     layout::{ContentAlign, Length},
     reactive::Signal,
     scene::{Align, Color},
@@ -305,6 +306,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             })
         }
         Kind::WebView(spec) => web_view_of(spec, vm, low),
+        Kind::Terminal(term) => zgui::terminal::terminal(term),
         Kind::Canvas(draw) => {
             let (draw, vm) = (draw.clone(), vm.clone());
             canvas(move |(w, h)| {
@@ -758,6 +760,51 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
     if node.events.any_input() {
         view = with_events(view, node, vm, low, handle.clone());
     }
+    if node.events.any_drag() || node.events.drag_preview.is_some() {
+        view = with_drag(view, node, vm, low, handle.clone());
+    }
+    if let Some(style) = &node.events.context_menu_style {
+        view = view.context_menu_style(apply_all(Styles::new(), style));
+    }
+    if node.events.context_menu_below {
+        view = view.context_menu_below(true);
+    }
+    if let Some(build) = node.events.context_menu.clone() {
+        let (vm, low) = (vm.clone(), low.clone());
+        view = view.context_menu(move |e| {
+            let point = vm.lua.create_table().and_then(|t| {
+                t.set("x", e.x)?;
+                t.set("y", e.y)?;
+                t.set("local_x", e.local_x)?;
+                t.set("local_y", e.local_y)?;
+                Ok(t)
+            });
+            let items = point.and_then(|p| {
+                vm.runtime
+                    .clone()
+                    .batch(|| vm.call::<Option<mlua::Table>>(&build, p))
+            });
+            match items {
+                Ok(Some(items)) => items
+                    .sequence_values::<mlua::AnyUserData>()
+                    .filter_map(|item| {
+                        match item.and_then(|ud| ud.borrow::<NodeUd>().map(|n| n.0.clone())) {
+                            Ok(node) => Some(lower(&node, &low)),
+                            Err(error) => {
+                                vm.report(error);
+                                None
+                            }
+                        }
+                    })
+                    .collect(),
+                Ok(None) => Vec::new(),
+                Err(error) => {
+                    vm.report(error);
+                    Vec::new()
+                }
+            }
+        });
+    }
     // Listeners scripts add later (a draggable) receive the element's events.
     if let Some(element) = &element {
         let element = element.clone();
@@ -771,7 +818,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             }
         });
     }
-    if element.is_some() || node.events.any_input() {
+    // Input and drag handlers read the node's handle (local coordinates).
+    if element.is_some() || node.events.any_input() || node.events.any_drag() {
         let (element, elements, refs) = (element.clone(), low.elements.clone(), node.refs.clone());
         let (mount, resize, vm) = (
             node.events.mount.clone(),
@@ -1185,6 +1233,9 @@ fn with_events(
         events.blur.clone(),
         events.wheel.clone(),
     );
+    // A press that follows the pointer (a divider, a slider of the
+    // script's own) keeps it until release, wherever it goes.
+    let captures = press.is_some() && (moved.is_some() || release.is_some());
     let (vm, actions) = (vm.clone(), low.actions.clone());
     view.on_event(move |event| {
         let lua = &vm.lua;
@@ -1204,6 +1255,18 @@ fn with_events(
             t.set("local_y", ly)?;
             Ok(t)
         };
+        if captures
+            && event.phase == EventPhase::Target
+            && matches!(
+                event.event,
+                InputEvent::PointerDown {
+                    button: PointerButton::Primary,
+                    ..
+                }
+            )
+        {
+            event.capture_pointer();
+        }
         match &event.event {
             InputEvent::PointerDown {
                 x,
@@ -1289,6 +1352,113 @@ fn with_events(
                         run(h, &vm, &actions, t);
                     }
                 }
+            }
+            _ => {}
+        }
+    })
+}
+
+/// Drag sources and destinations; payloads are script values.
+fn with_drag(
+    mut view: View,
+    node: &Node,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    handle: Rc<OnceCell<NodeHandle>>,
+) -> View {
+    use zgui::input::DragPhase;
+    let events = &node.events;
+    fn call(vm: &Rc<Vm>, f: &mlua::Function, args: impl mlua::IntoLuaMulti) -> Option<mlua::Value> {
+        vm.runtime
+            .clone()
+            .batch(|| match vm.call::<mlua::Value>(f, args) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    vm.report(error);
+                    None
+                }
+            })
+    }
+    if let Some(drag) = events.drag.clone() {
+        let vm = vm.clone();
+        view = view.on_drag(move || -> Value {
+            call(&vm, &drag, ())
+                .and_then(|v| Value::from_lua(v, &vm.lua).ok())
+                .unwrap_or(Value::Nil)
+        });
+    }
+    if let Some(preview) = events.drag_preview.clone() {
+        let (vm, low) = (vm.clone(), low.clone());
+        view = view.drag_preview(move |payload: &Value| {
+            let result = vm.call::<mlua::Value>(&preview, payload.clone());
+            built(&vm, result, &low)
+        });
+    }
+    if let Some(end) = events.drag_end.clone() {
+        let vm = vm.clone();
+        view = view.on_drag_end(move |payload: &Value, accepted| {
+            call(&vm, &end, (payload.clone(), accepted));
+        });
+    }
+    let (drop, accept, over, leave) = (
+        events.drop.clone(),
+        events.drop_when.clone(),
+        events.drag_over.clone(),
+        events.drag_leave.clone(),
+    );
+    if drop.is_none() && over.is_none() && leave.is_none() {
+        return view;
+    }
+    let vm = vm.clone();
+    view.on_event(move |cx| {
+        if cx.phase == EventPhase::Capture {
+            return;
+        }
+        let InputEvent::Drag(event) = cx.event.clone() else {
+            return;
+        };
+        let Some(payload) = event.payload.downcast_ref::<Value>() else {
+            return;
+        };
+        let accepts = || {
+            accept.as_ref().is_none_or(|f| {
+                call(&vm, f, payload.clone())
+                    .is_some_and(|v| !matches!(v, mlua::Value::Nil | mlua::Value::Boolean(false)))
+            })
+        };
+        let point = || -> Option<mlua::Table> {
+            let bounds = handle
+                .get()
+                .and_then(|h| h.scene().map(|s| s.borrow().bounds(h.node())))?;
+            let t = vm.lua.create_table().ok()?;
+            t.set("x", event.x).ok()?;
+            t.set("y", event.y).ok()?;
+            t.set("local_x", event.x - bounds.x).ok()?;
+            t.set("local_y", event.y - bounds.y).ok()?;
+            t.set("w", bounds.width).ok()?;
+            t.set("h", bounds.height).ok()?;
+            Some(t)
+        };
+        match event.phase {
+            DragPhase::Over if accepts() => {
+                cx.accept_drag();
+                // The nearest accepting destination is the one that shows it.
+                cx.stop_propagation();
+                if let (Some(f), Some(p)) = (&over, point()) {
+                    call(&vm, f, (payload.clone(), p));
+                }
+            }
+            DragPhase::Leave => {
+                if let Some(f) = &leave {
+                    call(&vm, f, payload.clone());
+                }
+            }
+            DragPhase::Drop if !cx.default_prevented() && accepts() => {
+                if let (Some(f), Some(p)) = (&drop, point()) {
+                    call(&vm, f, (payload.clone(), p));
+                }
+                cx.prevent_default();
+                cx.stop_propagation();
             }
             _ => {}
         }
@@ -2071,8 +2241,10 @@ fn presence(
                 let (state, enter, play, vm) =
                     (state.clone(), enter.clone(), play.clone(), vm.clone());
                 let mounted = element.clone();
+                // Content fills the presence's box: what sizes the presence
+                // (its own props) sizes it.
                 element_view(
-                    column().items_stretch().w_full().child(content),
+                    column().items_stretch().w_full().h_full().child(content),
                     element,
                     &low,
                     move |_| {
@@ -2086,6 +2258,7 @@ fn presence(
                 )
             },
         )
-        .w_full(),
+        .w_full()
+        .h_full(),
     )
 }

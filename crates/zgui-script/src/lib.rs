@@ -26,12 +26,15 @@
 mod anim;
 mod anime;
 mod canvas;
+mod command;
 mod element;
 mod lower;
 mod node;
+mod term;
 mod transform;
 mod value;
 
+pub use command::Command;
 pub use value::{Store, Value};
 
 use mlua::{Lua, VmState};
@@ -283,6 +286,10 @@ struct Inner {
     stamps: RefCell<Vec<(PathBuf, Option<SystemTime>)>>,
     /// Files scripts `require`d in the last load: watched with the scripts.
     required: RefCell<Vec<PathBuf>>,
+    /// Terminal sessions (`ui.term`): they outlive reloads.
+    terms: Rc<term::Terms>,
+    /// App commands (`ui.command`) the last successful load declared.
+    commands: Rc<command::Commands>,
 }
 
 /// Loads an application script and its plugins and mounts what they describe.
@@ -338,6 +345,8 @@ impl ScriptHost {
             error: runtime.signal(None),
             stamps: RefCell::default(),
             required: RefCell::default(),
+            terms: Rc::default(),
+            commands: Rc::new(command::Commands::new(runtime)),
         }))
     }
     fn configure(self, f: impl FnOnce(&mut Inner)) -> Self {
@@ -375,6 +384,15 @@ impl ScriptHost {
     pub fn shared(&self, key: &str, initial: impl Into<Value>) -> Signal<Value> {
         self.0.shared.state(key, initial.into())
     }
+    /// The app commands scripts declare (`ui.command`), in declaration
+    /// order, as of the last successful load: show them as menu items.
+    pub fn commands(&self) -> Signal<Vec<Command>> {
+        self.0.commands.list.clone()
+    }
+    /// Run the command `id` (a menu item was chosen); whether one ran.
+    pub fn run_command(&self, id: &str) -> bool {
+        self.0.commands.run(id)
+    }
     /// The latest load or script error, shown over the interface until fixed.
     pub fn error(&self) -> Signal<Option<String>> {
         self.0.error.clone()
@@ -383,12 +401,14 @@ impl ScriptHost {
     /// Evaluates every script again and remounts the interface. State is kept.
     /// On failure the previous interface stays mounted and the error is shown.
     pub fn reload(&self) -> Result<(), String> {
+        self.0.commands.begin();
         let loaded = self.load();
         // After loading: the files it required are watched too.
         *self.0.stamps.borrow_mut() = self.stamps();
         match loaded {
             Ok(loaded) => {
                 *self.0.current.borrow_mut() = Some(Rc::new(loaded));
+                self.0.commands.publish();
                 self.0.runtime.batch(|| {
                     self.0.error.set(None);
                     self.0.generation.update(|g| *g += 1);
@@ -679,8 +699,13 @@ impl ScriptHost {
             runtime: self.0.runtime.clone(),
             scope: RefCell::default(),
             retained: RefCell::default(),
+            actions: self.0.actions.clone(),
         });
         node::install(&lua).map_err(fail)?;
+        let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
+        term::install(&lua, &ui, self.0.terms.clone()).map_err(fail)?;
+        command::install(&lua, &ui, self.0.commands.clone()).map_err(fail)?;
+        ui.set_readonly(true);
         anime::api::install(&lua).map_err(fail)?;
         self.install_require(&lua, script.dir()).map_err(fail)?;
         lua.sandbox(true).map_err(fail)?;

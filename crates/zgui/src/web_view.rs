@@ -453,9 +453,37 @@ pub fn web_view_src(web: &WebView, src: impl FnMut() -> String + 'static) -> Vie
 pub fn native_view(content: NativeContent) -> View {
     let web = match &content {
         NativeContent::Web(web) => Some(web.clone()),
-        NativeContent::Platform(_) => None,
+        _ => None,
     };
     native(content, web, None)
+}
+/// What takes keyboard focus with a native node.
+enum Focusable {
+    Web(WebView),
+    Terminal(crate::terminal::Terminal),
+}
+impl Focusable {
+    fn of(content: &NativeContent) -> Option<Self> {
+        match content {
+            NativeContent::Web(web) => Some(Self::Web(web.clone())),
+            NativeContent::Terminal(term) => Some(Self::Terminal(term.clone())),
+            NativeContent::Platform(_) => None,
+        }
+    }
+    fn focused(&self) -> bool {
+        match self {
+            Self::Web(web) => web.focused(),
+            Self::Terminal(term) => term.focused(),
+        }
+    }
+    fn focus(&self, on: bool) {
+        match (self, on) {
+            (Self::Web(web), true) => web.focus(),
+            (Self::Web(web), false) => web.blur(),
+            (Self::Terminal(term), true) => term.focus(),
+            (Self::Terminal(term), false) => term.blur(),
+        }
+    }
 }
 fn native(
     content: NativeContent,
@@ -472,14 +500,14 @@ fn native(
             });
             cx.retain(effect);
         }
-        let focus = web.clone();
-        let mut root = div().focusable(web.is_some()).on_event(move |event| {
-            // The page's keyboard focus follows the node's: Tab into it,
+        let focus = Focusable::of(&content);
+        let mut root = div().focusable(focus.is_some()).on_event(move |event| {
+            // The view's keyboard focus follows the node's: Tab into it,
             // or focus moved away from it in zgui.
-            let Some(web) = &focus else { return };
+            let Some(focus) = &focus else { return };
             match event.event {
-                InputEvent::Focus if !web.focused() => web.focus(),
-                InputEvent::Blur if web.focused() => web.blur(),
+                InputEvent::Focus if !focus.focused() => focus.focus(true),
+                InputEvent::Blur if focus.focused() => focus.focus(false),
                 _ => {}
             }
         });
@@ -512,6 +540,17 @@ fn placeholder(content: NativeContent) -> View {
                     "Web view".into()
                 } else {
                     format!("Web view · {url}")
+                }
+            })
+        }
+        NativeContent::Terminal(term) => {
+            let term = term.clone();
+            crate::compose::text_signal(move || {
+                let title = term.title();
+                if title.is_empty() {
+                    "Terminal".into()
+                } else {
+                    format!("Terminal · {title}")
                 }
             })
         }

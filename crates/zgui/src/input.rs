@@ -173,6 +173,24 @@ pub struct EventContext {
     drag_accepted: Option<NodeId>,
 }
 impl EventContext {
+    /// `event` at `target`, in the target phase, nothing decided yet.
+    pub(crate) fn new(event: InputEvent, target: NodeId) -> Self {
+        Self {
+            event,
+            target,
+            current_target: target,
+            phase: EventPhase::Target,
+            stopped: false,
+            immediate: false,
+            prevented: false,
+            focus: None,
+            capture: None,
+            pointer_modifiers: Modifiers::default(),
+            click_count: 0,
+            drag_request: None,
+            drag_accepted: None,
+        }
+    }
     /// Request a typed drag from this listener during a pointer move.
     /// Start a drag from this pointer move; the current position is the grab point.
     pub fn start_drag<T: 'static>(&mut self, payload: T) {
@@ -316,12 +334,19 @@ struct State {
     captured: Option<NodeId>,
     capture_button: Option<PointerButton>,
     hovered: Option<NodeId>,
+    /// Where the pointer last was over the window (None: outside it).
+    pointer: Option<(f32, f32)>,
     file_hovered: Option<NodeId>,
     pressed: Option<NodeId>,
     key_pressed: Option<(NodeId, Key)>,
     scopes: Vec<FocusScope>,
     clicks: ClickTracker,
     drag: Option<drag::DragSession>,
+    /// Listeners of the drag's source removed while it went on (a drop that
+    /// moves the dragged thing elsewhere): they still hear the drag end.
+    drag_orphans: Vec<Callback>,
+    /// The source of a drag being finished (its drop and end delivering).
+    drag_ending: Option<NodeId>,
 }
 #[derive(Clone, Default)]
 pub struct InputDispatcher {
@@ -344,6 +369,11 @@ impl Drop for InputBinding {
                     .position(|entry| entry.token == self.token)?;
                 Some(listeners.remove(index))
             });
+            if let Some(entry) = &removed
+                && s.drag.as_ref().map(|drag| drag.source).or(s.drag_ending) == Some(self.node)
+            {
+                s.drag_orphans.push(entry.callback.clone());
+            }
             let mut disabled_observer = None;
             if s.entries.get(&self.node).is_some_and(Vec::is_empty) {
                 s.entries.remove(&self.node);
@@ -696,6 +726,13 @@ impl InputDispatcher {
     pub fn unregister(&self, node: NodeId) {
         let mut s = self.state.borrow_mut();
         let removed = s.entries.remove(&node);
+        if let Some(entries) = &removed
+            && s.drag.as_ref().map(|drag| drag.source).or(s.drag_ending) == Some(node)
+        {
+            let callbacks: Vec<Callback> =
+                entries.iter().map(|entry| entry.callback.clone()).collect();
+            s.drag_orphans.extend(callbacks);
+        }
         let observer = s.disabled_observers.remove(&node);
         s.options.remove(&node);
         if s.clicks.0.is_some_and(|click| click.target == node) {
@@ -726,6 +763,33 @@ impl InputDispatcher {
     }
     pub fn hovered(&self) -> Option<NodeId> {
         self.state.borrow().hovered
+    }
+    /// Hover what is under the resting pointer now that layout moved: a
+    /// button that slid away from it stops being hovered (and what slid
+    /// under it starts) without waiting for the pointer to move. Nothing
+    /// changes while a press holds the pointer or a drag is under way.
+    pub fn refresh_hover(&self, scene: &Rc<RefCell<Scene>>) {
+        let (pointer, old) = {
+            let state = self.state.borrow();
+            if state.captured.is_some() || state.drag.is_some() {
+                return;
+            }
+            (state.pointer, state.hovered)
+        };
+        let Some((x, y)) = pointer else {
+            return;
+        };
+        let hit = self.hit_target(&scene.borrow(), x, y);
+        if hit == old {
+            return;
+        }
+        self.state.borrow_mut().hovered = hit;
+        if let Some(id) = old.filter(|id| scene.borrow().contains(*id)) {
+            self.route(scene, id, InputEvent::PointerLeave);
+        }
+        if let Some(id) = hit {
+            self.route(scene, id, InputEvent::PointerEnter);
+        }
     }
     pub fn is_enabled(&self, scene: &Scene, node: NodeId) -> bool {
         self.enabled(scene, node)
@@ -966,19 +1030,9 @@ impl InputDispatcher {
             }
         }
         let mut ctx = EventContext {
-            event,
-            target,
-            current_target: target,
-            phase: EventPhase::Target,
-            stopped: false,
-            immediate: false,
-            prevented: false,
-            focus: None,
-            capture: None,
             pointer_modifiers,
             click_count,
-            drag_request: None,
-            drag_accepted: None,
+            ..EventContext::new(event, target)
         };
         let phases = path
             .iter()
@@ -1156,6 +1210,13 @@ impl InputDispatcher {
                 InputEvent::PointerMove { x, y } | InputEvent::PointerUp { x, y, .. } => {
                     state.clicks.moved(*x, *y)
                 }
+                _ => {}
+            }
+            match &event {
+                InputEvent::PointerMove { x, y }
+                | InputEvent::PointerDown { x, y, .. }
+                | InputEvent::PointerUp { x, y, .. } => state.pointer = Some((*x, *y)),
+                InputEvent::PointerLeave => state.pointer = None,
                 _ => {}
             }
         }

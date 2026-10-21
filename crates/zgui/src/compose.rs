@@ -93,7 +93,7 @@ impl Tasks {
 }
 type Registry = Rc<RefCell<HashMap<String, Vec<NodeId>>>>;
 #[derive(Clone)]
-struct Environment {
+pub(crate) struct Environment {
     services: ServiceScope,
     typography: Signal<Typography>,
     registry: Registry,
@@ -265,6 +265,9 @@ pub struct View {
     events: Vec<EventListener>,
     keymap: crate::actions::Keymap,
     pub(crate) drag_preview: Option<crate::compose_drag::PreviewBuilder>,
+    pub(crate) context_menu: Option<crate::compose_context_menu::ContextMenuBuilder>,
+    pub(crate) context_menu_style: Option<Styles>,
+    pub(crate) context_menu_below: Option<bool>,
     focusable: Option<bool>,
     id: Option<String>,
     scrollbar: Option<bool>,
@@ -279,6 +282,11 @@ pub struct View {
     mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
 }
 impl View {
+    /// Merge `styles` over this view's own (the crate's builders use it).
+    pub(crate) fn merge_styles(mut self, styles: &Styles) -> Self {
+        self.styles.merge(styles);
+        self
+    }
     /// Set the controlled checked state of a menu item, including accessibility.
     pub fn menu_checked(mut self, checked: bool) -> Self {
         assert!(
@@ -343,6 +351,9 @@ impl View {
             events: Vec::new(),
             keymap: crate::actions::Keymap::new(),
             drag_preview: None,
+            context_menu: None,
+            context_menu_style: None,
+            context_menu_below: None,
             focusable: None,
             id: None,
             scrollbar: None,
@@ -502,6 +513,15 @@ impl View {
         if self.drag_preview.is_some() {
             inner.drag_preview = self.drag_preview;
         }
+        if self.context_menu.is_some() {
+            inner.context_menu = self.context_menu;
+        }
+        if self.context_menu_style.is_some() {
+            inner.context_menu_style = self.context_menu_style;
+        }
+        if self.context_menu_below.is_some() {
+            inner.context_menu_below = self.context_menu_below;
+        }
         if self.focusable.is_some() {
             inner.focusable = self.focusable;
         }
@@ -583,6 +603,7 @@ pub fn text(value: impl Into<String>) -> View {
 pub fn text_signal(compute: impl FnMut() -> String + 'static) -> View {
     View::new(Kind::BoundText(Box::new(compute)))
 }
+pub use crate::compose_context_menu::ContextMenuEvent;
 pub use crate::compose_rich::{RichTextView, TextSpan, rich_text, text_span};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
@@ -1214,7 +1235,12 @@ impl Drop for IdRegistration {
         }
     }
 }
-fn mount(ui: &mut Ui, parent: NodeId, mut view: View, mut environment: Environment) -> NodeId {
+pub(crate) fn mount(
+    ui: &mut Ui,
+    parent: NodeId,
+    mut view: View,
+    mut environment: Environment,
+) -> NodeId {
     // Extract closures while retaining the root refinements on their wrapper.
     let kind = std::mem::replace(&mut view.kind, Kind::Container(Layout::Column));
     match kind {
@@ -1859,6 +1885,11 @@ fn mount_element(
     // constructor (such as an editor) already registered its default handlers.
     if let Some(preview) = view.drag_preview {
         crate::compose_drag::mount(ui, root, preview);
+    }
+    if let Some(build) = view.context_menu.take() {
+        let style = view.context_menu_style.take();
+        let below = view.context_menu_below.unwrap_or(false);
+        crate::compose_context_menu::mount(ui, root, build, style, below, environment.clone());
     }
     for callback in view.events.into_iter().rev() {
         let binding = ui.input.listen_first(root, callback);

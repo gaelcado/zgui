@@ -4450,6 +4450,7 @@ dependencies = [
  "dbus",
  "dbus-crossroads",
  "fontdue",
+ "libc",
  "muda",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -4472,9 +4473,15 @@ dependencies = [
  "wayland-protocols",
  "winit",
  "zgui",
+ "zgui-ghostty-sys",
  "zgui-gpu",
+ "zgui-script",
  "zgui-workload",
 ]
+
+[[package]]
+name = "zgui-ghostty-sys"
+version = "0.1.0"
 
 [[package]]
 name = "zgui-gpu"

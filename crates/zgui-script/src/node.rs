@@ -291,6 +291,7 @@ impl Node {
             Kind::Svg { .. } => "svg",
             Kind::Canvas(_) => "canvas",
             Kind::WebView(_) => "webview",
+            Kind::Terminal(_) => "terminal",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -336,6 +337,31 @@ pub(crate) struct Events {
     /// `fn({ w, h }, element)` when layout gives the node a new size (and
     /// once at first layout), as a ResizeObserver reports.
     pub resize: Option<Function>,
+    /// Drag and drop within the window (payloads are script values):
+    /// `on_drag() -> payload` starts a drag after a 4-point move;
+    /// `drag_preview(payload) -> node` follows the pointer;
+    /// `on_drag_end(payload, accepted)` on the source when it ends.
+    pub drag: Option<Function>,
+    pub drag_preview: Option<Function>,
+    pub drag_end: Option<Function>,
+    /// On a destination: `drop_when(payload) -> bool` (default: all),
+    /// `on_drag_over(payload, { x, y, local_x, local_y, w, h })` while an
+    /// accepted drag hovers, `on_drag_leave(payload)` when it leaves,
+    /// `on_drop(payload, { ... })` on release.
+    pub drop: Option<Function>,
+    pub drop_when: Option<Function>,
+    pub drag_over: Option<Function>,
+    pub drag_leave: Option<Function>,
+    /// `fn({ x, y, local_x, local_y }) -> { menu_item, … }`: a secondary
+    /// click (control-click on macOS) shows what it returns as a menu at
+    /// the pointer; nothing returned, no menu.
+    pub context_menu: Option<Function>,
+    /// `context_menu_style = { bg, rounded, p, backdrop_blur, … }`: the
+    /// menu panel's styles (plain values).
+    pub context_menu_style: Option<Styles>,
+    /// `context_menu_below = true`: the menu opens under the node (a tab's),
+    /// not at the pointer.
+    pub context_menu_below: bool,
 }
 impl Kind {
     /// Kinds that become a container of whatever they currently show.
@@ -361,6 +387,12 @@ impl Events {
             || self.focus.is_some()
             || self.blur.is_some()
             || self.wheel.is_some()
+    }
+    pub fn any_drag(&self) -> bool {
+        self.drag.is_some()
+            || self.drop.is_some()
+            || self.drag_over.is_some()
+            || self.drag_leave.is_some()
     }
 }
 
@@ -392,6 +424,9 @@ pub(crate) enum Kind {
     Canvas(Function),
     /// `ui.webview { ... }`: a native web view laid out like a div.
     WebView(Box<WebSpec>),
+    /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
+    /// where the node is.
+    Terminal(zgui::terminal::Terminal),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -677,6 +712,8 @@ pub(crate) struct Env {
     pub scope: RefCell<Option<Rc<Scope>>>,
     /// Effects created outside components: they live as long as the script.
     pub retained: RefCell<Vec<Box<dyn Any>>>,
+    /// The host's actions (`ui.action` binds them, `ui.invoke` calls them).
+    pub actions: crate::Actions,
 }
 
 /// What a component instance owns while it is mounted.
@@ -1038,6 +1075,29 @@ fn set_handler(events: &mut Events, key: &str, value: mlua::Value) -> mlua::Resu
             events.resize = Some(f);
             return Ok(true);
         }
+        "context_menu" => {
+            let mlua::Value::Function(f) = value else {
+                return Err(mlua::Error::runtime("context_menu takes a function"));
+            };
+            events.context_menu = Some(f);
+            return Ok(true);
+        }
+        "on_drag" | "drag_preview" | "on_drag_end" | "on_drop" | "drop_when" | "on_drag_over"
+        | "on_drag_leave" => {
+            let mlua::Value::Function(f) = value else {
+                return Err(mlua::Error::runtime(format!("{key} takes a function")));
+            };
+            *match key {
+                "on_drag" => &mut events.drag,
+                "drag_preview" => &mut events.drag_preview,
+                "on_drag_end" => &mut events.drag_end,
+                "on_drop" => &mut events.drop,
+                "drop_when" => &mut events.drop_when,
+                "on_drag_over" => &mut events.drag_over,
+                _ => &mut events.drag_leave,
+            } = Some(f);
+            return Ok(true);
+        }
         _ => return Ok(false),
     };
     *slot = Some(handler(value)?);
@@ -1226,6 +1286,35 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
             }
             "disabled" if !matches!(value, mlua::Value::Table(_)) => {
                 node.disabled = Some(source(lua, Ty::Bool, "disabled", value)?);
+            }
+            "context_menu_below" => {
+                let mlua::Value::Boolean(below) = value else {
+                    return Err(mlua::Error::runtime("`context_menu_below` takes a boolean"));
+                };
+                node.events.context_menu_below = below;
+            }
+            "context_menu_style" => {
+                let mlua::Value::Table(styles) = value else {
+                    return Err(mlua::Error::runtime(
+                        "`context_menu_style` takes a table of styles",
+                    ));
+                };
+                let mut lits = Vec::new();
+                for pair in styles.pairs::<String, mlua::Value>() {
+                    let (name, value) = pair?;
+                    let prop = Prop::parse(&name).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "unknown style `{name}` in `context_menu_style`"
+                        ))
+                    })?;
+                    let Source::Lit(lit) = source(lua, prop.ty(), &name, value)? else {
+                        return Err(mlua::Error::runtime(format!(
+                            "`context_menu_style.{name}` must be a plain value"
+                        )));
+                    };
+                    lits.push((prop, lit));
+                }
+                node.events.context_menu_style = Some(lits.into());
             }
             "hover" | "active" | "focus" | "disabled" => {
                 let pseudo = match key.as_str() {
@@ -1932,6 +2021,45 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             node_ud(lua, node)
         })?,
     )?;
+    // `ui.invoke(name, arg)`: call a host action now, from any handler.
+    ui.set(
+        "invoke",
+        lua.create_function(|lua, (name, arg): (String, Option<Value>)| {
+            let action = env(lua)?.actions.borrow().get(&name).cloned();
+            match action {
+                Some(action) => {
+                    action(arg.unwrap_or(Value::Nil));
+                    Ok(())
+                }
+                None => Err(mlua::Error::runtime(format!(
+                    "no host action named `{name}`"
+                ))),
+            }
+        })?,
+    )?;
+    ui.set(
+        "terminal",
+        lua.create_function(|lua, table: Table| {
+            let term = match table.get::<mlua::Value>("term")? {
+                mlua::Value::UserData(ud) if ud.is::<crate::term::TermUd>() => {
+                    ud.borrow::<crate::term::TermUd>()?.term.clone()
+                }
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.terminal needs `term = ui.term(id)`, not {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            table.raw_set("term", mlua::Value::Nil)?;
+            let node = fill(
+                lua,
+                Node::new(owner(lua)?, Kind::Terminal(term)),
+                Some(&table),
+            )?;
+            node_ud(lua, node)
+        })?,
+    )?;
     ui.set(
         "shader",
         lua.create_function(|_, (source, opts): (String, Option<Table>)| {
@@ -2176,7 +2304,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             action(lua, Action::Host(name.into(), arg))
         })?,
     )?;
-    ui.set_readonly(true);
+    // Read-only once the host's own parts are in (see `ScriptHost::run`).
     lua.globals().set("ui", ui)
 }
 

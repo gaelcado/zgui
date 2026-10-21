@@ -41,6 +41,10 @@ impl MenuAccelerator {
             {
                 s.to_ascii_uppercase()
             }
+            // Punctuation keys, by the character they type unshifted.
+            Key::Character(s) if s.chars().count() == 1 && "`\\[],=-.';/".contains(s.as_str()) => {
+                s.clone()
+            }
             Key::Function(n) if (1..=35).contains(n) => format!("F{n}"),
             Key::Character(_) | Key::Function(_) => {
                 return Err(AppMenuError(

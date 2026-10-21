@@ -7,6 +7,8 @@
 //! then present both planes and move the native views and the platform
 //! backdrops under overlay glass in one Core Animation transaction, so they
 //! never drift a frame apart. A window without native views does none of it.
+#[cfg(all(target_os = "macos", feature = "ghostty"))]
+mod ghostty;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

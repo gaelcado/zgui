@@ -33,6 +33,8 @@ use std::{
 pub enum NativeContent {
     /// A web page (see [`crate::web_view`]).
     Web(crate::web_view::WebView),
+    /// A terminal session (see [`crate::terminal`]).
+    Terminal(crate::terminal::Terminal),
     /// A platform view the host knows how to mount: on macOS a
     /// `Retained<NSView>` (see `zgui_desktop::native_view`).
     Platform(Rc<dyn Any>),
@@ -47,6 +49,14 @@ impl NativeContent {
                     "Web view".into()
                 } else {
                     format!("Web view · {url}")
+                }
+            }
+            Self::Terminal(term) => {
+                let title = term.state().with_untracked(|state| state.title.clone());
+                if title.is_empty() {
+                    "Terminal".into()
+                } else {
+                    format!("Terminal · {title}")
                 }
             }
             Self::Platform(_) => "Native view".into(),

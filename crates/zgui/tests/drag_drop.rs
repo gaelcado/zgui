@@ -311,3 +311,75 @@ fn preview_keeps_grab_point_or_fixed_cursor_offset() {
         view.unmount();
     }
 }
+
+#[test]
+fn overlays_receive_drops_over_their_children() {
+    let mut ui = Ui::new(400., 300.);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let dropped = log.clone();
+    let view = ui.mount(
+        column()
+            .child(div().id("source").size(40., 40.).on_drag(|| Card(3)))
+            .child(
+                overlay()
+                    .id("area")
+                    .size(200., 200.)
+                    .on_drop(move |card: &Card, _| dropped.borrow_mut().push(card.0))
+                    .child(div().id("child").size(100., 100.)),
+            ),
+    );
+    ui.prepare_frame();
+    let bounds = |id: &str| ui.scene.borrow().bounds(view.find(id).unwrap());
+    let (source, child) = (bounds("source"), bounds("child"));
+    down(&ui, source.x + 5., source.y + 5.);
+    moved(&ui, source.x + 15., source.y + 15.);
+    moved(&ui, child.x + 20., child.y + 20.);
+    up(&ui, child.x + 20., child.y + 20.);
+    assert_eq!(*log.borrow(), vec![3]);
+}
+
+#[test]
+fn a_source_the_drop_removes_still_hears_the_drag_end() {
+    let mut ui = Ui::new(400., 200.);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let here = ui.signal(true);
+    let (ended, gone) = (log.clone(), here.clone());
+    let view = ui.mount(
+        row()
+            .child(switch(
+                move || here.get(),
+                move |here, _| {
+                    if !here {
+                        return div();
+                    }
+                    let ended = ended.clone();
+                    div()
+                        .id("source")
+                        .size(100., 80.)
+                        .on_drag(|| Card(3))
+                        .on_drag_end(move |_: &Card, accepted| {
+                            ended.borrow_mut().push(format!("end:{accepted}"))
+                        })
+                },
+            ))
+            .child(
+                div()
+                    .id("destination")
+                    .size(100., 80.)
+                    // Taking the card moves it here: the source goes.
+                    .on_drop(move |_: &Card, _| {
+                        gone.set(false);
+                    }),
+            ),
+    );
+    ui.prepare_frame();
+    assert!(view.find("source").is_some());
+    down(&ui, 20., 20.);
+    moved(&ui, 60., 20.);
+    moved(&ui, 150., 20.);
+    assert!(ui.input.is_dragging());
+    up(&ui, 150., 20.);
+    assert!(view.find("source").is_none());
+    assert!(!ui.input.is_dragging());
+    assert_eq!(&*log.borrow(), &["end:true"]);
+}

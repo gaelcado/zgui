@@ -29,6 +29,13 @@ cargo run --release -p zgui-desktop --example dynamic_menus
 cargo run --release -p zgui-desktop --example platform_services
 ```
 
+A terminal multiplexer written in Luau, its terminals Ghostty's (macOS; needs
+Zig 0.16, `brew install zig@0.16`: see `crates/zgui-ghostty-sys`):
+
+```sh
+cargo run --release -p zgui-desktop --features ghostty --example terminal
+```
+
 Linux builds need the native development libraries for fontconfig, xkbcommon and
 D-Bus, plus `pkg-config` (for example `libfontconfig1-dev libxkbcommon-dev
 libdbus-1-dev pkg-config` on Debian/Ubuntu). File dialogs use the desktop's XDG

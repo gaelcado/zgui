@@ -1030,6 +1030,7 @@ impl Ui {
             if hidden_focus {
                 self.input.focus(&self.scene, None);
             }
+            self.input.refresh_hover(&self.scene);
             self.storage
                 .editor_layout_revision
                 .set(Some(layout_revision));

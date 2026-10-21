@@ -96,6 +96,73 @@ type WebOptions = {
 	new_windows: boolean?,
 }
 type WebEvent = { kind: "started" | "committed" | "finished" | "failed" | "changed", url: string }
+--- `ui.term(id, opts)`: a terminal session (a Ghostty surface with the
+--- desktop host's `ghostty` feature). Sessions outlive reloads: the run that
+--- asks for `id` again gets the same one. Its fields are tracked.
+declare extern type Term with
+	id: string
+	-- What the running program set (OSC 0/2); "" until it does.
+	title: string
+	-- The shell's working directory (OSC 7); "" until reported.
+	pwd: string
+	-- The foreground process ("zsh", "nvim", "claude").
+	process: string
+	pid: number
+	focused: boolean
+	-- The bell rang since the terminal last had focus.
+	bell: boolean
+	-- A program's progress (OSC 9;4): 0 to 1, negative while indeterminate.
+	progress: number?
+	exited: number?
+	columns: number
+	rows: number
+	-- The pointer over it, in points from its top left; nil outside.
+	pointer: { x: number, y: number }?
+	function focus(self): ()
+	function blur(self): ()
+	-- Text as if typed ("ls\r" runs ls).
+	function input(self, text: string): ()
+	function paste(self, text: string): ()
+	-- A Ghostty binding action: "copy_to_clipboard", "clear_screen", ...
+	function binding(self, action: string): ()
+	-- Whether closing would end something other than an idle shell.
+	function needs_confirm(self): boolean
+	-- End the session (its process is hung up).
+	function close(self): ()
+end
+type TermOptions = {
+	-- A command line; nil runs the login shell.
+	command: string?,
+	-- Where it starts ("~" is home); nil is home.
+	cwd: string?,
+	env: { [string]: string }?,
+	font_size: number?,
+	-- Handlers (the latest run's are called).
+	on_title: ((title: string) -> ())?,
+	on_pwd: ((pwd: string) -> ())?,
+	on_process: ((name: string) -> ())?,
+	on_exit: ((code: number) -> ())?,
+	-- The terminal asks to close: its process exited (alive = false), or
+	-- a close binding ran with something still running.
+	on_close: ((alive: boolean) -> ())?,
+	on_bell: (() -> ())?,
+	-- A shell-integrated command finished.
+	on_command: ((exit_code: number?, duration_ms: number) -> ())?,
+	on_notify: ((title: string, body: string) -> ())?,
+}
+--- `ui.command(opts)`: an app command, shown as a menu item; its key
+--- reaches it wherever focus is (terminals and web pages included).
+type CommandOptions = {
+	id: string?,
+	title: string?,
+	-- "File", "Edit", "View", "Window" or any other menu.
+	menu: string?,
+	-- Modifiers and a key joined by "+": "cmd+shift+d", "cmd+alt+arrowleft".
+	key: string?,
+	run: (() -> ())?,
+	-- A separator line in `menu` instead of a command.
+	separator: boolean?,
+}
 declare extern type Brush with end
 declare extern type Shader with end
 type Paint = Color | Brush
@@ -405,9 +472,34 @@ type Props = {
 	on_message: ((value: any) -> ())?,
 	on_error: ((url: string, err: string) -> ())?,
 	on_new_window: ((url: string) -> ())?,
+	-- Terminals: the session (`ui.term(id)`).
+	term: Term?,
+	-- Drag and drop within the window; payloads are plain values.
+	-- A source: `on_drag` returns the payload once the pointer moves 4
+	-- points; `drag_preview` builds what follows the pointer.
+	on_drag: (() -> any)?,
+	drag_preview: ((payload: any) -> Node)?,
+	on_drag_end: ((payload: any, accepted: boolean) -> ())?,
+	-- A destination: `drop_when` filters payloads (default: all).
+	drop_when: ((payload: any) -> boolean)?,
+	on_drag_over: ((payload: any, e: DragPoint) -> ())?,
+	on_drag_leave: ((payload: any) -> ())?,
+	on_drop: ((payload: any, e: DragPoint) -> ())?,
+	-- A secondary click (control-click on macOS) shows the returned
+	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
+	-- returning nil (or nothing) shows none.
+	context_menu: ((e: { x: number, y: number, local_x: number, local_y: number }) -> { Node }?)?,
+	-- The context menu panel's look (plain values): bg, rounded, p, gap,
+	-- backdrop_blur, border, shadow, w, …
+	context_menu_style: Styles?,
+	-- Open the context menu under the node, from its left edge (a tab's),
+	-- rather than at the pointer.
+	context_menu_below: boolean?,
 	-- Children.
 	[number]: Child,
 }
+
+type DragPoint = { x: number, y: number, local_x: number, local_y: number, w: number, h: number }
 
 type Container = (props: Props) -> Node
 
@@ -689,6 +781,9 @@ declare ui: {
 	canvas: Container,
 	webview: Container,
 	web: (opts: WebOptions?) -> Web,
+	terminal: Container,
+	term: (id: string, opts: TermOptions?) -> Term,
+	command: (opts: CommandOptions) -> (),
 	checkbox: Container,
 	input: Container,
 	textarea: Container,
@@ -724,6 +819,8 @@ declare ui: {
 	ref: () -> Ref,
 	component: (build: (props: { [any]: any }) -> Node) -> ((props: { [any]: any }?) -> Node),
 	action: (name: string, arg: any?) -> Action,
+	-- Call a host action now (`ui.action` binds one to a handler instead).
+	invoke: (name: string, arg: any?) -> (),
 	set: (state: State, value: any) -> Action,
 	toggle: (state: State) -> Action,
 	add: (state: State, by: number?) -> Action,

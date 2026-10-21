@@ -150,8 +150,40 @@ fn style(window: &NSWindow, material: isize) {
             let _: () = msg_send![window, setToolbar: &*toolbar];
             // NSWindowToolbarStyleUnifiedCompact
             let _: () = msg_send![window, setToolbarStyle: 4_isize];
+            toolbar_passes_through();
         }
         frost(window, material);
+    }
+}
+
+/// The empty toolbar is only there to center the traffic lights: presses in
+/// it go to the content under it. Otherwise it keeps a press's drag and
+/// release events (zgui would start a drag and never see it end). The
+/// traffic lights are in the titlebar view, not the toolbar's, and stay
+/// clickable.
+fn toolbar_passes_through() {
+    use objc2::runtime::Sel;
+    use objc2_foundation::NSPoint;
+    extern "C-unwind" fn nothing(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        _point: NSPoint,
+    ) -> *mut AnyObject {
+        std::ptr::null_mut()
+    }
+    let Some(class) = AnyClass::get(c"NSToolbarView") else {
+        return;
+    };
+    unsafe {
+        let imp: objc2::runtime::Imp = std::mem::transmute(
+            nothing as extern "C-unwind" fn(*mut AnyObject, Sel, NSPoint) -> *mut AnyObject,
+        );
+        objc2::ffi::class_replaceMethod(
+            class as *const AnyClass as *mut AnyClass,
+            sel!(hitTest:),
+            imp,
+            c"@@:{CGPoint=dd}".as_ptr(),
+        );
     }
 }
 

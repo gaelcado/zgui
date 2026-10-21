@@ -56,6 +56,88 @@ const NATIVE_CUTS: usize = 4;
 /// own corners are its layer's).
 const BACKDROP_CUTS: usize = 3;
 
+thread_local! {
+    /// Each window's router, by its content view: native views hand zgui
+    /// the input they do not use.
+    static ROUTERS: RefCell<Vec<(usize, Weak<Router>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A secondary click a native view did not use (a terminal's right click
+/// with no program asking for the mouse): zgui gets it as its own, at the
+/// same point, so a context menu there opens.
+#[allow(dead_code)]
+pub(crate) fn forward_secondary_click(view: &NSView, event: &objc2_app_kit::NSEvent) {
+    let Some(content) = view.window().and_then(|window| window.contentView()) else {
+        return;
+    };
+    let point = content.convertPoint_fromView(event.locationInWindow(), None);
+    let y = if content.isFlipped() {
+        point.y
+    } else {
+        content.frame().size.height - point.y
+    };
+    let key = Retained::as_ptr(&content) as usize;
+    let router = ROUTERS.with(|routers| {
+        routers
+            .borrow()
+            .iter()
+            .find(|(view, _)| *view == key)
+            .and_then(|(_, router)| router.upgrade())
+    });
+    let Some(router) = router else {
+        return;
+    };
+    let (x, y) = (point.x as f32, y as f32);
+    zgui::native_view::post(move || {
+        let Some(scene) = router.scene.upgrade() else {
+            return;
+        };
+        use zgui::input::{InputEvent, PointerButton};
+        let button = PointerButton::Secondary;
+        router
+            .input
+            .dispatch(&scene, InputEvent::PointerDown { x, y, button });
+        router
+            .input
+            .dispatch(&scene, InputEvent::PointerUp { x, y, button });
+    });
+}
+
+/// The cursor zgui shows at `event`'s point in `view`'s window (what it
+/// draws over a native view there: a pane's grip), if it sets one.
+#[allow(dead_code)]
+pub(crate) fn zgui_cursor_at(
+    view: &NSView,
+    event: &objc2_app_kit::NSEvent,
+) -> Option<zgui::cursor::Cursor> {
+    let content = view.window().and_then(|window| window.contentView())?;
+    let point = content.convertPoint_fromView(event.locationInWindow(), None);
+    let y = if content.isFlipped() {
+        point.y
+    } else {
+        content.frame().size.height - point.y
+    };
+    let key = Retained::as_ptr(&content) as usize;
+    let router = ROUTERS.with(|routers| {
+        routers
+            .borrow()
+            .iter()
+            .find(|(view, _)| *view == key)
+            .and_then(|(_, router)| router.upgrade())
+    })?;
+    let scene = router.scene.upgrade()?;
+    let scene = scene.try_borrow().ok()?;
+    scene.cursor_at(point.x as f32, y as f32)
+}
+
+/// Whether `view` or a view in it has its window's keyboard focus.
+fn has_focus(view: &NSView) -> bool {
+    view.window()
+        .and_then(|window| window.firstResponder())
+        .and_then(|responder| responder.downcast::<NSView>().ok())
+        .is_some_and(|responder| responder.isDescendantOf(view))
+}
+
 /// One Core Animation transaction, without implicit animation: committed on drop.
 pub(crate) struct Transaction;
 impl Transaction {
@@ -438,9 +520,10 @@ fn shapes(clip: Rect, rounded: &[RoundRect], levels: usize) -> Vec<Option<Shape>
 
 struct Clip {
     cuts: Vec<Cut>,
-    /// The native view it holds, and the controller when a page.
+    /// The native view it holds, and the controller when a page or a terminal.
     content: Option<Retained<NSView>>,
     web: Option<zgui::web_view::WebView>,
+    term: Option<zgui::terminal::Terminal>,
     placed: Option<NativePlacement>,
     background: Option<Retained<objc2_app_kit::NSColor>>,
 }
@@ -498,6 +581,7 @@ impl Surfaces {
         // SAFETY: winit's content view, alive while its window is.
         let parent: Retained<NSView> =
             unsafe { Retained::retain(handle.ns_view.as_ptr().cast()) }.ok_or("no content view")?;
+        let parent_key = Retained::as_ptr(&parent) as usize;
         let overlay_root = CALayer::new();
         no_actions(&overlay_root);
         let overlay_host = CALayer::new();
@@ -528,7 +612,15 @@ impl Surfaces {
         Ok(Self {
             mtm,
             parent,
-            router: Rc::new(router),
+            router: {
+                let router = Rc::new(router);
+                ROUTERS.with(|routers| {
+                    let mut routers = routers.borrow_mut();
+                    routers.retain(|(_, weak)| weak.strong_count() > 0);
+                    routers.push((parent_key, Rc::downgrade(&router)));
+                });
+                router
+            },
             clips: Vec::new(),
             backdrops: Vec::new(),
             overlay_view,
@@ -582,6 +674,17 @@ impl Surfaces {
             None => self.overlay_host.setHidden(true),
             Some(rect) => {
                 self.overlay_host.setFrame(in_space(rect, height, down));
+                // The presenting layers fill it exactly. Autoresizing alone
+                // drifts: it applies each change's delta to their old frames,
+                // and a host resized more than once before they are laid out
+                // leaves them taller than it, the plane's paint stretched and
+                // shifted.
+                let bounds = self.overlay_host.bounds();
+                if let Some(layers) = unsafe { self.overlay_host.sublayers() } {
+                    for layer in layers.iter() {
+                        layer.setFrame(bounds);
+                    }
+                }
                 self.overlay_host.setHidden(false);
             }
         }
@@ -593,13 +696,19 @@ impl Surfaces {
         if self.overlay_view.frame() != bounds {
             self.overlay_view.setFrame(bounds);
         }
-        // Unmounted: their cuts go (pages stay with their controllers).
+        // Unmounted: their cuts go (pages stay with their controllers). A
+        // view with keyboard focus that is mounted again elsewhere (its node
+        // rebuilt) gets it back once placed.
         let views = natives.views();
         let mut order_changed = false;
+        let mut refocus: Option<Retained<NSView>> = None;
         self.clips.retain(|(node, clip)| {
             let kept = views.iter().any(|(other, _)| other == node);
             if !kept {
                 if let Some(content) = &clip.content {
+                    if has_focus(content) {
+                        refocus = Some(content.clone());
+                    }
                     content.removeFromSuperview();
                 }
                 clip.outer().removeFromSuperview();
@@ -619,7 +728,8 @@ impl Surfaces {
                 .find(|(other, _)| other == node)
                 .unwrap()
                 .1;
-            // Mount what it shows (a page is made on first mount).
+            // Mount what it shows (a page or a terminal is made on first mount).
+            let mut term = None;
             let (view, web): (Option<Retained<NSView>>, Option<zgui::web_view::WebView>) =
                 match content {
                     NativeContent::Web(web) => {
@@ -629,6 +739,10 @@ impl Surfaces {
                             .downcast_ref::<webkit::MacWebView>()
                             .map(|page| page.view().retain());
                         (page, Some(web.clone()))
+                    }
+                    NativeContent::Terminal(terminal) => {
+                        term = Some(terminal.clone());
+                        (Self::terminal_view(terminal, self.mtm), None)
                     }
                     NativeContent::Platform(view) => {
                         (view.downcast_ref::<Retained<NSView>>().cloned(), None)
@@ -651,6 +765,11 @@ impl Surfaces {
                     old.removeFromSuperview();
                 }
                 if let Some(view) = &view {
+                    // Moving a view out of its window drops first responder
+                    // without asking it to resign: keep it where it was.
+                    if has_focus(view) {
+                        refocus = Some(view.clone());
+                    }
                     view.removeFromSuperview();
                     inner.addSubview(view);
                 }
@@ -658,6 +777,7 @@ impl Surfaces {
                 clip.placed = None;
             }
             clip.web = web;
+            clip.term = term;
             Self::place(clip, &bounds, split.native(*node).cloned());
         }
         // Pages in paint order, under backdrops and the overlay.
@@ -690,6 +810,11 @@ impl Surfaces {
                     Some(&above),
                 );
             }
+        }
+        if let Some(view) = refocus
+            && let Some(window) = view.window()
+        {
+            window.makeFirstResponder(Some(&view));
         }
         self.apply_backdrops(split.backdrops(), &bounds);
         let mut shared = self.shared.borrow_mut();
@@ -738,11 +863,30 @@ impl Surfaces {
         }
         cuts
     }
+    /// A terminal's view: its Ghostty surface (made on first mount), or
+    /// none without the `ghostty` feature or once it closed.
+    #[allow(unused_variables)]
+    fn terminal_view(
+        term: &zgui::terminal::Terminal,
+        mtm: MainThreadMarker,
+    ) -> Option<Retained<NSView>> {
+        #[cfg(feature = "ghostty")]
+        {
+            let backend = super::ghostty::backend(term, mtm)?;
+            backend
+                .as_any()
+                .downcast_ref::<super::ghostty::MacTerminal>()
+                .map(|terminal| terminal.view().retain())
+        }
+        #[cfg(not(feature = "ghostty"))]
+        None
+    }
     fn clip(&self, node: NodeId, bounds: &NSRect) -> Clip {
         Clip {
             cuts: self.cuts(NATIVE_CUTS, bounds, Some(node), Role::Route, Role::Inner),
             content: None,
             web: None,
+            term: None,
             placed: None,
             background: None,
         }
@@ -759,6 +903,11 @@ impl Surfaces {
                     && web.focused()
                 {
                     web.blur();
+                }
+                if let Some(term) = &clip.term
+                    && term.focused()
+                {
+                    term.blur();
                 }
                 clip.outer().setHidden(true);
             }
@@ -934,11 +1083,16 @@ impl Surfaces {
         }
         let previous = std::mem::replace(&mut self.focus, focused);
         for (node, clip) in &self.clips {
-            if let Some(web) = &clip.web {
-                let has = focused == Some(*node);
-                if web.focused() != has {
-                    web.update_state(|state| state.focused = has);
-                }
+            let has = focused == Some(*node);
+            if let Some(web) = &clip.web
+                && web.focused() != has
+            {
+                web.update_state(|state| state.focused = has);
+            }
+            if let Some(term) = &clip.term
+                && term.focused() != has
+            {
+                term.update_state(|state| state.focused = has);
             }
         }
         match focused {
