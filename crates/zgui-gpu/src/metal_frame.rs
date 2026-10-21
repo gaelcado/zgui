@@ -4,12 +4,13 @@
 //! then replays it into Metal, and its submission and wait add bookkeeping
 //! of their own: about half of an animating window's presentation CPU, for
 //! a frame of a handful of draws. The common frame (quads and text sampling
-//! the atlas, no filters) needs none of it: the same pipelines, built here
+//! the atlas, images and cached layers, no filters) needs none of it: the same pipelines, built here
 //! from the same WGSL through naga, record straight into a command buffer on
 //! wgpu's own queue, so ordering against wgpu's submissions holds. Backdrop
 //! filters mixed by dual-source blending are drawn here too, their blur
-//! passes splitting the frame's pass. Frames needing anything else take the
-//! wgpu path.
+//! passes splitting the frame's pass, and so are layer effects' passes
+//! (effects.rs), ahead of it. Frames needing anything else take the wgpu
+//! path.
 use crate::{GpuError, Shading};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
@@ -29,6 +30,11 @@ type Encoder = Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>;
 
 /// The vertex buffer's slot; slot 0 holds the viewport.
 const VERTICES: usize = 1;
+/// The quads' clip regions (`crate::Region`) for their fragments, and in the
+/// next slot their byte length (naga reads runtime-sized arrays' lengths
+/// from there).
+const REGIONS: usize = 2;
+const REGION_SIZES: usize = 3;
 
 pub(crate) struct MetalFrame {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -40,6 +46,31 @@ pub(crate) struct MetalFrame {
     copy_offset: Pipeline,
     /// Compiled with the first filter (None: not here).
     blur: std::cell::OnceCell<Option<Blur>>,
+    /// Layer effects' pipelines (effects.wgsl), with the first effect.
+    effects: std::cell::OnceCell<Option<Effects>>,
+}
+
+/// effects.wgsl's passes: across into the scratch atlas, down into the
+/// effect atlas.
+struct Effects {
+    across: Pipeline,
+    down: Pipeline,
+}
+
+/// A pass of layer effects (`effects.rs`) into `target`: the effect atlas
+/// (`down`, its other slots kept) or the scratch atlas.
+pub(crate) struct EffectPass {
+    pub(crate) target: Texture,
+    pub(crate) down: bool,
+    pub(crate) draws: Vec<EffectDraw>,
+}
+
+/// One job's quad in an effect pass: the frame's vertex buffer instance, the
+/// texture it reads and its mask (a blank one where it has none).
+pub(crate) struct EffectDraw {
+    pub(crate) source: Texture,
+    pub(crate) mask: Texture,
+    pub(crate) instance: u32,
 }
 
 /// The backdrop blur pipelines (blur.wgsl), as `BlurPipelines`' mixed ones.
@@ -92,7 +123,38 @@ impl MetalFrame {
             device: raw,
             queue,
             blur: std::cell::OnceCell::new(),
+            effects: std::cell::OnceCell::new(),
         })
+    }
+
+    /// Whether layer effects can be drawn here: their pipelines, compiled
+    /// now if they are not yet.
+    pub(crate) fn effects(&self) -> bool {
+        self.effect_pipelines().is_some()
+    }
+
+    fn effect_pipelines(&self) -> Option<&Effects> {
+        self.effects
+            .get_or_init(|| {
+                let library =
+                    Library::new(&self.device, include_str!("effects.wgsl"), Kind::Effects).ok()?;
+                let pipeline = |fragment: &str| {
+                    library
+                        .pipeline(
+                            &self.device,
+                            "vs",
+                            fragment,
+                            MTLPixelFormat::BGRA8Unorm,
+                            Blend::Replace,
+                        )
+                        .ok()
+                };
+                Some(Effects {
+                    across: pipeline("fs_across")?,
+                    down: pipeline("fs_down")?,
+                })
+            })
+            .as_ref()
     }
 
     /// Whether filters can be drawn here: their pipelines, compiled now if
@@ -124,18 +186,70 @@ impl MetalFrame {
             .as_ref()
     }
 
-    /// Open a frame drawing into `target`, its pixels kept (loaded).
+    /// Open a frame drawing into `target`, its pixels kept (loaded), after
+    /// `effects`' passes (`effects` checked first) drawing from `vertices`;
+    /// quads lie in `regions` (`crate::Region`s, as bytes).
     pub(crate) fn begin(
         &self,
         target: &ProtocolObject<dyn MTLTexture>,
         vertices: &ProtocolObject<dyn objc2_metal::MTLBuffer>,
         viewport: [f32; 4],
+        regions: &[u8],
+        effects: &[EffectPass],
     ) -> Frame {
         let buffer = self
             .queue
             .commandBuffer()
             .expect("a command buffer");
+        for effect in effects {
+            let pipelines = self.effect_pipelines().expect("checked by `effects`");
+            let load = match effect.down {
+                true => MTLLoadAction::Load,
+                false => MTLLoadAction::Clear,
+            };
+            let encoder = pass(&buffer, &effect.target, load);
+            encoder.setRenderPipelineState(if effect.down {
+                &pipelines.down
+            } else {
+                &pipelines.across
+            });
+            // SAFETY: The frame's live vertex buffer, live textures for both
+            // of effects.wgsl's slots, and four-vertex strips of instances
+            // the buffer holds.
+            unsafe {
+                encoder.setVertexBuffer_offset_atIndex(Some(vertices), 0, VERTICES);
+                for draw in &effect.draws {
+                    encoder.setFragmentTexture_atIndex(Some(&draw.source), 0);
+                    encoder.setFragmentTexture_atIndex(Some(&draw.mask), 1);
+                    encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                        MTLPrimitiveType::TriangleStrip,
+                        0,
+                        4,
+                        1,
+                        draw.instance as usize,
+                    );
+                }
+            }
+            encoder.endEncoding();
+        }
         let encoder = pass(&buffer, target, MTLLoadAction::Load);
+        // Small tables ride inline with each pass; larger ones in a buffer.
+        let regions = match regions.len() {
+            0 => Regions::Inline(vec![0; size_of::<crate::Region>()]),
+            len if len <= 4096 => Regions::Inline(regions.to_vec()),
+            len => Regions::Buffer(
+                // SAFETY: `len` bytes of `regions`, copied by Metal.
+                unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        std::ptr::NonNull::from(regions).cast(),
+                        len,
+                        objc2_metal::MTLResourceOptions::StorageModeShared,
+                    )
+                }
+                .expect("a regions buffer"),
+                len,
+            ),
+        };
         let mut frame = Frame {
             buffer,
             encoder,
@@ -145,6 +259,7 @@ impl MetalFrame {
                 vertices.retain()
             },
             viewport,
+            regions,
         };
         frame.quad_state();
         frame
@@ -192,14 +307,22 @@ pub(crate) struct Frame {
     current: Option<Bound>,
     vertices: Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>,
     viewport: [f32; 4],
+    regions: Regions,
+}
+
+/// A frame's clip regions, as Metal takes them.
+enum Regions {
+    Inline(Vec<u8>),
+    Buffer(Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>, usize),
 }
 
 impl Frame {
-    /// The viewport and vertex buffer quads draw with.
+    /// The viewport, vertex buffer and clip regions quads draw with.
     fn quad_state(&mut self) {
         let bytes = std::ptr::NonNull::from(&self.viewport).cast();
-        // SAFETY: Sixteen bytes of viewport for slot 0 of both stages, and the
-        // frame's live vertex buffer.
+        // SAFETY: Sixteen bytes of viewport for slot 0 of both stages, the
+        // frame's live vertex buffer, and its regions (copied by Metal, or
+        // a buffer the encoder retains) with their length.
         unsafe {
             self.encoder
                 .setVertexBytes_length_atIndex(bytes, size_of_val(&self.viewport), 0);
@@ -207,6 +330,25 @@ impl Frame {
                 .setFragmentBytes_length_atIndex(bytes, size_of_val(&self.viewport), 0);
             self.encoder
                 .setVertexBuffer_offset_atIndex(Some(&self.vertices), 0, VERTICES);
+            let len = match &self.regions {
+                Regions::Inline(bytes) => {
+                    let pointer = std::ptr::NonNull::from(&bytes[..]).cast();
+                    self.encoder
+                        .setFragmentBytes_length_atIndex(pointer, bytes.len(), REGIONS);
+                    bytes.len()
+                }
+                Regions::Buffer(buffer, len) => {
+                    self.encoder
+                        .setFragmentBuffer_offset_atIndex(Some(buffer), 0, REGIONS);
+                    *len
+                }
+            };
+            let sizes = [len as u32];
+            self.encoder.setFragmentBytes_length_atIndex(
+                std::ptr::NonNull::from(&sizes).cast(),
+                size_of_val(&sizes),
+                REGION_SIZES,
+            );
         }
     }
     /// Bind a batch's records for the blur's fragments: as bytes where Metal
@@ -412,6 +554,9 @@ enum Kind {
     Copies,
     /// Backdrop blur (see `Blur`): no attributes, its sampler inline.
     Blur,
+    /// Layer effects: the quads' attributes, the source in texture 0, the
+    /// mask in texture 1, the sampler inline.
+    Effects,
 }
 
 /// How a pipeline writes its colour.
@@ -468,6 +613,16 @@ impl Library {
                     ..Default::default()
                 },
             );
+        } else if kind == Kind::Effects {
+            resources.insert(binding(0, 1), texture(0));
+            resources.insert(
+                binding(0, 2),
+                naga::back::msl::BindTarget {
+                    sampler: Some(naga::back::msl::BindSamplerTarget::Inline(0)),
+                    ..Default::default()
+                },
+            );
+            resources.insert(binding(1, 0), texture(1));
         } else if kind == Kind::Quads {
             resources.insert(
                 binding(1, 0),
@@ -476,6 +631,7 @@ impl Library {
                     ..Default::default()
                 },
             );
+            resources.insert(binding(1, 1), buffer(REGIONS as u8));
             resources.insert(
                 binding(0, 1),
                 naga::back::msl::BindTarget {
@@ -507,7 +663,11 @@ impl Library {
                     entry.name.clone(),
                     naga::back::msl::EntryPointResources {
                         resources: resources.clone(),
-                        sizes_buffer: (kind == Kind::Blur).then_some(BLUR_SIZES as u8),
+                        sizes_buffer: match kind {
+                            Kind::Blur => Some(BLUR_SIZES as u8),
+                            Kind::Quads => Some(REGION_SIZES as u8),
+                            _ => None,
+                        },
                         ..Default::default()
                     },
                 )
@@ -578,7 +738,7 @@ impl Library {
         descriptor.setFragmentFunction(Some(&*function(fragment)?));
         // Per-instance quads, 128 bytes each: eight vec4s, as `Quad`.
         let attributes = match self.kind {
-            Kind::Quads => 8,
+            Kind::Quads | Kind::Effects => 8,
             Kind::Copies => 2,
             Kind::Blur => 0,
         };

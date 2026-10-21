@@ -160,6 +160,7 @@ impl Demo {
                     opacity: 0.85,
                     blur_radius: 8.,
                     edge_fade: 16.,
+                    filter_blur: 0.,
                 },
             );
             label(

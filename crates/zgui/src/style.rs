@@ -4,7 +4,7 @@
 //! except explicit percentage dimension methods.
 //! Style patches only replace explicitly supplied properties; chaining follows
 //! last-write precedence, including individual padding and margin sides.
-use crate::scene::{Align, BoxShadow, Color, Insets, Justify, Layout, Transform};
+use crate::scene::{Align, BoxShadow, Color, Insets, Justify, Layout, LocalTransform, Transform};
 
 /// How image pixels fit the allocated padded content box. Alignment is centered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -56,7 +56,13 @@ pub struct Styles {
     pub(crate) opacity: Option<f32>,
     pub(crate) blur: Option<f32>,
     pub(crate) edge_fade: Option<f32>,
+    pub(crate) filter_blur: Option<f32>,
+    /// Where `RareStyles::mask` lies over the node: animated every frame.
+    pub(crate) mask_offset: Option<(f32, f32)>,
+    /// `Styled::clip_inset`: animated every frame.
+    pub(crate) clip_inset: Option<crate::scene::ClipInset>,
     pub(crate) transform: Option<Transform>,
+    pub(crate) local_transform: TransformPatch,
     pub(crate) isolated: Option<bool>,
     pub(crate) padding_sides: u8,
     pub(crate) margin_sides: u8,
@@ -66,6 +72,47 @@ pub struct Styles {
     pub(crate) border_edges: Option<Option<Insets>>,
     /// Properties few views set (see `RareStyles`).
     pub(crate) rare: Option<std::sync::Arc<RareStyles>>,
+}
+/// Scale, rotation, skew and origin, each set or not (see `Styled::scale`).
+/// Inline rather than among `RareStyles`: animations rewrite it every frame,
+/// and a bit per component keeps it a third the size of four `Option`s.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TransformPatch {
+    pub(crate) values: LocalTransform,
+    pub(crate) set: u8,
+}
+impl TransformPatch {
+    const SCALE: u8 = 1;
+    const ROTATE: u8 = 2;
+    const SKEW: u8 = 4;
+    const ORIGIN: u8 = 8;
+    /// `self` with what `over` sets laid over it.
+    pub(crate) fn over(mut self, over: Self) -> Self {
+        let pick = |bit: u8| over.set & bit != 0;
+        if pick(Self::SCALE) {
+            self.values.scale = over.values.scale;
+        }
+        if pick(Self::ROTATE) {
+            self.values.rotate = over.values.rotate;
+        }
+        if pick(Self::SKEW) {
+            self.values.skew = over.values.skew;
+        }
+        if pick(Self::ORIGIN) {
+            self.values.origin = over.values.origin;
+        }
+        self.set |= over.set;
+        self
+    }
+    /// `base` with the set components replaced.
+    pub(crate) fn resolve(self, base: LocalTransform) -> LocalTransform {
+        Self {
+            values: base,
+            set: 0,
+        }
+        .over(self)
+        .values
+    }
 }
 /// Properties few views set, kept apart and shared so that every `Styles`
 /// (a view's, its node's style effect's and that effect's memo) stays small:
@@ -78,7 +125,11 @@ pub(crate) struct RareStyles {
     pub(crate) max_height: Option<f32>,
     pub(crate) fade_edges: Option<[f32; 2]>,
     pub(crate) fade_insets: Option<[f32; 2]>,
+    pub(crate) fade_edges_x: Option<[f32; 2]>,
+    pub(crate) fade_insets_x: Option<[f32; 2]>,
     pub(crate) border_style: Option<crate::decoration::BorderStyle>,
+    /// `Styled::border_over`.
+    pub(crate) border_over: Option<bool>,
     pub(crate) shadows: Option<Option<std::sync::Arc<[BoxShadow]>>>,
     pub(crate) shadow: Option<Option<BoxShadow>>,
     pub(crate) letter_spacing: Option<crate::text_layout::LetterSpacing>,
@@ -86,7 +137,11 @@ pub(crate) struct RareStyles {
     pub(crate) line_clamp: Option<Option<std::num::NonZeroU32>>,
     pub(crate) font_features: Option<crate::text_layout::FontFeatures>,
     pub(crate) font_fallbacks: Option<std::sync::Arc<[crate::text_layout::FontFamily]>>,
+    /// A mask image and the size it is drawn at (`Styled::mask`).
+    pub(crate) mask: Option<Option<MaskImage>>,
 }
+/// A mask image and the size (logical pixels) it is drawn at.
+pub(crate) type MaskImage = (std::sync::Arc<crate::image::ImageData>, (f32, f32));
 impl RareStyles {
     const NONE: Self = Self {
         min_width: None,
@@ -95,7 +150,10 @@ impl RareStyles {
         max_height: None,
         fade_edges: None,
         fade_insets: None,
+        fade_edges_x: None,
+        fade_insets_x: None,
         border_style: None,
+        border_over: None,
         shadows: None,
         shadow: None,
         letter_spacing: None,
@@ -103,6 +161,7 @@ impl RareStyles {
         line_clamp: None,
         font_features: None,
         font_fallbacks: None,
+        mask: None,
     };
     /// Overlay explicitly supplied properties, preserving all others.
     fn merge(&mut self, other: &Self) {
@@ -123,6 +182,15 @@ impl RareStyles {
         }
         if other.fade_insets.is_some() {
             self.fade_insets = other.fade_insets;
+        }
+        if other.fade_edges_x.is_some() {
+            self.fade_edges_x = other.fade_edges_x;
+        }
+        if other.fade_insets_x.is_some() {
+            self.fade_insets_x = other.fade_insets_x;
+        }
+        if other.border_over.is_some() {
+            self.border_over = other.border_over;
         }
         if other.border_style.is_some() {
             self.border_style = other.border_style;
@@ -147,6 +215,9 @@ impl RareStyles {
         }
         if other.font_fallbacks.is_some() {
             self.font_fallbacks = other.font_fallbacks.clone();
+        }
+        if other.mask.is_some() {
+            self.mask = other.mask.clone();
         }
     }
 }
@@ -371,9 +442,19 @@ impl Styles {
         if other.edge_fade.is_some() {
             self.edge_fade = other.edge_fade;
         }
+        if other.filter_blur.is_some() {
+            self.filter_blur = other.filter_blur;
+        }
+        if other.mask_offset.is_some() {
+            self.mask_offset = other.mask_offset;
+        }
+        if other.clip_inset.is_some() {
+            self.clip_inset = other.clip_inset;
+        }
         if other.transform.is_some() {
             self.transform = other.transform;
         }
+        self.local_transform = self.local_transform.over(other.local_transform);
         if other.isolated.is_some() {
             self.isolated = other.isolated;
         }
@@ -833,12 +914,31 @@ pub trait Styled: Sized {
         }));
         self
     }
+    /// A background image filling the view as `fit` places it (centred),
+    /// over its `bg` colour, cut to its rounded corners, under its border
+    /// and children. Set after `bg`, which clears it.
+    fn bg_image(
+        mut self,
+        image: std::sync::Arc<crate::image::ImageData>,
+        fit: crate::style::ObjectFit,
+    ) -> Self {
+        self.styles_mut().paint_background =
+            Some(Some(crate::decoration::Background::Image { image, fit }));
+        self
+    }
     fn rounded_corners(mut self, corners: crate::decoration::Corners) -> Self {
         self.styles_mut().corners = Some(Some(corners));
         self
     }
     fn border_edges(mut self, widths: Insets) -> Self {
         self.styles_mut().border_edges = Some(Some(widths));
+        self
+    }
+    /// Paint the border over the view's content, as an inset stroke (a CSS
+    /// outline drawn inside): a photo filling a framed thumbnail stays
+    /// under its frame. Solid borders only; a dashed one paints with the fill.
+    fn border_over(mut self, value: bool) -> Self {
+        self.styles_mut().rare_mut().border_over = Some(value);
         self
     }
     fn border_style(mut self, style: crate::decoration::BorderStyle) -> Self {
@@ -947,8 +1047,62 @@ pub trait Styled: Sized {
         self.styles_mut().opacity = Some(value);
         self
     }
+    /// Backdrop blur (CSS `backdrop-filter: blur()`): what lies behind the
+    /// node, within its bounds, blurs by this sigma in logical pixels, as
+    /// frosted glass; the node's own content stays sharp. For blurring the
+    /// node's content itself, see `filter_blur`.
     fn blur(mut self, value: f32) -> Self {
         self.styles_mut().blur = Some(value);
+        self
+    }
+    /// Content blur (CSS `filter: blur()`): the node and its subtree blur by
+    /// this sigma in logical pixels, spreading past its bounds, under its
+    /// opacity. The subtree paints once into a cached layer; animating the
+    /// sigma (a fade in from blurred text) only composites it again. Unlike
+    /// `blur`, what lies behind is untouched.
+    fn filter_blur(mut self, value: f32) -> Self {
+        self.styles_mut().filter_blur = Some(value);
+        self
+    }
+    /// Show the node's content through `image`'s alpha (CSS `mask-image`,
+    /// no repeat, nearest sampling), drawn `size` (logical pixels) large at
+    /// `mask_offset` from the node's origin; outside the image nothing shows.
+    /// The subtree paints once into a cached layer, so moving the mask (a
+    /// shimmer, a progress fill) only composites it again.
+    fn mask(mut self, image: std::sync::Arc<crate::image::ImageData>, size: (f32, f32)) -> Self {
+        self.styles_mut().rare_mut().mask = Some(Some((image, size)));
+        self
+    }
+    /// Clip the view and its descendants to its box inset by these pixels
+    /// (CSS `clip-path: inset(top right bottom left)`); negative ones reach
+    /// past it, so shadows and rings aren't cut. Animating it composites
+    /// again without layout. With `overflow_hidden` and rounded corners,
+    /// the inset box is rounded alike.
+    fn clip_inset(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        self.styles_mut().clip_inset = Some(crate::scene::ClipInset::px(top, right, bottom, left));
+        self
+    }
+    /// `clip_inset` in percent of the view's own size (top and bottom of its
+    /// height, left and right of its width), following it as it resizes:
+    /// `clip_inset_percent(0., 0., 100., 0.)` closes it to its top edge.
+    fn clip_inset_percent(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        use crate::layout::Length::Percent;
+        self.styles_mut().clip_inset = Some(crate::scene::ClipInset {
+            top: Percent(top / 100.),
+            right: Percent(right / 100.),
+            bottom: Percent(bottom / 100.),
+            left: Percent(left / 100.),
+        });
+        self
+    }
+    /// `clip_inset` with each side's length (pixels or percent) as given.
+    fn clip_inset_lengths(mut self, inset: crate::scene::ClipInset) -> Self {
+        self.styles_mut().clip_inset = Some(inset);
+        self
+    }
+    /// Where `mask`'s image lies, from the node's laid-out origin.
+    fn mask_offset(mut self, x: f32, y: f32) -> Self {
+        self.styles_mut().mask_offset = Some((x, y));
         self
     }
     fn edge_fade(mut self, value: f32) -> Self {
@@ -1237,6 +1391,22 @@ pub trait Styled: Sized {
         self.styles_mut().rare_mut().fade_insets = Some([top, bottom]);
         self
     }
+    /// `fade_edges` at the left and right edges: a horizontally scrolling
+    /// row fading the overflow at its right edge.
+    fn fade_edges_x(mut self, left: f32, right: f32) -> Self {
+        self.styles_mut().rare_mut().fade_edges_x = Some([left, right]);
+        self
+    }
+    /// `fade_insets` at the left and right edges.
+    fn fade_insets_x(mut self, left: f32, right: f32) -> Self {
+        self.styles_mut().rare_mut().fade_insets_x = Some([left, right]);
+        self
+    }
+    /// Fade all four edges (CSS order: top, right, bottom, left), each band
+    /// independent; 0 leaves an edge sharp.
+    fn fade_sides(self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        self.fade_edges(top, bottom).fade_edges_x(left, right)
+    }
     fn overflow_hidden(mut self) -> Self {
         self.styles_mut().clip = Some(true);
         if let Some(options) = &mut self.styles_mut().layout_options {
@@ -1292,6 +1462,40 @@ pub trait Styled: Sized {
     }
     fn translate(mut self, x: f32, y: f32) -> Self {
         self.styles_mut().transform = Some(Transform { x, y });
+        self
+    }
+    /// Scale uniformly about the transform origin, after layout: the
+    /// subtree composites as a cached layer, so animating it repaints none
+    /// of its content (see `Scene::set_local_transform`).
+    fn scale(self, factor: f32) -> Self {
+        self.scale_xy(factor, factor)
+    }
+    fn scale_xy(mut self, x: f32, y: f32) -> Self {
+        let patch = &mut self.styles_mut().local_transform;
+        patch.values.scale = (x, y);
+        patch.set |= TransformPatch::SCALE;
+        self
+    }
+    /// Rotate clockwise by `radians` about the transform origin, as `scale`.
+    fn rotate(mut self, radians: f32) -> Self {
+        let patch = &mut self.styles_mut().local_transform;
+        patch.values.rotate = radians;
+        patch.set |= TransformPatch::ROTATE;
+        self
+    }
+    /// Skew by angles in radians, as CSS `skew(x, y)`.
+    fn skew(mut self, x: f32, y: f32) -> Self {
+        let patch = &mut self.styles_mut().local_transform;
+        patch.values.skew = (x, y);
+        patch.set |= TransformPatch::SKEW;
+        self
+    }
+    /// The pivot of `scale`, `rotate` and `skew`, as fractions of the
+    /// view's own size: (0.5, 0.5), its centre, by default.
+    fn transform_origin(mut self, x: f32, y: f32) -> Self {
+        let patch = &mut self.styles_mut().local_transform;
+        patch.values.origin = (x, y);
+        patch.set |= TransformPatch::ORIGIN;
         self
     }
 }

@@ -268,6 +268,7 @@ pub struct View {
     focusable: Option<bool>,
     id: Option<String>,
     scrollbar: Option<bool>,
+    follow_end: Option<bool>,
     animation: Option<animation::Animated>,
     keyboard_navigation: Option<bool>,
     dismiss_backdrop: Option<bool>,
@@ -275,6 +276,7 @@ pub struct View {
     trigger_id: Option<String>,
     menu_trigger: Option<Signal<bool>>,
     menu_checked: Option<bool>,
+    mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
 }
 impl View {
     /// Set the controlled checked state of a menu item, including accessibility.
@@ -344,6 +346,7 @@ impl View {
             focusable: None,
             id: None,
             scrollbar: None,
+            follow_end: None,
             animation: None,
             keyboard_navigation: None,
             dismiss_backdrop: None,
@@ -351,11 +354,18 @@ impl View {
             trigger_id: None,
             menu_trigger: None,
             menu_checked: None,
+            mounted: Vec::new(),
         }
     }
     /// Show an interactive overlay scrollbar on a scroll viewport or virtual list.
     pub fn scrollbar(mut self, visible: bool) -> Self {
         self.scrollbar = Some(visible);
+        self
+    }
+    /// Keep a scroll viewport at its end while its content grows, as long as
+    /// it was at the end (a chat transcript); scrolling away releases it.
+    pub fn follow_end(mut self, follow: bool) -> Self {
+        self.follow_end = Some(follow);
         self
     }
     /// Enable bounded keyboard row navigation on a virtual list.
@@ -459,6 +469,13 @@ impl View {
         self.read_only = Some(Box::new(read_only));
         self
     }
+    /// Run `f` once this view's node and children are mounted, with a handle
+    /// to that node: for code that drives the scene directly, such as an
+    /// animation engine writing transforms each frame.
+    pub fn on_mount(mut self, f: impl FnOnce(NodeHandle) + 'static) -> Self {
+        self.mounted.push(Box::new(f));
+        self
+    }
     pub fn reactive_style(mut self, style: impl FnMut() -> Styles + 'static) -> Self {
         self.reactive_style = Some(Box::new(style));
         self
@@ -476,6 +493,9 @@ impl View {
         }
         if self.scrollbar.is_some() {
             inner.scrollbar = self.scrollbar;
+        }
+        if self.follow_end.is_some() {
+            inner.follow_end = self.follow_end;
         }
         inner.events.extend(self.events);
         inner.keymap.extend(self.keymap);
@@ -521,6 +541,7 @@ impl View {
         if self.id.is_some() {
             inner.id = self.id;
         }
+        inner.mounted.extend(self.mounted);
         inner
     }
 }
@@ -1493,6 +1514,7 @@ fn mount_element(
         "scrollbar is only supported on scroll, scroll_x, and virtual_list views"
     );
     let scrollbar = view.scrollbar.unwrap_or(false);
+    let follow_end = view.follow_end.unwrap_or(false);
     // Decorated/padded text gets an actual layout box. Plain text stays a single
     // node, keeping common reactive labels small. Dynamic/state styles may add
     // decoration later, so reserve that box at mount rather than remount on hover.
@@ -2126,7 +2148,7 @@ fn mount_element(
         ui.semantics.borrow_mut().remove(indicator);
     }
     if let (Some((offset, horizontal)), Some((viewport, content))) = (scroll_offset, scroll_nodes) {
-        mount_scroll(ui, root, viewport, content, offset, horizontal, scrollbar);
+        mount_scroll(ui, root, viewport, content, offset, horizontal, scrollbar, follow_end);
     }
     if let Some(mut compute) = compute {
         let weak = ui.downgrade();
@@ -2154,6 +2176,12 @@ fn mount_element(
         ui.input.set_options(root, options);
     }
     update_button_labels(ui, root);
+    for mounted in view.mounted {
+        mounted(NodeHandle {
+            ui: ui.downgrade(),
+            node: root,
+        });
+    }
     root
 }
 #[allow(clippy::too_many_arguments)]
@@ -2165,6 +2193,7 @@ fn mount_scroll(
     offset: Signal<f32>,
     horizontal: bool,
     scrollbar: bool,
+    follow_end: bool,
 ) {
     use crate::scene::{Style, Transform};
     let main_size = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
@@ -2281,15 +2310,25 @@ fn mount_scroll(
         }
     });
     let scene = ui.scene.clone();
+    // For `follow_end`: the position last applied, and whether it was the
+    // end. Only growth moves a pinned view; a new offset (a wheel, a script)
+    // is taken as it is and decides whether the view stays pinned.
+    let (applied, pinned) = (std::cell::Cell::new(0_f32), std::cell::Cell::new(true));
     ui.bind(root, move || {
         let (width, height) = size.get();
         let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
         let requested = offset.get();
         let position = if requested.is_nan() {
             0.
+        } else if follow_end && pinned.get() && requested == applied.get() {
+            limit
         } else {
             requested.clamp(0., limit)
         };
+        if follow_end {
+            applied.set(position);
+            pinned.set(position >= limit - 0.5);
+        }
         if requested != position {
             offset.set(position);
         }
@@ -2744,6 +2783,44 @@ fn update_button_labels(ui: &Ui, node: NodeId) {
                 .update(id, |node| node.label = label);
         }
         current = scene.parent(id);
+    }
+}
+/// A mounted node, from `View::on_mount`. Weak: it keeps neither the UI
+/// nor the node alive.
+#[derive(Clone)]
+pub struct NodeHandle {
+    ui: WeakUi,
+    node: NodeId,
+}
+impl NodeHandle {
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+    /// The scene, while the UI exists.
+    pub fn scene(&self) -> Option<Rc<RefCell<crate::scene::Scene>>> {
+        self.ui.upgrade().map(|ui| ui.scene.clone())
+    }
+    pub fn is_mounted(&self) -> bool {
+        self.ui
+            .upgrade()
+            .is_some_and(|ui| ui.scene.borrow().contains(self.node))
+    }
+    /// The node's world bounds, republished after each frame's layout: for
+    /// animating a container to the size of what it holds.
+    pub fn observe_bounds(&self) -> Option<Signal<crate::scene::Rect>> {
+        let ui = self.ui.upgrade()?;
+        ui.scene
+            .borrow()
+            .contains(self.node)
+            .then(|| ui.observe_bounds(self.node))
+    }
+    /// Keep `resource` until the node is removed, then drop it.
+    pub fn retain(&self, resource: impl Any) {
+        if let Some(mut ui) = self.ui.upgrade()
+            && ui.scene.borrow().contains(self.node)
+        {
+            ui.retain(self.node, resource);
+        }
     }
 }
 /// Reference to a Ui-owned component tree. Drop does not unmount; call `unmount`.

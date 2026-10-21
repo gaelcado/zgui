@@ -38,6 +38,14 @@ pub enum Background {
         angle: f32,
         stops: Arc<[GradientStop]>,
     },
+    /// An image filling the box as `fit` places it (centred; CSS
+    /// `background-size` cover/contain, `object-fit` alike), over the
+    /// box's `fill` colour, cut to its rounded corners, under its border
+    /// and children.
+    Image {
+        image: Arc<crate::image::ImageData>,
+        fit: crate::style::ObjectFit,
+    },
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Decoration {

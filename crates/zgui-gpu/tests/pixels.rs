@@ -213,6 +213,7 @@ fn rounded_border_shadow_images_and_background_damage() {
                 blur_radius: 3.,
                 spread: 1.,
             }),
+            border_over: false,
         }),
         fixed(24., 24.),
     );
@@ -3007,21 +3008,25 @@ fn nonfinite_effects_normalize_to_stable_pixels_and_repeated_writes_stay_idle() 
                 opacity: f32::INFINITY,
                 blur_radius: -3.,
                 edge_fade: -4.,
+                filter_blur: 0.,
             },
             Effects {
                 opacity: f32::NAN,
                 blur_radius: f32::INFINITY,
                 edge_fade: f32::NEG_INFINITY,
+                filter_blur: 0.,
             },
             Effects {
                 opacity: f32::NAN,
                 blur_radius: f32::NAN,
                 edge_fade: f32::INFINITY,
+                filter_blur: 0.,
             },
             Effects {
                 opacity: 1.,
                 blur_radius: f32::NEG_INFINITY,
                 edge_fade: f32::NAN,
+                filter_blur: 0.,
             },
         ] {
             scene.set_effects(
@@ -3030,6 +3035,7 @@ fn nonfinite_effects_normalize_to_stable_pixels_and_repeated_writes_stay_idle() 
                     opacity: 0.5,
                     blur_radius: 2.,
                     edge_fade: 2.,
+                    filter_blur: 0.,
                 },
             );
             let damage = scene.flush().damage;

@@ -11,6 +11,9 @@ pub(super) struct AdvancedLayoutCache {
     root: t::NodeId,
     nodes: std::collections::HashMap<NodeId, t::NodeId>,
     order: Vec<NodeId>,
+    /// The percentage bases children were last measured under: taffy keys
+    /// a leaf's cached size by its known and available sizes alone.
+    bases: (Option<f32>, Option<f32>),
 }
 impl AdvancedLayoutCache {
     fn new() -> Self {
@@ -24,6 +27,7 @@ impl AdvancedLayoutCache {
             root,
             nodes: Default::default(),
             order: Vec::new(),
+            bases: (None, None),
         }
     }
 }
@@ -224,13 +228,107 @@ fn available(value: Option<f32>) -> t::AvailableSpace {
         t::AvailableSpace::Definite(finite(v).max(0.))
     })
 }
+/// The width or height a child is laid out within for a probe: a min-content
+/// probe lays it out with no room at all, so text and wrapping rows break at
+/// every opportunity and report their widest unbreakable piece. Treating it
+/// as unbounded (max-content) made a shrink-to-fit box as wide as its
+/// unwrapped content: a wrapping row inside a narrower column overflowed it.
 fn bound(value: t::AvailableSpace) -> Option<f32> {
     match value {
         t::AvailableSpace::Definite(v) => Some(v),
-        _ => None,
+        t::AvailableSpace::MinContent => Some(0.),
+        t::AvailableSpace::MaxContent => None,
     }
 }
 impl Scene {
+    /// Lay `cache`'s tree out within `space`, each child (of `ids`, keyed
+    /// `keys`) measured through `Scene::measure` with percentages against
+    /// `bases`.
+    fn compute_retained(
+        &mut self,
+        cache: &mut AdvancedLayoutCache,
+        ids: &[NodeId],
+        keys: &[t::NodeId],
+        space: t::Size<t::AvailableSpace>,
+        bases: (Option<f32>, Option<f32>),
+    ) {
+        self.rebase(cache, ids, keys, bases);
+        let root = cache.root;
+        cache
+            .tree
+            .compute_layout_with_measure(root, space, |known, space, _, context, _| {
+                let Some(child) = context.copied() else {
+                    return t::Size::ZERO;
+                };
+                let size = self.measure(
+                    child,
+                    Constraints {
+                        width: known.width.or_else(|| bound(space.width)),
+                        height: known.height.or_else(|| bound(space.height)),
+                        percent_width: bases.0,
+                        percent_height: bases.1,
+                        force_width: known.width,
+                        force_height: known.height,
+                    },
+                );
+                t::Size {
+                    width: size.0,
+                    height: size.1,
+                }
+            })
+            .expect("retained tree is structurally valid");
+    }
+    /// Where the root's in-flow children end along its main axis (`down`:
+    /// a column's), with their margins and its padding: its size when
+    /// sized by its content.
+    fn main_extent(
+        &self,
+        cache: &AdvancedLayoutCache,
+        ids: &[NodeId],
+        keys: &[t::NodeId],
+        down: bool,
+    ) -> f32 {
+        let root = cache.tree.layout(cache.root).expect("computed root");
+        let mut end = 0_f32;
+        for (child, key) in ids.iter().zip(keys) {
+            if self.node(*child).style.absolute {
+                continue;
+            }
+            let layout = cache.tree.layout(*key).expect("computed child");
+            end = end.max(match down {
+                true => layout.location.y + layout.size.height + layout.margin.bottom,
+                false => layout.location.x + layout.size.width + layout.margin.right,
+            });
+        }
+        end + match down {
+            true => root.padding.bottom,
+            false => root.padding.right,
+        }
+    }
+    /// Children resolve percentages against `bases` now: drop taffy's cached
+    /// sizes of those that do, if the bases changed.
+    fn rebase(
+        &self,
+        cache: &mut AdvancedLayoutCache,
+        ids: &[NodeId],
+        keys: &[t::NodeId],
+        bases: (Option<f32>, Option<f32>),
+    ) {
+        if cache.bases == bases {
+            return;
+        }
+        let (width, height) = (cache.bases.0 != bases.0, cache.bases.1 != bases.1);
+        cache.bases = bases;
+        for (child, key) in ids.iter().zip(keys) {
+            let (widths, heights) = self.percent_bases(*child);
+            if (width && widths) || (height && heights) {
+                cache
+                    .tree
+                    .mark_dirty(*key)
+                    .expect("retained child invalidation");
+            }
+        }
+    }
     /// Resolved padding from the most recent layout, including percentages.
     pub fn padding(&self, id: NodeId) -> Insets {
         let constraints = self
@@ -342,20 +440,19 @@ impl Scene {
     pub(super) fn measure_hidden(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
         self.node_mut(id).advanced_layout = None;
         let ids = self.node(id).children.clone();
+        let hidden = Constraints {
+            force_width: Some(f32::NAN),
+            ..Constraints::default()
+        };
         let children = ids
             .into_iter()
             .map(|child| {
-                self.measure_hidden(
-                    child,
-                    Constraints {
-                        force_width: Some(f32::NAN),
-                        ..Constraints::default()
-                    },
-                );
+                self.measure_hidden(child, hidden);
                 (child, Rect::default())
             })
-            .collect();
-        self.store_measurement(id, constraints, (0., 0.), children);
+            .collect::<Vec<_>>();
+        let asked = vec![Some(hidden); children.len()];
+        self.store_measurement(id, constraints, (0., 0.), children, asked);
         (0., 0.)
     }
     pub(super) fn measure_advanced(
@@ -509,42 +606,47 @@ impl Scene {
         // text lays out unwrapped, so the heights it keeps are one-line
         // heights. A second pass at the width found gives them their basis:
         // a capped bubble is as tall as the text it wraps.
-        for pass in 0..2 {
+        let column = !matches!(
             cache
                 .tree
-                .compute_layout_with_measure(
-                    root,
-                    t::Size {
-                        width: available(constraints.width),
-                        height: available(constraints.height),
-                    },
-                    |known, space, _, context, _| {
-                        let Some(context) = context else {
-                            return t::Size::ZERO;
-                        };
-                        let child = *context;
-                        let size = self.measure(
-                            child,
-                            Constraints {
-                                width: known.width.or_else(|| bound(space.width)),
-                                height: known.height.or_else(|| bound(space.height)),
-                                percent_width: child_percent_width,
-                                percent_height: child_percent_height,
-                                force_width: known.width,
-                                force_height: known.height,
-                            },
-                        );
-                        t::Size {
-                            width: size.0,
-                            height: size.1,
-                        }
-                    },
-                )
-                .expect("retained tree is structurally valid");
+                .style(root)
+                .expect("retained root style")
+                .flex_direction,
+            t::FlexDirection::Row | t::FlexDirection::RowReverse
+        );
+        let flex = root_options.display.unwrap_or_default() == ViewDisplay::Flex
+            && root_options.wrap.is_none();
+        for pass in 0..2 {
+            let available_space = t::Size {
+                width: available(constraints.width),
+                height: available(constraints.height),
+            };
+            let bases = (child_percent_width, child_percent_height);
+            self.compute_retained(&mut cache, &ids, &children, available_space, bases);
             if pass == 1 || !auto_width {
                 break;
             }
-            let found = cache.tree.layout(root).expect("computed root").size.width;
+            let mut found = cache.tree.layout(root).expect("computed root").size.width;
+            if !column && flex {
+                found = found.max(self.main_extent(&cache, &ids, &children, false));
+            }
+            // Taffy lays an auto-width root out at its longest line's length,
+            // as a parent that sizes it would first; shrunk to fit here, it
+            // is no wider than the room given unless its content cannot
+            // shrink (CSS fit-content: max-content, at most the room, at
+            // least min-content). A wrapping row in a narrower column wraps.
+            if let Some(room) = constraints.width
+                && found > room + 0.01
+            {
+                let least_space = t::Size {
+                    width: t::AvailableSpace::MinContent,
+                    ..available_space
+                };
+                let bases = (None, child_percent_height);
+                self.compute_retained(&mut cache, &ids, &children, least_space, bases);
+                let least = cache.tree.layout(root).expect("computed root").size.width;
+                found = found.min(least.max(room));
+            }
             let mut fixed = cache.tree.style(root).expect("retained root style").clone();
             fixed.size.width = t::Dimension::length(found);
             cache
@@ -553,12 +655,45 @@ impl Scene {
                 .expect("retained root style update");
             child_percent_width = Some((found - padding.left - padding.right).max(0.));
         }
+        // An auto height probed at max-content: taffy sizes it from each
+        // item's contribution, which a negative margin (a layout animation
+        // growing a box open) turns into a vast shrink, collapsing the
+        // column while placing its items right. It is as tall as where they
+        // end, as a definite probe finds.
+        if column
+            && flex
+            && constraints.height.is_none()
+            && cache
+                .tree
+                .style(root)
+                .expect("retained root style")
+                .size
+                .height
+                .is_auto()
+        {
+            let extent = self.main_extent(&cache, &ids, &children, true);
+            if extent > cache.tree.layout(root).expect("computed root").size.height + 0.01 {
+                let mut fixed = cache.tree.style(root).expect("retained root style").clone();
+                fixed.size.height = t::Dimension::length(extent);
+                cache
+                    .tree
+                    .set_style(root, fixed)
+                    .expect("retained root style update");
+                let available_space = t::Size {
+                    width: available(constraints.width),
+                    height: available(constraints.height),
+                };
+                let bases = (child_percent_width, child_percent_height);
+                self.compute_retained(&mut cache, &ids, &children, available_space, bases);
+            }
+        }
         let root_layout = *cache.tree.layout(root).expect("computed root");
         let inner_width =
             (root_layout.size.width - root_layout.padding.left - root_layout.padding.right).max(0.);
         let inner_height =
             (root_layout.size.height - root_layout.padding.top - root_layout.padding.bottom)
                 .max(0.);
+        let mut asked = Vec::with_capacity(ids.len());
         let positions = ids
             .into_iter()
             .zip(children)
@@ -583,6 +718,7 @@ impl Scene {
                 } else {
                     self.measure(child, child_constraints);
                 }
+                asked.push(Some(child_constraints));
                 (
                     child,
                     Rect::new(
@@ -595,7 +731,7 @@ impl Scene {
             })
             .collect();
         let size = (root_layout.size.width, root_layout.size.height);
-        self.store_measurement(id, constraints, size, positions);
+        self.store_measurement(id, constraints, size, positions, asked);
         self.node_mut(id).advanced_layout = Some(cache);
         size
     }

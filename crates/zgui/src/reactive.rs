@@ -266,6 +266,14 @@ impl<T: 'static> Signal<T> {
             });
         }
     }
+    /// Whether both handles are the same signal.
+    pub fn same(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+    /// Identifies this signal while any handle to it lives.
+    pub fn addr(&self) -> usize {
+        Rc::as_ptr(&self.inner).cast::<()>() as usize
+    }
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         self.track();
         f(&self.inner.value.borrow())

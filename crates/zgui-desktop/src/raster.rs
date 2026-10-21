@@ -122,112 +122,127 @@ impl Raster {
                 let Some(clip) = intersect(dirty, item.clip.unwrap_or(full[0])) else {
                     continue;
                 };
-                if item.isolated {
-                    self.isolated(scene, item, clip);
-                    continue;
-                }
-                let Some(visible) = intersect(
-                    clip,
-                    if let NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } = item.kind {
-                        style.paint_bounds(item.bounds)
-                    } else if let NodeKind::Svg(svg) = item.kind {
-                        svg.paint_bounds(item.bounds)
-                    } else if let NodeKind::Image(image) = item.kind {
-                        image.paint_bounds(item.bounds)
-                    } else {
-                        item.bounds
-                    },
-                ) else {
-                    continue;
-                };
-                if item.effects.blur_radius > 0. {
-                    self.blur(visible, item.effects.blur_radius.ceil().min(64.) as usize);
-                }
-                match item.kind {
-                    NodeKind::Rect(color) => self.rect(item.bounds, clip, *color, item.effects),
-                    NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } => {
-                        self.quad(item.id, item.bounds, clip, style.clone(), item.effects)
+                // Rounded clips around it: its pixels there mixed back over
+                // what lay beneath by how much of each the curves keep.
+                let corners = self.save_corners(&item.rounded, clip);
+                'draw: {
+                    if item.isolated {
+                        self.isolated(scene, item, clip);
+                        break 'draw;
                     }
-                    NodeKind::Svg(svg) => {
-                        if item.bounds.width > 0.
-                            && item.bounds.height > 0.
-                            && let Ok(image) = self.svgs.get(
-                                item.id,
-                                svg,
-                                item.bounds.width,
-                                item.bounds.height,
-                                1.,
-                            )
+                    let Some(visible) = intersect(
+                        clip,
+                        if let NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } =
+                            item.kind
                         {
-                            self.image(item.bounds, clip, &image, item.effects);
-                        }
-                    }
-                    NodeKind::Image(image) => self.image(item.bounds, clip, image, item.effects),
-                    NodeKind::Canvas(canvas) => {
-                        if item.bounds.width > 0.
-                            && item.bounds.height > 0.
-                            && let Ok(raster) = self.canvases.get(
-                                item.id,
-                                canvas,
-                                item.bounds.width,
-                                item.bounds.height,
-                                1.,
-                            )
-                            // Drawn from memory: never marked uploaded.
-                            && let Some(image) = raster.pixels
-                        {
-                            self.image(item.bounds, clip, &image, item.effects);
-                        }
-                    }
-                    #[cfg(target_os = "macos")]
-                    NodeKind::NativeSurface(_) => {} // Native GPU-only source; no CPU readback.
-                    NodeKind::RichText { text } => {
-                        self.rich_text(text, item.bounds, clip, item.effects)
-                    }
-                    NodeKind::Text {
-                        text,
-                        color,
-                        font_size,
-                    } => {
-                        if item.text_options != Default::default() {
-                            let runs = if text.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![zgui::rich_text::TextRun {
-                                    range: 0..text.len(),
-                                    font: item.font.clone(),
-                                    font_size: *font_size,
-                                    color: *color,
-                                    ..Default::default()
-                                }]
-                            };
-                            let rich = std::sync::Arc::new(
-                                zgui::rich_text::RichText::new(text.clone(), runs)
-                                    .unwrap()
-                                    .with_options(item.text_options),
-                            );
-                            self.rich_text(&rich, item.bounds, clip, item.effects);
-                        } else if *item.font == Default::default() {
-                            self.text(text, item.bounds, clip, *color, *font_size, item.effects)
+                            style.paint_bounds(item.bounds)
+                        } else if let NodeKind::Svg(svg) = item.kind {
+                            svg.paint_bounds(item.bounds)
+                        } else if let NodeKind::Image(image) = item.kind {
+                            image.paint_bounds(item.bounds)
                         } else {
-                            self.styled_text(
-                                text,
-                                item.bounds,
-                                clip,
-                                *color,
-                                *font_size,
-                                item.effects,
-                                item.font,
-                            )
-                        }
+                            item.bounds
+                        },
+                    ) else {
+                        break 'draw;
+                    };
+                    if item.effects.blur_radius > 0. {
+                        self.blur(visible, item.effects.blur_radius.ceil().min(64.) as usize);
                     }
-                    _ => {}
+                    match item.kind {
+                        NodeKind::Rect(color) => self.rect(item.bounds, clip, *color, item.effects),
+                        NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } => {
+                            let style = border_part(style, item.border_pass);
+                            self.quad(item.id, item.bounds, clip, style, item.effects)
+                        }
+                        NodeKind::Svg(svg) => {
+                            if item.bounds.width > 0.
+                                && item.bounds.height > 0.
+                                && let Ok(image) = self.svgs.get(
+                                    item.id,
+                                    svg,
+                                    item.bounds.width,
+                                    item.bounds.height,
+                                    1.,
+                                )
+                            {
+                                self.image(item.bounds, clip, &image, item.effects);
+                            }
+                        }
+                        NodeKind::Image(image) => {
+                            self.image(item.bounds, clip, image, item.effects)
+                        }
+                        NodeKind::Canvas(canvas) => {
+                            if item.bounds.width > 0.
+                                && item.bounds.height > 0.
+                                && let Ok(raster) = self.canvases.get(
+                                    item.id,
+                                    canvas,
+                                    item.bounds.width,
+                                    item.bounds.height,
+                                    1.,
+                                )
+                                // Drawn from memory: never marked uploaded.
+                                && let Some(image) = raster.pixels
+                            {
+                                self.image(item.bounds, clip, &image, item.effects);
+                            }
+                        }
+                        #[cfg(target_os = "macos")]
+                        NodeKind::NativeSurface(_) => {} // Native GPU-only source; no CPU readback.
+                        NodeKind::RichText { text } => {
+                            self.rich_text(text, item.bounds, clip, item.effects)
+                        }
+                        NodeKind::Text {
+                            text,
+                            color,
+                            font_size,
+                        } => {
+                            if item.text_options != Default::default() {
+                                let runs = if text.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    vec![zgui::rich_text::TextRun {
+                                        range: 0..text.len(),
+                                        font: item.font.clone(),
+                                        font_size: *font_size,
+                                        color: *color,
+                                        ..Default::default()
+                                    }]
+                                };
+                                let rich = std::sync::Arc::new(
+                                    zgui::rich_text::RichText::new(text.clone(), runs)
+                                        .unwrap()
+                                        .with_options(item.text_options),
+                                );
+                                self.rich_text(&rich, item.bounds, clip, item.effects);
+                            } else if *item.font == Default::default() {
+                                self.text(text, item.bounds, clip, *color, *font_size, item.effects)
+                            } else {
+                                self.styled_text(
+                                    text,
+                                    item.bounds,
+                                    clip,
+                                    *color,
+                                    *font_size,
+                                    item.effects,
+                                    item.font,
+                                )
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+                self.mix_corners(&item.rounded, corners);
             }
         }
     }
     fn isolated(&mut self, scene: &Scene, item: &zgui::scene::PaintItem<'_>, clip: Rect) {
-        let bounds = scene.layer_bounds(item.id);
+        // A content blur spreads the layer; its mattes get room for it.
+        let sigma = item.effects.filter_blur;
+        let bounds = scene
+            .layer_bounds(item.id)
+            .expand(zgui::scene::filter_spread(sigma));
         let x = bounds.x.floor();
         let y = bounds.y.floor();
         let width = ((bounds.x + bounds.width).ceil() - x).max(1.) as usize;
@@ -266,19 +281,64 @@ impl Raster {
                 i.clip = i
                     .clip
                     .map(|r| Rect::new(r.x - x, r.y - y, r.width, r.height));
+                for round in i.rounded.iter_mut().flatten() {
+                    round.rect.x -= x;
+                    round.rect.y -= y;
+                }
                 i
             })
             .collect();
         let full = [Rect::new(0., 0., width as f32, height as f32)];
         black.render_flat(scene, items.clone(), &full);
         white.render_flat(scene, items, &full);
+        if sigma > 0. {
+            // Three box passes of radius sigma: close to its Gaussian, and
+            // reaching as far as the spread damage covers.
+            let radius = sigma.round().clamp(1., 64.) as usize;
+            for _ in 0..3 {
+                black.blur(full[0], radius);
+                white.blur(full[0], radius);
+            }
+        }
+        // The mask's alpha at a matte pixel, nearest, none past its image.
+        let node = (item.bounds.x + self.origin.0, item.bounds.y + self.origin.1);
+        let mask = scene.mask(item.id);
+        let masked = |sx: f32, sy: f32| -> f32 {
+            let Some(mask) = mask else { return 1. };
+            let image = &mask.image;
+            let texel = |at: f32, node: f32, offset: f32, size: f32, pixels: u32| {
+                let texel = ((at - node - offset) / size * pixels as f32).floor();
+                (size > 0. && texel >= 0. && texel < pixels as f32).then_some(texel as usize)
+            };
+            let (Some(tx), Some(ty)) = (
+                texel(x + sx, node.0, mask.offset.0, mask.size.0, image.width()),
+                texel(y + sy, node.1, mask.offset.1, mask.size.1, image.height()),
+            ) else {
+                return 0.;
+            };
+            image.pixels()[(ty * image.width() as usize + tx) * 4 + 3] as f32 / 255.
+        };
         let output = Rect::new(
             x - self.origin.0,
             y - self.origin.1,
             width as f32,
             height as f32,
         );
-        let Some(visible) = intersect(output, clip) else {
+        // A transformed layer samples back through its matrix (from this
+        // target's origin), nearest texel, as transformed images do.
+        let matrix = item.matrix.map(|matrix| {
+            let (x, y) = self.origin;
+            zgui::affine::Affine::translation(x, y)
+                .then(matrix)
+                .then(zgui::affine::Affine::translation(-x, -y))
+        });
+        let inverse = match matrix.map(|matrix| matrix.inverse()) {
+            Some(None) => return,
+            Some(inverse) => inverse,
+            None => None,
+        };
+        let painted = matrix.map_or(output, |matrix| matrix.bounds(output));
+        let Some(visible) = intersect(painted, clip) else {
             return;
         };
         if item.effects.blur_radius > 0. {
@@ -287,8 +347,21 @@ impl Raster {
         let (x0, y0, x1, y1) = self.region(visible);
         for py in y0..y1 {
             for px in x0..x1 {
-                let sx = (px as f32 - output.x) as usize;
-                let sy = (py as f32 - output.y) as usize;
+                let (sx, sy, fade_y) = match inverse {
+                    None => (
+                        (px as f32 - output.x) as usize,
+                        (py as f32 - output.y) as usize,
+                        py as f32,
+                    ),
+                    Some(inverse) => {
+                        let (x, y) = inverse.point(px as f32 + 0.5, py as f32 + 0.5);
+                        let (sx, sy) = (x - output.x, y - output.y);
+                        if sx < 0. || sy < 0. || sx >= width as f32 || sy >= height as f32 {
+                            continue;
+                        }
+                        (sx as usize, sy as usize, y)
+                    }
+                };
                 let b = black.pixels[sy * width + sx];
                 let w = white.pixels[sy * width + sx];
                 let alpha = 255 - ((w & 255) as i32 - (b & 255) as i32).clamp(0, 255);
@@ -303,9 +376,58 @@ impl Raster {
                     &mut self.pixels[py * self.width + px],
                     color,
                     item.effects.opacity
-                        * edge_alpha(py as f32, item.bounds, item.effects.edge_fade),
+                        * edge_alpha(fade_y, item.bounds, item.effects.edge_fade)
+                        * masked(sx as f32 + 0.5, sy as f32 + 0.5),
                 );
             }
+        }
+    }
+    /// The pixels within `clip` a rounded clip's corners can cut, with
+    /// their values before an item draws.
+    fn save_corners(&self, rounded: &zgui::scene::RoundedClip, clip: Rect) -> Vec<(usize, u32)> {
+        let mut saved = Vec::new();
+        for round in rounded.iter().flatten() {
+            let r = round.rect;
+            let [tl, tr, br, bl] = round.radii;
+            for (x, y, radius) in [
+                (r.x, r.y, tl),
+                (r.x + r.width - tr, r.y, tr),
+                (r.x + r.width - br, r.y + r.height - br, br),
+                (r.x, r.y + r.height - bl, bl),
+            ] {
+                let Some(square) = intersect(Rect::new(x, y, radius, radius), clip) else {
+                    continue;
+                };
+                let (x0, y0, x1, y1) = self.region(square);
+                for py in y0..y1 {
+                    for px in x0..x1 {
+                        let at = py * self.width + px;
+                        saved.push((at, self.pixels[at]));
+                    }
+                }
+            }
+        }
+        saved
+    }
+    /// Mix the item just drawn back over `saved` by the rounded clips'
+    /// coverage of each pixel's centre.
+    fn mix_corners(&mut self, rounded: &zgui::scene::RoundedClip, saved: Vec<(usize, u32)>) {
+        for (at, before) in saved {
+            let (x, y) = (
+                (at % self.width) as f32 + 0.5,
+                (at / self.width) as f32 + 0.5,
+            );
+            let keep: f32 = rounded
+                .iter()
+                .flatten()
+                .map(|round| rounded_coverage(round, x, y))
+                .product();
+            let after = self.pixels[at];
+            let mix = |shift: u32| {
+                let (b, a) = ((before >> shift) & 255, (after >> shift) & 255);
+                ((b as f32 + (a as f32 - b as f32) * keep).round() as u32) << shift
+            };
+            self.pixels[at] = mix(16) | mix(8) | mix(0);
         }
     }
     fn region(&self, rect: Rect) -> (usize, usize, usize, usize) {
@@ -417,6 +539,50 @@ impl Raster {
                     }
                 }
             }
+        }
+        // A background image: the fill, the image, then the border.
+        if let Some(zgui::decoration::Background::Image { image, fit }) = style
+            .decoration
+            .as_deref()
+            .and_then(|detail| detail.background.clone())
+        {
+            let staged = zgui::scene::QuadStyle {
+                border_over: true,
+                ..style.clone()
+            };
+            let mut fill = border_part(&staged, false);
+            fill.border_over = false;
+            fill.decoration = fill.decoration.map(|detail| {
+                std::sync::Arc::new(zgui::decoration::Decoration {
+                    background: None,
+                    ..(*detail).clone()
+                })
+            });
+            self.quad(node, bounds, clip, fill, effects);
+            let (width, height) = fitted(image.width() as f32, image.height() as f32, bounds, fit);
+            let placed = Rect::new(
+                bounds.x + (bounds.width - width) / 2.,
+                bounds.y + (bounds.height - height) / 2.,
+                width,
+                height,
+            );
+            if let Some(inside) = intersect(bounds, clip) {
+                self.image(placed, inside, &image, effects);
+            }
+            if style.has_border() {
+                let mut border = border_part(&staged, true);
+                border.border_over = false;
+                border.decoration = border.decoration.map(|detail| {
+                    std::sync::Arc::new(zgui::decoration::Decoration {
+                        background: Some(zgui::decoration::Background::Brush(
+                            zgui::canvas::Brush::Solid(Color(0, 0, 0, 0)),
+                        )),
+                        ..(*detail).clone()
+                    })
+                });
+                self.quad(node, bounds, clip, border, effects);
+            }
+            return;
         }
         if style.decoration.is_some() && bounds.width > 0. && bounds.height > 0. {
             if let Ok(raster) =
@@ -899,6 +1065,220 @@ mod tests {
         s.set_transform(id, Transform { x, y: 10. });
         id
     }
+    /// `scene`'s pixels drawn from its flushed damage, and drawn afresh.
+    fn incremental_and_full(raster: &mut Raster, scene: &mut Scene) -> (Vec<u32>, Vec<u32>) {
+        let damage = scene.flush().damage;
+        raster.render(scene, &damage);
+        let mut fresh = Raster::new(raster.width, raster.height);
+        fresh.render(
+            scene,
+            &[Rect::new(0., 0., raster.width as f32, raster.height as f32)],
+        );
+        (raster.pixels.clone(), fresh.pixels)
+    }
+    #[test]
+    fn background_images_paint_between_fill_and_border() {
+        let stripes = std::sync::Arc::new(
+            zgui::image::ImageData::new(
+                4,
+                1,
+                [
+                    [255, 0, 0, 255],
+                    [255, 0, 0, 255],
+                    [0, 0, 255, 255],
+                    [0, 0, 255, 255],
+                ]
+                .concat(),
+            )
+            .unwrap(),
+        );
+        let mut s = scene();
+        let card = s.append(
+            s.root(),
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: zgui::scene::QuadStyle {
+                    fill: Color(50, 50, 50, 255),
+                    border_color: Color(255, 255, 255, 255),
+                    border_width: 2.,
+                    decoration: Some(std::sync::Arc::new(zgui::decoration::Decoration {
+                        background: Some(zgui::decoration::Background::Image {
+                            image: stripes,
+                            fit: zgui::style::ObjectFit::Contain,
+                        }),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+            },
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        s.set_transform(card, Transform { x: 30., y: 10. });
+        let mut raster = Raster::new(100, 80);
+        let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+        assert_eq!(pixels, full);
+        let at = |x: usize, y: usize| pixels[y * 100 + x];
+        // Contained: 40 × 10 centred, the fill above, the border round all.
+        assert_eq!(at(40, 30), 0xff0000);
+        assert_eq!(at(60, 30), 0x0000ff);
+        assert_eq!(at(50, 20), 0x323232);
+        assert_eq!(at(50, 10), 0xffffff);
+    }
+    #[test]
+    fn borders_over_content_paint_after_the_children() {
+        for over in [false, true] {
+            let mut s = scene();
+            let frame = s.append(
+                s.root(),
+                NodeKind::Panel {
+                    layout: Layout::Overlay,
+                    quad: zgui::scene::QuadStyle {
+                        fill: Color(20, 20, 20, 255),
+                        border_color: Color(255, 255, 255, 255),
+                        border_width: 3.,
+                        border_over: over,
+                        ..Default::default()
+                    },
+                },
+                Style {
+                    width: Some(40.),
+                    height: Some(40.),
+                    ..Default::default()
+                },
+            );
+            s.set_transform(frame, Transform { x: 30., y: 10. });
+            s.append(
+                frame,
+                NodeKind::Rect(Color(255, 0, 0, 255)),
+                Style {
+                    width: Some(40.),
+                    height: Some(40.),
+                    ..Default::default()
+                },
+            );
+            let mut raster = Raster::new(100, 80);
+            let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+            assert_eq!(pixels, full);
+            let at = |x: usize, y: usize| pixels[y * 100 + x];
+            assert_eq!(
+                at(50, 11),
+                if over { 0xffffff } else { 0xff0000 },
+                "over {over}"
+            );
+            assert_eq!(at(50, 30), 0xff0000);
+        }
+    }
+    #[test]
+    fn rounded_clips_cut_their_childrens_corners() {
+        let mut s = scene();
+        let card = s.append(
+            s.root(),
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: zgui::scene::QuadStyle {
+                    radius: 15.,
+                    ..Default::default()
+                },
+            },
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                clip: true,
+                ..Default::default()
+            },
+        );
+        s.set_transform(card, Transform { x: 30., y: 10. });
+        let red = s.append(
+            card,
+            NodeKind::Rect(Color(255, 0, 0, 255)),
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        let mut raster = Raster::new(100, 80);
+        let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+        assert_eq!(pixels, full);
+        let at = |pixels: &[u32], x: usize, y: usize| pixels[y * 100 + x];
+        assert_eq!(at(&pixels, 50, 30), 0xff0000);
+        assert_eq!(at(&pixels, 31, 11), 0x10141c);
+        assert_eq!(at(&pixels, 68, 48), 0x10141c);
+        assert_eq!(at(&pixels, 69, 30), 0xff0000);
+        // Antialiased along the curve.
+        let row: Vec<u32> = (30..40).map(|x| at(&pixels, x, 14) >> 16).collect();
+        assert!(row.iter().any(|r| *r > 0x30 && *r < 0xf0), "{row:x?}");
+        s.set_kind(red, NodeKind::Rect(Color(0, 0, 255, 255)));
+        let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+        assert_eq!(pixels, full);
+        assert_eq!(at(&pixels, 31, 11), 0x10141c);
+    }
+    #[test]
+    fn content_blurs_spread_and_masks_hide_their_layers() {
+        let mut s = scene();
+        let red = rectangle(&mut s, 30., Color(255, 0, 0, 255));
+        let mut raster = Raster::new(100, 80);
+        incremental_and_full(&mut raster, &mut s);
+        let at = |pixels: &[u32], x: usize, y: usize| pixels[y * 100 + x];
+        s.set_filter_blur(red, 3.);
+        let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+        assert_eq!(pixels, full);
+        // Spread a few pixels past the box, not past three sigma.
+        assert!((at(&pixels, 27, 25) >> 16) & 255 > 0x30);
+        assert_eq!(at(&pixels, 19, 25), 0x10141c);
+        assert!((at(&pixels, 45, 25) >> 16) & 255 > 0xf0);
+        // Masked to its left half, then the band slid right.
+        s.set_filter_blur(red, 0.);
+        s.set_mask(
+            red,
+            Some(zgui::scene::ImageMask {
+                image: std::sync::Arc::new(
+                    zgui::image::ImageData::new(2, 1, vec![255, 255, 255, 255, 0, 0, 0, 0])
+                        .unwrap(),
+                ),
+                offset: (0., 0.),
+                size: (30., 30.),
+            }),
+        );
+        let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+        assert_eq!(pixels, full);
+        assert_eq!(at(&pixels, 35, 25), 0xff0000);
+        assert_eq!(at(&pixels, 50, 25), 0x10141c);
+        s.set_mask_offset(red, (15., 0.));
+        let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+        assert_eq!(pixels, full);
+        assert_eq!(at(&pixels, 35, 25), 0x10141c);
+        assert_eq!(at(&pixels, 50, 25), 0xff0000);
+    }
+    #[test]
+    fn rotated_layers_sample_through_their_matrix_and_repair_damage() {
+        let mut s = scene();
+        let background = s.root();
+        let square = rectangle(&mut s, 35., Color(255, 0, 0, 255));
+        let mut raster = Raster::new(100, 80);
+        let damage = s.flush().damage;
+        raster.render(&s, &damage);
+        s.set_local_transform(
+            square,
+            zgui::scene::LocalTransform {
+                rotate: std::f32::consts::FRAC_PI_4,
+                ..Default::default()
+            },
+        );
+        let damage = s.flush().damage;
+        raster.render(&s, &damage);
+        // A diamond about (50, 25), reaching 21 px: above the laid-out box
+        // (y 10..40), but out of its corners.
+        assert_eq!(raster.pixels[6 * 100 + 50], 0xff0000);
+        assert_eq!(raster.pixels[12 * 100 + 37], 0x10141c);
+        let incremental = raster.pixels.clone();
+        raster.render(&s, &[s.bounds(background)]);
+        assert_eq!(incremental, raster.pixels);
+    }
     #[test]
     fn incremental_matches_full_after_move_opacity_and_removal() {
         let mut s = scene();
@@ -941,6 +1321,7 @@ mod tests {
                 opacity: 0.8,
                 blur_radius: 4.,
                 edge_fade: 8.,
+                filter_blur: 0.,
             },
         );
         let mut r = Raster::new(100, 80);
@@ -956,6 +1337,73 @@ mod tests {
     }
 }
 
+/// The size an image of `source_w` × `source_h` shows at in `bounds` as
+/// `fit` places it.
+fn fitted(source_w: f32, source_h: f32, bounds: Rect, fit: zgui::style::ObjectFit) -> (f32, f32) {
+    use zgui::style::ObjectFit;
+    let (horizontal, vertical) = (bounds.width / source_w, bounds.height / source_h);
+    let scale = match fit {
+        ObjectFit::Fill => return (bounds.width, bounds.height),
+        ObjectFit::None => return (source_w, source_h),
+        ObjectFit::Cover => horizontal.max(vertical),
+        ObjectFit::ScaleDown => horizontal.min(vertical).min(1.),
+        ObjectFit::Contain => horizontal.min(vertical),
+    };
+    (source_w * scale, source_h * scale)
+}
+/// What of `style` an item paints when its border is drawn over its content
+/// (`QuadStyle::border_over`): the border alone in the `border_pass`, the
+/// rest before it; otherwise all of it.
+fn border_part(style: &zgui::scene::QuadStyle, border_pass: bool) -> zgui::scene::QuadStyle {
+    use zgui::decoration::{Background, Decoration};
+    if !style.border_over || !style.has_border() {
+        return style.clone();
+    }
+    let detail = style.decoration.as_deref().cloned();
+    if border_pass {
+        let clear = Color(0, 0, 0, 0);
+        zgui::scene::QuadStyle {
+            fill: clear,
+            shadow: None,
+            decoration: detail.map(|detail| {
+                std::sync::Arc::new(Decoration {
+                    background: Some(Background::Brush(zgui::canvas::Brush::Solid(clear))),
+                    shadows: Some(std::sync::Arc::new([])),
+                    ..detail
+                })
+            }),
+            ..style.clone()
+        }
+    } else {
+        zgui::scene::QuadStyle {
+            border_width: 0.,
+            decoration: detail.map(|detail| {
+                std::sync::Arc::new(Decoration {
+                    border_widths: None,
+                    ..detail
+                })
+            }),
+            ..style.clone()
+        }
+    }
+}
+/// How much of the pixel centred at (`x`, `y`) `round` keeps: 1 inside, 0
+/// outside, antialiased over a pixel at its curves.
+fn rounded_coverage(round: &zgui::scene::RoundRect, x: f32, y: f32) -> f32 {
+    let r = round.rect;
+    let (half_w, half_h) = (r.width / 2., r.height / 2.);
+    let (qx, qy) = (x - r.x - half_w, y - r.y - half_h);
+    let [tl, tr, br, bl] = round.radii;
+    let radius = match (qx > 0., qy > 0.) {
+        (false, false) => tl,
+        (true, false) => tr,
+        (true, true) => br,
+        (false, true) => bl,
+    };
+    let (dx, dy) = (qx.abs() - half_w + radius, qy.abs() - half_h + radius);
+    let outside = (dx.max(0.).powi(2) + dy.max(0.).powi(2)).sqrt() + dx.max(dy).min(0.) - radius;
+    (0.5 - outside).clamp(0., 1.)
+}
 fn rounded_distance(x: f32, y: f32, bounds: Rect, radius: f32) -> f32 {
     let r = radius.max(0.).min(bounds.width.min(bounds.height) * 0.5);
     let qx = (x - bounds.x - bounds.width * 0.5).abs() - bounds.width * 0.5 + r;
@@ -986,6 +1434,7 @@ mod extended_tests {
                     spread: 2.,
                 }),
                 decoration: None,
+                border_over: false,
             }),
             Style {
                 width: Some(24.),

@@ -2466,6 +2466,7 @@ fn surface(theme: Theme, color: Color) -> NodeKind {
         border_width: 1.,
         shadow: None,
         decoration: None,
+        border_over: false,
     })
 }
 impl Ui {

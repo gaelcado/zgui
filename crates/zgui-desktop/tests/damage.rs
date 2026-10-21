@@ -140,6 +140,7 @@ fn run(seed: u64, steps: usize, filters: bool) {
                     opacity: random.n(101) as f32 / 100.0,
                     edge_fade: random.n(14) as f32,
                     blur_radius: 0.0,
+                    filter_blur: 0.,
                 },
             ),
             3 => scene.set_style(id, random.style()),
@@ -189,6 +190,7 @@ fn run(seed: u64, steps: usize, filters: bool) {
                         2.0 + random.n(4) as f32
                     },
                     edge_fade: 4.0,
+                    filter_blur: 0.,
                 },
             ),
             _ => unreachable!(),
@@ -254,6 +256,7 @@ fn removing_last_blur_restores_incremental_compositing_without_ghosts() {
             blur_radius: 5.0,
             edge_fade: 8.0,
             opacity: 0.7,
+            filter_blur: 0.,
         },
     );
     let mut incremental = Raster::new(WIDTH, HEIGHT);

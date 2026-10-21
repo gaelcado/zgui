@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgui::scene::{Color, NodeId, NodeKind, Rect, Scene};
 
+mod effects;
 #[cfg(target_os = "macos")]
 mod layer_present;
 #[cfg(target_os = "macos")]
@@ -82,6 +83,9 @@ pub struct GpuStats {
     pub layer_texture_allocations: usize,
     /// Scrolled regions shifted by copying instead of redrawn.
     pub scroll_copies: usize,
+    /// Layer effect passes (content blurs and masks drawn anew; at most two
+    /// a frame however many), included in render_passes.
+    pub effect_passes: usize,
 }
 /// Retained allocation counters for diagnostics; excludes driver/font database allocations.
 #[derive(Debug, Clone, Copy)]
@@ -118,11 +122,67 @@ struct Quad {
     options: [f32; 4],
     shape: [f32; 4],
     border: [f32; 4],
-    /// A vertical fade mask (top y, bottom y, top band, bottom band) from a
-    /// `fade_edges` ancestor; zero bands leave the quad as is.
+    /// `x`: the index plus one of the clip region the quad lies in (its
+    /// ancestors' rounded clips and edge fades, see `Region`), 0 for none.
     mask: [f32; 4],
 }
 const NO_MASK: [f32; 4] = [0.; 4];
+/// A clip region quads share (`Region` in draw.wgsl): up to two rounded
+/// boxes (x, y, width, height; a negative width for none) with their
+/// corner radii, and a box (x0, y0, x1, y1) fading over bands at its edges
+/// (top, right, bottom, left). In the target's logical units.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct Region {
+    round0: [f32; 4],
+    radii0: [f32; 4],
+    round1: [f32; 4],
+    radii1: [f32; 4],
+    fade_box: [f32; 4],
+    fade: [f32; 4],
+}
+impl Region {
+    /// `item`'s, if it lies in one.
+    fn of(item: &zgui::scene::PaintItem<'_>) -> Option<Self> {
+        if item.mask.is_none() && item.rounded.iter().all(Option::is_none) {
+            return None;
+        }
+        let round = |clip: Option<zgui::scene::RoundRect>| match clip {
+            Some(clip) => (
+                [clip.rect.x, clip.rect.y, clip.rect.width, clip.rect.height],
+                clip.radii,
+            ),
+            None => ([0., 0., -1., -1.], [0.; 4]),
+        };
+        let ((round0, radii0), (round1, radii1)) = (round(item.rounded[0]), round(item.rounded[1]));
+        let (fade_box, fade) = item.mask.map_or(([0.; 4], [0.; 4]), |(rect, bands)| {
+            (
+                [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
+                bands,
+            )
+        });
+        Some(Self {
+            round0,
+            radii0,
+            round1,
+            radii1,
+            fade_box,
+            fade,
+        })
+    }
+}
+/// The index (plus one) `region` has in `regions`, added if new; 0 for none.
+/// Neighbouring items mostly share one (a list in a rounded card).
+fn region_index(regions: &mut Vec<Region>, region: Option<Region>) -> f32 {
+    let Some(region) = region else {
+        return 0.;
+    };
+    if let Some(at) = regions.iter().rev().take(8).position(|r| *r == region) {
+        return (regions.len() - at) as f32;
+    }
+    regions.push(region);
+    regions.len() as f32
+}
 /// How a quad is drawn, where drawing is split (see `push_draw`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shading {
@@ -156,8 +216,7 @@ fn shading(quad: &Quad, scale: f32) -> Shading {
         && quad.options[2] < 0.5
         && quad.shape[2] <= 0.
         && (quad.shape[3] <= 0.5 || (square && quad.color[3] >= 1.))
-        && quad.mask[2] <= 0.
-        && quad.mask[3] <= 0.;
+        && quad.mask[0] <= 0.;
     if !plain {
         Shading::Full
     } else if quad.options[1] <= 0.5 && quad.color[3] >= 1. {
@@ -466,6 +525,9 @@ struct Shaped {
     size: f32,
     width: f32,
     height: f32,
+    /// Device pixels per logical pixel the glyphs were placed at: a layer's
+    /// raster scale differs from the window's.
+    scale: f32,
     glyphs: Vec<Glyph>,
     quads: Vec<Quad>,
     atlas_epoch: u64,
@@ -502,6 +564,41 @@ struct LayerCache {
     bytes: usize,
     /// The content's extent in texture coordinates.
     uv: [f32; 2],
+    /// Its raster scale over the device's, as steps of √2 (`raster_step`).
+    step: i32,
+    /// Promoted by a local transform rather than isolation: kept a while
+    /// once back at identity (`LAYER_PARK_FRAMES`).
+    transformed: bool,
+    /// The frame (`GpuRenderer::layer_frame`) it was last a layer in.
+    used: u64,
+    /// No longer a layer, kept for its pixels.
+    parked: bool,
+}
+/// Frames a transformed layer's texture outlives its transform, so an
+/// animation passing through identity finds its pixels again instead of
+/// repainting into a new allocation. The scene keeps counting the node's
+/// layer revision meanwhile, so the pixels are known current.
+const LAYER_PARK_FRAMES: u64 = 60;
+/// Raster scales a layer renders at, in √2 steps from the device's: half
+/// to four times. Beyond, a texture grows faster than detail shows.
+const RASTER_STEPS: std::ops::RangeInclusive<i32> = -2..=4;
+/// The raster step for content magnified `magnification` times: the
+/// nearest √2 step, kept while within three quarters of a step of
+/// `current`, so a scale animation re-renders a layer once per step it
+/// crosses rather than every frame, and never back and forth at a boundary.
+fn raster_step(magnification: f32, current: Option<i32>) -> i32 {
+    if !(magnification.is_finite() && magnification > 0.) {
+        return current.unwrap_or(0);
+    }
+    let level = 2. * magnification.log2();
+    let step = match current {
+        Some(step) if (level - step as f32).abs() < 0.75 => step,
+        _ => level.round() as i32,
+    };
+    step.clamp(*RASTER_STEPS.start(), *RASTER_STEPS.end())
+}
+fn step_scale(step: i32) -> f32 {
+    std::f32::consts::SQRT_2.powi(step)
 }
 #[derive(Clone)]
 struct Draw {
@@ -825,6 +922,9 @@ struct LayerPresent {
     /// Frames come at the display's full rate (`GpuRenderer::set_full_rate`):
     /// a third surface is kept for them, and the layer queues them.
     full_rate: bool,
+    /// When the window last changed size. Frames show on the plain layer
+    /// until `RESIZE_SETTLE` after it (`Layer::show_plain`).
+    resized_at: Option<std::time::Instant>,
 }
 #[cfg(target_os = "macos")]
 impl LayerPresent {
@@ -856,6 +956,10 @@ const LAYER_BUFFERS: usize = 3;
 /// Frames of changes kept to bring a surface up to date (older ones copy all).
 #[cfg(target_os = "macos")]
 const LAYER_HISTORY: usize = 8;
+/// How long after a size change frames keep to the plain layer, so a live
+/// resize's frames land with its window sizes before queueing resumes.
+#[cfg(target_os = "macos")]
+const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 /// A pass's pipelines for each shading, and the one clearing a region.
 struct PickedPipelines {
     full: wgpu::RenderPipeline,
@@ -910,7 +1014,14 @@ fn quad_bounds(quads: &[Quad]) -> Rect {
 /// edge (`push_panel`): a negative width or height.
 fn quad_rect(quad: &Quad) -> Rect {
     let [x, y, w, h] = quad.rect;
-    Rect::new(x.min(x + w), y.min(y + h), w.abs(), h.abs())
+    let rect = Rect::new(x.min(x + w), y.min(y + h), w.abs(), h.abs());
+    if quad.options[2] < 0.5 {
+        return rect;
+    }
+    // Transformed (an affine image or layer): where its corners land.
+    let [a, c, b, d] = quad.shape;
+    let [tx, ty, ..] = quad.border;
+    zgui::affine::Affine { a, b, c, d, tx, ty }.bounds(rect)
 }
 /// Shapes using exactly the same font selection and line metrics as the renderer.
 pub fn measure_text(
@@ -1047,7 +1158,9 @@ pub struct GpuRenderer {
     pending: RefCell<Option<wgpu::CommandEncoder>>,
     /// Viewport uniforms by logical size (f32 bits). Each is written once at
     /// creation; layers and the window switch between them per pass.
-    viewports: FxHashMap<(u32, u32, u32), wgpu::BindGroup>,
+    viewports: FxHashMap<(u32, u32, u32), (wgpu::Buffer, wgpu::BindGroup)>,
+    /// Bound as the clip regions of frames without any (`Region`).
+    no_regions: wgpu::Buffer,
     /// The raster each canvas, decoration or SVG node currently draws. A
     /// resized or restyled node gets a new raster; the old texture goes at
     /// once instead of waiting for a structural prune.
@@ -1100,6 +1213,8 @@ pub struct GpuRenderer {
     single_pass_frames: u64,
     /// Frames presented to the drawable alone (`Deferred::direct`).
     direct_frames: u64,
+    /// Frames encoded with Metal directly (`render_direct`).
+    metal_frames: u64,
     /// Work encoded at presentation (single-pass frames), reported with the
     /// next `render`'s statistics.
     present_stats: GpuStats,
@@ -1120,6 +1235,8 @@ pub struct GpuRenderer {
     text_cache: Rc<RefCell<prepared::TextCache>>,
     swash: SwashCache,
     layers: FxHashMap<NodeId, LayerCache>,
+    /// Counts rendered frames, to age parked layers (`LAYER_PARK_FRAMES`).
+    layer_frame: u64,
     layer_origin: (f32, f32),
     shapes: FxHashMap<NodeId, Shaped>,
     shaped_bytes: usize,
@@ -1181,6 +1298,11 @@ pub struct GpuRenderer {
     blur_pipelines: Option<BlurPipelines>,
     /// Backdrop blur scratch, shared by the window and every isolated layer.
     blur_scratch: Option<BlurScratch>,
+    /// Blurred and masked layers' slots (effects.rs), made with the first.
+    effects: Option<effects::EffectAtlas>,
+    effect_pipelines: Option<effects::EffectPipelines>,
+    /// Slots the next `render_flat` draws before compositing them.
+    effect_jobs: Vec<effects::Job>,
 }
 impl GpuRenderer {
     pub fn new(width: u32, height: u32) -> Result<Self, GpuError> {
@@ -1358,6 +1480,12 @@ impl GpuRenderer {
             pruned_revision: None,
             pending: RefCell::new(None),
             viewports: FxHashMap::default(),
+            no_regions: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("no clip regions"),
+                size: std::mem::size_of::<Region>() as u64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
             node_images: FxHashMap::default(),
             viewport_bind: None,
             belt: RefCell::new(wgpu::util::StagingBelt::new(device.clone(), 256 * 1024)),
@@ -1406,6 +1534,7 @@ impl GpuRenderer {
             copy_present,
             single_pass_frames: 0,
             direct_frames: 0,
+            metal_frames: 0,
             present_stats: GpuStats::default(),
             atlas,
             atlas_size: 1,
@@ -1415,6 +1544,7 @@ impl GpuRenderer {
             text_cache: context.text_cache(),
             swash: SwashCache::new(),
             layers: FxHashMap::default(),
+            layer_frame: 0,
             layer_origin: (0., 0.),
             shapes: FxHashMap::default(),
             shaped_bytes: 0,
@@ -1443,6 +1573,9 @@ impl GpuRenderer {
             // As if last recycled long ago: the first fill recycles.
             atlas_recycled_at: 0_u64.wrapping_sub(ATLAS_THRASH_FRAMES),
             blur_scratch: None,
+            effects: None,
+            effect_pipelines: None,
+            effect_jobs: Vec::new(),
         })
     }
     /// Bytes the native device reports as allocated (Metal only), including
@@ -1576,6 +1709,7 @@ impl GpuRenderer {
             present.current = None;
             present.changed.clear();
             present.catch_up.clear();
+            present.resized_at = Some(std::time::Instant::now());
         }
         self.flush_pending();
         self.layers.clear();
@@ -1704,8 +1838,23 @@ impl GpuRenderer {
             self.pruned_revision = Some(scene.content_revision());
             self.prune(scene);
         }
-        self.layers
-            .retain(|id, _| scene.contains(*id) && scene.is_isolated(*id));
+        let frame = self.layer_frame;
+        self.layers.retain(|id, cache| {
+            cache.parked = scene.contains(*id) && !scene.is_layer(*id);
+            scene.contains(*id)
+                && (!cache.parked || cache.transformed && frame - cache.used < LAYER_PARK_FRAMES)
+        });
+        if let Some(atlas) = &mut self.effects {
+            let layers = &self.layers;
+            atlas
+                .slots
+                .retain(|id, _| layers.get(id).is_some_and(|cache| !cache.parked));
+            // Unwanted a while, the atlas goes; the next effect makes another.
+            if atlas.slots.is_empty() && frame - atlas.used >= LAYER_PARK_FRAMES {
+                self.effects = None;
+                self.images.remove(&effects::EFFECT_ATLAS);
+            }
+        }
         // Scroll moves this frame can copy; the rest repaint their clip.
         let (copies, repaint) = self.scroll_copies(scene, damage);
         self.copies = copies;
@@ -1735,11 +1884,13 @@ impl GpuRenderer {
             None => scene.layer_items(None),
         };
         let mut layer_stats = GpuStats::default();
+        self.layer_frame += 1;
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
-                self.prepare_layer(scene, item.id, &mut layer_stats)?;
+                self.prepare_layer(scene, item.id, 1., &mut layer_stats)?;
             }
         }
+        self.prepare_effects(scene, &items)?;
         let mut stats = self.render_flat(scene, items, damage, merged)?;
         self.rendered_serial = Some(scene.flush_serial());
         stats.layer_repaints = layer_stats.layer_repaints;
@@ -1749,6 +1900,7 @@ impl GpuRenderer {
         stats.draw_calls += layer_stats.draw_calls;
         stats.render_passes += layer_stats.render_passes;
         stats.blur_passes += layer_stats.blur_passes;
+        stats.effect_passes += layer_stats.effect_passes;
         stats.instances += layer_stats.instances;
         stats.shaped_nodes += layer_stats.shaped_nodes;
         stats.glyph_uploads += layer_stats.glyph_uploads;
@@ -1786,6 +1938,24 @@ impl GpuRenderer {
                 .collect();
             live_images.extend(self.canvases.image_ids());
             live_images.extend(self.svgs.image_ids());
+            // Boxes' background images.
+            live_images.extend(scene.paint_items().filter_map(|item| match item.kind {
+                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
+                    match quad.decoration.as_deref()?.background.as_ref()? {
+                        zgui::decoration::Background::Image { image, .. } => Some(image.id()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }));
+            // Effect layers' atlas and masks.
+            live_images.insert(effects::EFFECT_ATLAS);
+            live_images.extend(
+                self.layers
+                    .keys()
+                    .filter(|id| scene.contains(**id))
+                    .filter_map(|id| scene.mask(*id).map(|mask| mask.image.id())),
+            );
             #[cfg(target_os = "macos")]
             if let Some(cache) = &mut self.native_surfaces {
                 cache.retain(&live_images);
@@ -1793,56 +1963,103 @@ impl GpuRenderer {
             self.images.retain(|id, _| live_images.contains(id));
         }
     }
+    /// Bring `id`'s layer texture up to date. `magnification`: how much its
+    /// parent's content is magnified on screen (by transformed ancestors);
+    /// with its own scale, it picks the raster scale (`raster_step`).
     fn prepare_layer(
         &mut self,
         scene: &Scene,
         id: NodeId,
+        magnification: f32,
         stats: &mut GpuStats,
     ) -> Result<(), GpuError> {
         let revision = scene.layer_revision(id);
         let root = scene.bounds(id);
+        let local = scene.local_transform(id);
+        // Parked a while once it has none (`LAYER_PARK_FRAMES`).
+        let transformed =
+            !local.is_identity() || scene.filter_blur(id) > 0. || scene.mask(id).is_some();
+        let magnification = magnification * local.magnification();
+        let current = self.layers.get(&id).map(|cache| cache.step);
+        let mut step = raster_step(magnification, current);
+        let frame = self.layer_frame;
         if let Some(cache) = self.layers.get_mut(&id)
             && cache.revision == revision
+            && cache.step == step
         {
             cache.bounds.x += root.x - cache.root_origin.0;
             cache.bounds.y += root.y - cache.root_origin.1;
             cache.root_origin = (root.x, root.y);
+            cache.transformed = transformed;
+            cache.used = frame;
+            cache.parked = false;
             stats.layer_cache_hits += 1;
             return Ok(());
         }
+        let content = scene.layer_bounds(id);
+        let limit = self.device.limits().max_texture_dimension_2d;
+        // Magnified past what the texture limits or the budget allow, a
+        // layer renders at the finest scale that fits.
+        let pixels = |step: i32| {
+            let scale = self.scale * step_scale(step);
+            (content.width + 2. / scale) * scale * (content.height + 2. / scale) * scale
+        };
+        while step > 0
+            && ((content.width.max(content.height) + 2.) * self.scale * step_scale(step)
+                > limit as f32
+                || pixels(step) * 4. > 16. * 1024. * 1024.)
+        {
+            step -= 1;
+        }
+        let device_scale = self.scale;
+        let scale = device_scale * step_scale(step);
         // A transparent texel border lets linear sampling preserve fractional
-        // translation coverage instead of clamping opaque edge pixels.
-        let bounds = scene.layer_bounds(id).expand(1. / self.scale);
+        // translation coverage (and smooth a rotated layer's edges) instead
+        // of clamping opaque edge pixels.
+        let bounds = content.expand(1. / scale);
         let x = bounds.x;
         let y = bounds.y;
-        let width = (bounds.width * self.scale).ceil().max(1.) as u32;
-        let height = (bounds.height * self.scale).ceil().max(1.) as u32;
-        let bounds = Rect::new(x, y, width as f32 / self.scale, height as f32 / self.scale);
+        let width = (bounds.width * scale).ceil().max(1.) as u32;
+        let height = (bounds.height * scale).ceil().max(1.) as u32;
+        let bounds = Rect::new(x, y, width as f32 / scale, height as f32 / scale);
         let items = scene.layer_items(Some(id));
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
-                self.prepare_layer(scene, item.id, stats)?;
+                self.prepare_layer(scene, item.id, magnification, stats)?;
             }
         }
+        self.prepare_effects(scene, &items)?;
         let bytes = width as usize * height as usize * 4;
-        let existing = self.layers.get(&id).map_or(0, |l| l.bytes);
-        let used: usize = self.layers.values().map(|l| l.bytes).sum();
+        let mut existing = self.layers.get(&id).map_or(0, |l| l.bytes);
+        let mut used: usize = self.layers.values().map(|l| l.bytes).sum();
+        let over = |count: usize, used: usize, existing: usize, known: bool| {
+            (!known && count >= 1024) || used - existing + bytes > 64 * 1024 * 1024
+        };
+        if over(
+            self.layers.len(),
+            used,
+            existing,
+            self.layers.contains_key(&id),
+        ) {
+            // Parked layers give way first.
+            self.layers
+                .retain(|other, _| *other == id || scene.is_layer(*other));
+            existing = self.layers.get(&id).map_or(0, |l| l.bytes);
+            used = self.layers.values().map(|l| l.bytes).sum();
+        }
         if !self.layers.contains_key(&id) && self.layers.len() >= 1024 {
             return Err(GpuError("isolated layers exceed 1024 texture limit".into()));
         }
         if bytes > 64 * 1024 * 1024 || used - existing + bytes > 64 * 1024 * 1024 {
             return Err(GpuError("isolated layers exceed 64 MiB budget".into()));
         }
-        if width > self.device.limits().max_texture_dimension_2d
-            || height > self.device.limits().max_texture_dimension_2d
-        {
+        if width > limit || height > limit {
             return Err(GpuError(
                 "isolated layer exceeds GPU texture dimensions".into(),
             ));
         }
         // Animated layers change size every frame: round allocations up and
         // reuse any texture that fits without wasting more than half of it.
-        let limit = self.device.limits().max_texture_dimension_2d;
         let (alloc_w, alloc_h) = (
             width.next_multiple_of(64).min(limit),
             height.next_multiple_of(64).min(limit),
@@ -1880,6 +2097,9 @@ impl GpuRenderer {
         self.background = Color(0, 0, 0, 0);
         let fresh = self.fresh;
         self.fresh = true;
+        // Everything inside draws at the layer's raster scale: glyphs,
+        // canvases and nested layers rasterize as finely as it shows.
+        self.scale = scale;
         let local: Vec<_> = items
             .into_iter()
             .map(|mut item| {
@@ -1894,6 +2114,10 @@ impl GpuRenderer {
                         bands,
                     )
                 });
+                for clip in item.rounded.iter_mut().flatten() {
+                    clip.rect.x -= bounds.x;
+                    clip.rect.y -= bounds.y;
+                }
                 item
             })
             .collect();
@@ -1916,12 +2140,14 @@ impl GpuRenderer {
         let _view = std::mem::replace(&mut self.view, old_view);
         self.width = old_size.0;
         self.height = old_size.1;
+        self.scale = device_scale;
         self.background = background;
         self.fresh = fresh;
         let result = result?;
         stats.draw_calls += result.draw_calls;
         stats.render_passes += result.render_passes;
         stats.blur_passes += result.blur_passes;
+        stats.effect_passes += result.effect_passes;
         stats.instances += result.instances;
         stats.shaped_nodes += result.shaped_nodes;
         stats.glyph_uploads += result.glyph_uploads;
@@ -1942,6 +2168,10 @@ impl GpuRenderer {
                 root_origin: (root.x, root.y),
                 bytes,
                 uv,
+                step,
+                transformed,
+                used: frame,
+                parked: false,
             },
         );
         Ok(())
@@ -1961,21 +2191,35 @@ impl GpuRenderer {
                 bytemuck::cast_slice(&[width, height, self.scale, 0.]),
                 wgpu::BufferUsages::UNIFORM,
             );
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("viewport"),
-                layout: &self.context.inner.viewport_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            });
-            self.viewports.insert(key, bind);
+            let bind = self.viewport_group(&buffer, self.no_regions.as_entire_binding());
+            self.viewports.insert(key, (buffer, bind));
         }
-        self.viewport_bind = self.viewports.get(&key).cloned();
+        self.viewport_bind = self.viewports.get(&key).map(|(_, bind)| bind.clone());
         #[cfg(target_os = "macos")]
         {
             self.viewport_values = [width, height, self.scale, 0.];
         }
+    }
+    /// Group 1 of the quad pipelines: the viewport `uniform` and `regions`.
+    fn viewport_group(
+        &self,
+        uniform: &wgpu::Buffer,
+        regions: wgpu::BindingResource<'_>,
+    ) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport"),
+            layout: &self.context.inner.viewport_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: regions,
+                },
+            ],
+        })
     }
     fn texture_bind(&self, view: &wgpu::TextureView, label: &str) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2002,7 +2246,7 @@ impl GpuRenderer {
     /// `merged`: `damage` merged into regions already (`merge_damage`).
     fn render_flat(
         &mut self,
-        _scene: &Scene,
+        scene: &Scene,
         items: Vec<zgui::scene::PaintItem<'_>>,
         damage: &[Rect],
         merged: Option<Vec<Rect>>,
@@ -2013,7 +2257,11 @@ impl GpuRenderer {
         } else {
             std::mem::take(&mut self.copies)
         };
+        // Effect slots `prepare_effects` planned for these items: drawn
+        // before anything composites them.
+        let effect_jobs = std::mem::take(&mut self.effect_jobs);
         if damage.is_empty() && !self.fresh && copies.is_empty() {
+            self.forget_effects(&effect_jobs);
             return Ok(stats);
         }
         // Earlier commands read the vertex and uniform buffers rewritten below.
@@ -2059,6 +2307,7 @@ impl GpuRenderer {
             merged.unwrap_or_else(|| merge_damage(damage, viewport, self.scale))
         };
         if damage.is_empty() && copies.is_empty() {
+            self.forget_effects(&effect_jobs);
             return Ok(stats);
         }
         self.frame = self.frame.wrapping_add(1);
@@ -2091,6 +2340,8 @@ impl GpuRenderer {
             mask: NO_MASK,
         });
         let mut draws = std::mem::take(&mut self.frame_draws);
+        // The clip regions quads lie in (`Quad::mask`).
+        let mut clips: Vec<Region> = Vec::new();
         draws.clear();
         for item in items {
             // Retained hidden subtrees must not allocate textures, shape text,
@@ -2112,16 +2363,30 @@ impl GpuRenderer {
                 continue;
             };
 
+            // A transformed layer's matrix, from this target's origin.
+            let matrix = item.matrix.map(|matrix| {
+                let (x, y) = self.layer_origin;
+                zgui::affine::Affine::translation(x, y)
+                    .then(matrix)
+                    .then(zgui::affine::Affine::translation(-x, -y))
+            });
+            // Blurred or masked: composited from its effect slot.
+            let effect = (item.isolated
+                && (item.effects.filter_blur > 0. || scene.mask(item.id).is_some()))
+            .then(|| self.effect_slot(item.id))
+            .flatten();
             if !damage.iter().any(|d| {
                 d.intersects(clip)
                     && d.intersects(if item.isolated {
                         let b = self.layers[&item.id].bounds;
-                        Rect::new(
+                        let b = Rect::new(
                             b.x - self.layer_origin.0,
                             b.y - self.layer_origin.1,
                             b.width,
                             b.height,
-                        )
+                        );
+                        let b = effect.map_or(b, |slot| b.expand(slot.spread));
+                        matrix.map_or(b, |matrix| matrix.bounds(b))
                     } else if let NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } =
                         item.kind
                     {
@@ -2145,9 +2410,16 @@ impl GpuRenderer {
                     layer.bounds.width,
                     layer.bounds.height,
                 );
+                let (bounds, uv) = match (effect, &self.effects) {
+                    (Some(slot), Some(atlas)) => slot.composite(bounds, atlas.size()),
+                    _ => (bounds, [0., 0., layer.uv[0], layer.uv[1]]),
+                };
+                // Transformed: the quad's corners move in the vertex shader,
+                // as an affine image's; edge fades stay in its own frame.
+                let m = matrix.unwrap_or_default();
                 quads.push(Quad {
                     rect: [bounds.x, bounds.y, bounds.width, bounds.height],
-                    uv: [0., 0., layer.uv[0], layer.uv[1]],
+                    uv,
                     color: [1., 1., 1., item.effects.opacity],
                     fade: [
                         item.bounds.x,
@@ -2155,12 +2427,21 @@ impl GpuRenderer {
                         item.bounds.width,
                         item.bounds.height,
                     ],
-                    options: [item.effects.edge_fade, 2., 0., 0.],
-                    shape: [0.; 4],
-                    border: [0.; 4],
-                    mask: item.mask.map_or(NO_MASK, |(rect, [top, bottom])| {
-                        [rect.y, rect.y + rect.height, top, bottom]
-                    }),
+                    options: [
+                        item.effects.edge_fade,
+                        2.,
+                        if matrix.is_some() { 1. } else { 0. },
+                        0.,
+                    ],
+                    shape: match matrix {
+                        Some(_) => [m.a, m.c, m.b, m.d],
+                        None => [0.; 4],
+                    },
+                    border: match matrix {
+                        Some(_) => [m.tx, m.ty, 0., 0.],
+                        None => [0.; 4],
+                    },
+                    mask: [region_index(&mut clips, Region::of(&item)), 0., 0., 0.],
                 });
                 draws.push(Draw {
                     shading: Shading::Full,
@@ -2168,8 +2449,9 @@ impl GpuRenderer {
                     end: quads.len() as u32,
                     clip,
                     bounds: quad_bounds(&quads[start as usize..]),
-                    image: None,
-                    layer: Some(item.id),
+                    // Effect layers sample the effect atlas, and batch.
+                    image: effect.map(|_| effects::EFFECT_ATLAS),
+                    layer: effect.is_none().then_some(item.id),
                     blur: (item.effects.blur_radius > 0.).then_some((
                         item.bounds,
                         item.effects,
@@ -2219,117 +2501,167 @@ impl GpuRenderer {
                     if style.shadows().len() > 32 {
                         return Err(GpuError("panel exceeds 32 shadows".into()));
                     }
-                    for shadow in style.shadows() {
-                        let core = bounds.expand(shadow.spread.max(0.));
-                        let core = Rect::new(
-                            core.x + shadow.offset.x,
-                            core.y + shadow.offset.y,
-                            core.width,
-                            core.height,
-                        );
-                        let outer = core.expand(shadow.blur_radius.max(0.) * 3.);
-                        quads.push(Quad {
-                            rect: [outer.x, outer.y, outer.width, outer.height],
-                            uv: [0.; 4],
-                            color: rgba(shadow.color, item.effects.opacity),
-                            fade: [core.x, core.y, core.width, core.height],
-                            options: [0., 0., 0., 1.],
-                            shape: [
-                                style.radius + shadow.spread.max(0.),
-                                0.,
-                                shadow.blur_radius.max(0.001),
-                                0.,
-                            ],
-                            border: decoration::shadow_corners(
-                                style,
+                    // A solid border (any widths per side, any radii) is a
+                    // ring the quad shader draws; dashed ones rasterize with
+                    // the fill.
+                    let ring = style.has_border()
+                        && style.decoration.as_ref().is_none_or(|detail| {
+                            detail.border_style == zgui::decoration::BorderStyle::Solid
+                        });
+                    let (opacity, edge_fade) = (item.effects.opacity, item.effects.edge_fade);
+                    if item.border_pass {
+                        // Its border alone, over what it holds.
+                        if ring {
+                            quads.push(ring_quad(style, bounds, opacity, edge_fade));
+                        }
+                    } else {
+                        for shadow in style.shadows() {
+                            let core = bounds.expand(shadow.spread.max(0.));
+                            let core = Rect::new(
+                                core.x + shadow.offset.x,
+                                core.y + shadow.offset.y,
                                 core.width,
                                 core.height,
-                                shadow.spread.max(0.),
-                            ),
-                            mask: NO_MASK,
-                        });
-                    }
-                    // Per-corner radii over a flat fill need no raster: the quad
-                    // shader draws per-corner rounded rects. Borders, gradients
-                    // and patterns still rasterize.
-                    let flat_fill = style.decoration.as_deref().and_then(|detail| {
-                        let fill = match &detail.background {
-                            None => style.fill,
-                            Some(zgui::decoration::Background::Brush(
-                                zgui::canvas::Brush::Solid(color),
-                            )) => *color,
-                            Some(_) => return None,
-                        };
-                        let widths = detail
-                            .border_widths
-                            .unwrap_or(zgui::scene::Insets::all(style.border_width));
-                        let border = widths
-                            .left
-                            .max(widths.right)
-                            .max(widths.top)
-                            .max(widths.bottom);
-                        (border <= 0. || style.border_color.3 == 0).then_some(fill)
-                    });
-                    if let Some(fill) = flat_fill {
-                        if let Some(old) = self.node_images.remove(&item.id) {
-                            self.images.remove(&old);
-                        }
-                        push_panel(
-                            &mut quads,
-                            Quad {
-                                rect: fade,
+                            );
+                            let outer = core.expand(shadow.blur_radius.max(0.) * 3.);
+                            quads.push(Quad {
+                                rect: [outer.x, outer.y, outer.width, outer.height],
                                 uv: [0.; 4],
-                                color: rgba(fill, item.effects.opacity),
-                                fade,
-                                options: [item.effects.edge_fade, 0., 0., 1.],
-                                shape: [0., 0., 0., 1.],
+                                color: rgba(shadow.color, item.effects.opacity),
+                                fade: [core.x, core.y, core.width, core.height],
+                                options: [0., 0., 0., 1.],
+                                shape: [
+                                    style.radius + shadow.spread.max(0.),
+                                    0.,
+                                    shadow.blur_radius.max(0.001),
+                                    0.,
+                                ],
                                 border: decoration::shadow_corners(
                                     style,
-                                    bounds.width,
-                                    bounds.height,
-                                    0.,
+                                    core.width,
+                                    core.height,
+                                    shadow.spread.max(0.),
                                 ),
                                 mask: NO_MASK,
-                            },
-                            self.scale,
-                            self.split_shading,
-                        );
-                    } else if style.decoration.is_some() && bounds.width > 0. && bounds.height > 0.
-                    {
-                        let before = self.canvases.rasterizations();
-                        let (width, height, scale) = (bounds.width, bounds.height, self.scale);
-                        let id = self.canvas_texture(item.id, &mut stats, |cache| {
-                            cache.get_decoration(item.id, style, width, height, scale)
-                        })?;
-                        stats.canvas_rasterizations +=
-                            (self.canvases.rasterizations() - before) as usize;
-                        canvas_image = Some(id);
-                        quads.push(Quad {
-                            rect: fade,
-                            uv: [0., 0., 1., 1.],
-                            color: [1., 1., 1., item.effects.opacity],
-                            fade,
-                            options: [item.effects.edge_fade, 2., 0., 0.],
-                            shape: [0.; 4],
-                            border: [0.; 4],
-                            mask: NO_MASK,
+                            });
+                        }
+                        // Drawn by its border pass instead (`border_over`).
+                        let later = style.border_over && ring;
+                        // Per-corner radii over a flat fill need no raster: the
+                        // quad shader draws per-corner rounded rects, and their
+                        // solid borders as rings. Gradients, patterns and
+                        // dashes still rasterize.
+                        let flat_fill = style.decoration.as_deref().and_then(|detail| {
+                            let fill = match &detail.background {
+                                // An image paints over the fill colour.
+                                None | Some(zgui::decoration::Background::Image { .. }) => {
+                                    style.fill
+                                }
+                                Some(zgui::decoration::Background::Brush(
+                                    zgui::canvas::Brush::Solid(color),
+                                )) => *color,
+                                Some(_) => return None,
+                            };
+                            (!style.has_border() || ring).then_some(fill)
                         });
-                    } else {
-                        push_panel(
-                            &mut quads,
-                            Quad {
+                        if let Some(fill) = flat_fill {
+                            if let Some(old) = self.node_images.remove(&item.id) {
+                                self.images.remove(&old);
+                            }
+                            push_panel(
+                                &mut quads,
+                                Quad {
+                                    rect: fade,
+                                    uv: [0.; 4],
+                                    color: rgba(fill, opacity),
+                                    fade,
+                                    options: [edge_fade, 0., 0., 1.],
+                                    shape: [0., 0., 0., 1.],
+                                    border: decoration::shadow_corners(
+                                        style,
+                                        bounds.width,
+                                        bounds.height,
+                                        0.,
+                                    ),
+                                    mask: NO_MASK,
+                                },
+                                self.scale,
+                                self.split_shading,
+                            );
+                            if let Some(zgui::decoration::Background::Image { image, fit }) = style
+                                .decoration
+                                .as_deref()
+                                .and_then(|d| d.background.as_ref())
+                                && let Some(quad) =
+                                    background_quad(image, *fit, style, bounds, opacity, edge_fade)
+                            {
+                                if !self.images.contains_key(&image.id()) {
+                                    self.upload_image(image)?;
+                                    stats.image_uploads += 1;
+                                }
+                                quads.push(quad);
+                                canvas_image = Some(image.id());
+                            }
+                            if ring && !later {
+                                quads.push(ring_quad(style, bounds, opacity, edge_fade));
+                            }
+                        } else if style.decoration.is_some()
+                            && bounds.width > 0.
+                            && bounds.height > 0.
+                        {
+                            // Its border left to the border pass, when it has one.
+                            let drawn = match later {
+                                true => std::borrow::Cow::Owned(zgui::scene::QuadStyle {
+                                    border_width: 0.,
+                                    decoration: style.decoration.as_deref().map(|detail| {
+                                        Arc::new(zgui::decoration::Decoration {
+                                            border_widths: None,
+                                            ..detail.clone()
+                                        })
+                                    }),
+                                    ..style.clone()
+                                }),
+                                false => std::borrow::Cow::Borrowed(style),
+                            };
+                            let before = self.canvases.rasterizations();
+                            let (width, height, scale) = (bounds.width, bounds.height, self.scale);
+                            let id = self.canvas_texture(item.id, &mut stats, |cache| {
+                                cache.get_decoration(item.id, &drawn, width, height, scale)
+                            })?;
+                            stats.canvas_rasterizations +=
+                                (self.canvases.rasterizations() - before) as usize;
+                            canvas_image = Some(id);
+                            quads.push(Quad {
                                 rect: fade,
-                                uv: [0.; 4],
-                                color: rgba(style.fill, item.effects.opacity),
+                                uv: [0., 0., 1., 1.],
+                                color: [1., 1., 1., opacity],
                                 fade,
-                                options: [item.effects.edge_fade, 0., 0., 0.],
-                                shape: [style.radius.max(0.), style.border_width.max(0.), 0., 1.],
-                                border: rgba(style.border_color, item.effects.opacity),
+                                options: [edge_fade, 2., 0., 0.],
+                                shape: [0.; 4],
+                                border: [0.; 4],
                                 mask: NO_MASK,
-                            },
-                            self.scale,
-                            self.split_shading,
-                        );
+                            });
+                        } else {
+                            let border = match later {
+                                true => 0.,
+                                false => style.border_width.max(0.),
+                            };
+                            push_panel(
+                                &mut quads,
+                                Quad {
+                                    rect: fade,
+                                    uv: [0.; 4],
+                                    color: rgba(style.fill, opacity),
+                                    fade,
+                                    options: [edge_fade, 0., 0., 0.],
+                                    shape: [style.radius.max(0.), border, 0., 1.],
+                                    border: rgba(style.border_color, opacity),
+                                    mask: NO_MASK,
+                                },
+                                self.scale,
+                                self.split_shading,
+                            );
+                        }
                     }
                 }
                 NodeKind::Svg(svg) => {
@@ -2535,6 +2867,7 @@ impl GpuRenderer {
                             || s.size != font_size
                             || s.width != bounds.width
                             || s.height != bounds.height
+                            || s.scale != self.scale
                     });
                     if stale {
                         if let Some(old) = self.shapes.remove(&item.id) {
@@ -2638,6 +2971,7 @@ impl GpuRenderer {
                             size: font_size,
                             width: bounds.width,
                             height: bounds.height,
+                            scale: self.scale,
                             glyphs,
                             quads: Vec::new(),
                             atlas_epoch: 0,
@@ -2732,11 +3066,12 @@ impl GpuRenderer {
                 }
                 NodeKind::Container(_) => {}
             }
-            // Under a `fade_edges` container, fade by its bands in the shader.
-            if let Some((rect, [top, bottom])) = item.mask {
-                let mask = [rect.y, rect.y + rect.height, top, bottom];
+            // Inside rounded clips or a `fade_edges` container: cut and faded
+            // in the shader.
+            let region = region_index(&mut clips, Region::of(&item));
+            if region > 0. {
                 for quad in &mut quads[start as usize..] {
-                    quad.mask = mask;
+                    quad.mask = [region, 0., 0., 0.];
                 }
             }
             // When the clip only culls whole quads, apply it on the CPU and
@@ -2784,6 +3119,9 @@ impl GpuRenderer {
                 push_draw(&mut draws, &quads, draw, self.split_shading, self.scale);
             }
         }
+        // Effect passes' quads ride in the frame's vertex buffer.
+        let effect_first = quads.len() as u32;
+        quads.extend(Self::effect_quads(&effect_jobs));
         // The surface this frame draws into, when presenting through the
         // layer: shown surfaces stay as they are.
         #[cfg(target_os = "macos")]
@@ -2904,9 +3242,11 @@ impl GpuRenderer {
                 }
             }
         }
-        // Frames of quads (images the CPU wrote, no layers, nothing else
-        // recorded, any filters mixed by dual-source blending) skip wgpu:
-        // see `metal_frame`.
+        // Frames of quads (images the CPU wrote, layer composites, nothing
+        // else recorded, any filters mixed by dual-source blending) skip
+        // wgpu: see `metal_frame`. Layers repainted this frame were submitted
+        // to the queue by `flush_pending` above, so they land first: a frame
+        // animating only layer transforms is a single direct pass.
         #[cfg(target_os = "macos")]
         if !self.in_layer
             && self.mapped.is_some()
@@ -2916,7 +3256,7 @@ impl GpuRenderer {
             && (self.layer_present.is_some() || self.surface.is_none())
             && self.single_pass_format.is_none()
             && draws.iter().all(|draw| {
-                draw.layer.is_none()
+                draw.layer.is_none_or(|id| self.layers.contains_key(&id))
                     && draw.image.is_none_or(|id| {
                         self.images.get(&id).is_some_and(|image| image.2.is_some())
                     })
@@ -2926,14 +3266,24 @@ impl GpuRenderer {
                     .device
                     .features()
                     .contains(wgpu::Features::DUAL_SOURCE_BLENDING))
+            && effect_jobs.iter().all(|job| {
+                job.mask
+                    .is_none_or(|id| self.images.get(&id).is_some_and(|image| image.2.is_some()))
+            })
             && self
                 .metal_frame
                 .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
                 .as_ref()
-                .is_some_and(|frame| batches.is_empty() || frame.blurs())
+                .is_some_and(|frame| {
+                    (batches.is_empty() || frame.blurs())
+                        && (effect_jobs.is_empty() || frame.effects())
+                })
         {
             let catch_up = catch_up.map(|(_, instances)| instances);
-            return Ok(self.render_direct(quads, draws, &regions, &batches, catch_up, shown, stats));
+            let effects = (&effect_jobs[..], effect_first);
+            return Ok(self.render_direct(
+                quads, draws, &regions, &batches, catch_up, shown, effects, &clips, stats,
+            ));
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         // Glyphs rasterized while building this frame land before any pass
@@ -2978,6 +3328,8 @@ impl GpuRenderer {
             records.extend_from_slice(part);
             (at as u64, part.len() as u64)
         };
+        // The clip regions too, bound with the viewport for this frame.
+        let region_range = (!clips.is_empty()).then(|| record(bytemuck::cast_slice(&clips)));
         let ranges: Vec<Option<[(u64, u64); 2]>> = plans
             .iter()
             .map(|plan| {
@@ -3022,6 +3374,30 @@ impl GpuRenderer {
             self.belt.get_mut().finish();
             vertices
         };
+        if let Some((offset, size)) = region_range {
+            let uniform = self
+                .viewports
+                .get(&(
+                    viewport.width.to_bits(),
+                    viewport.height.to_bits(),
+                    self.scale.to_bits(),
+                ))
+                .map(|(uniform, _)| uniform.clone())
+                .expect("selected above");
+            let regions = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &vertices,
+                offset,
+                size: wgpu::BufferSize::new(size),
+            });
+            self.viewport_bind = Some(self.viewport_group(&uniform, regions));
+        }
+        self.encode_effects(
+            &mut encoder,
+            &vertices,
+            &effect_jobs,
+            effect_first,
+            &mut stats,
+        );
         let splits: Vec<usize> = batches.iter().map(|(start, _)| *start).collect();
         // The window's own frame can be drawn at presentation in the same pass
         // as the drawable (`present_single_pass`). With damaged filters, only
@@ -3151,6 +3527,8 @@ impl GpuRenderer {
         batches: &[(usize, Vec<usize>)],
         catch_up: Option<std::ops::Range<u32>>,
         shown: Option<usize>,
+        (effect_jobs, effect_first): (&[effects::Job], u32),
+        clips: &[Region],
         mut stats: GpuStats,
     ) -> GpuStats {
         let vertices = {
@@ -3205,7 +3583,20 @@ impl GpuRenderer {
                 .as_ref()
                 .filter(|_| plans.iter().any(Option::is_some))
                 .map(|scratch| scratch.atlas.each_ref().map(raw));
-            let mut pass = frame.begin(&target, &vertices, self.viewport_values);
+            // Effect slots drawn first, each pass of them into its atlas.
+            let effect_passes = self.metal_effect_passes(effect_jobs, effect_first, &raw);
+            for pass in &effect_passes {
+                stats.render_passes += 1;
+                stats.effect_passes += 1;
+                stats.draw_calls += pass.draws.len();
+            }
+            let mut pass = frame.begin(
+                &target,
+                &vertices,
+                self.viewport_values,
+                bytemuck::cast_slice(clips),
+                &effect_passes,
+            );
             let present = self.layer_present.as_ref();
             if let (Some(instances), Some(present), Some(shown)) = (catch_up, present, shown) {
                 pass.texture(&present.buffers[shown].0.metal);
@@ -3218,8 +3609,8 @@ impl GpuRenderer {
             } else {
                 Shading::Full
             };
-            // The image the quads sample (None: the glyph atlas).
-            let mut sampled = None;
+            // The image or layer the quads sample (neither: the glyph atlas).
+            let mut sampled = (None, None);
             let splits = batches.iter().map(|(start, _)| *start);
             let mut from = 0;
             // The batch drawn back at the start of the pass after its blur.
@@ -3246,13 +3637,21 @@ impl GpuRenderer {
                         else {
                             return;
                         };
-                        let image = batch.source.0;
-                        if image != sampled {
-                            match image.and_then(|id| self.images.get(&id)?.2.as_ref()) {
+                        if batch.source != sampled {
+                            let texture = match batch.source {
+                                (Some(image), _) => {
+                                    self.images.get(&image).and_then(|image| image.2.as_ref())
+                                }
+                                (None, Some(layer)) => {
+                                    self.layers.get(&layer).map(|layer| &layer.texture)
+                                }
+                                (None, None) => None,
+                            };
+                            match texture {
                                 Some(texture) => pass.texture(&raw(texture)),
                                 None => pass.texture(&atlas),
                             }
-                            sampled = image;
+                            sampled = batch.source;
                         }
                         pass.scissor(rect);
                         pass.quads(frame, batch.shading, false, batch.start..batch.end);
@@ -3272,7 +3671,7 @@ impl GpuRenderer {
                 pass.blur(frame, &target, [&blur[0], &blur[1]], &records, rects);
                 pass.resume(&target);
                 pass.texture(&atlas);
-                sampled = None;
+                sampled = (None, None);
                 stats.draw_calls += 3 * rects.iter().filter(|r| r.2 > 0 && r.3 > 0).count();
                 stats.render_passes += 4;
                 stats.blur_passes += 3;
@@ -3282,6 +3681,7 @@ impl GpuRenderer {
             pass.commit()
         };
         *self.metal_inflight.get_mut() = Some(committed);
+        self.metal_frames += 1;
         stats.render_passes += 1;
         self.fresh = false;
         self.frame_quads = quads;
@@ -4586,7 +4986,15 @@ impl GpuRenderer {
         }
         before_present();
         let layer = present.layer.as_mut().expect("attached above");
-        layer.show(&present.buffers[index].0, self.background.3 == 255, present.full_rate);
+        let (buffer, opaque) = (&present.buffers[index].0, self.background.3 == 255);
+        if present
+            .resized_at
+            .is_some_and(|at| at.elapsed() < RESIZE_SETTLE)
+        {
+            layer.show_plain(buffer, opaque);
+        } else {
+            layer.show(buffer, opaque, present.full_rate);
+        }
         present.frame += 1;
         let frame = present.frame;
         present.buffers[index].1 = Some(frame);
@@ -4722,7 +5130,11 @@ impl GpuRenderer {
     pub fn trim(&mut self) {
         self.flush_pending();
         self.blur_scratch = None;
+        // Effect slots draw again from their layers when next damaged.
+        self.effects = None;
+        self.images.remove(&effects::EFFECT_ATLAS);
         self.spare = None;
+        self.layers.retain(|_, cache| !cache.parked);
         // Idle: only the shown surface is needed; the next frame makes another.
         #[cfg(target_os = "macos")]
         if let Some(present) = &mut self.layer_present
@@ -4821,6 +5233,10 @@ impl GpuRenderer {
     }
     pub fn debug_single_pass_frames(&self) -> u64 {
         self.single_pass_frames
+    }
+    /// Frames encoded with Metal directly rather than through wgpu (macOS).
+    pub fn debug_metal_frames(&self) -> u64 {
+        self.metal_frames
     }
     /// Test hook: draw plain quads with the basic shader, or every quad with
     /// the full shader.
@@ -5121,6 +5537,85 @@ fn rich_decoration_quad(d: &text::RichDecoration) -> Quad {
         options: [0.; 4],
         shape: [0.; 4],
         border: [0.; 4],
+        mask: NO_MASK,
+    }
+}
+/// A background `image` placed in `bounds` as `fit` has it (centred), the
+/// part inside them, cut to `style`'s rounded corners (the quad shader's
+/// per-corner shape over the box, whatever part of it the image covers).
+fn background_quad(
+    image: &zgui::image::ImageData,
+    fit: zgui::style::ObjectFit,
+    style: &zgui::scene::QuadStyle,
+    bounds: Rect,
+    opacity: f32,
+    edge_fade: f32,
+) -> Option<Quad> {
+    use zgui::style::ObjectFit;
+    let (source_w, source_h) = (image.width() as f32, image.height() as f32);
+    if bounds.width <= 0. || bounds.height <= 0. {
+        return None;
+    }
+    let (horizontal, vertical) = (bounds.width / source_w, bounds.height / source_h);
+    let (width, height) = match fit {
+        ObjectFit::Fill => (bounds.width, bounds.height),
+        ObjectFit::None => (source_w, source_h),
+        fit => {
+            let scale = match fit {
+                ObjectFit::Cover => horizontal.max(vertical),
+                ObjectFit::ScaleDown => horizontal.min(vertical).min(1.),
+                _ => horizontal.min(vertical),
+            };
+            (source_w * scale, source_h * scale)
+        }
+    };
+    let placed = Rect::new(
+        bounds.x + (bounds.width - width) / 2.,
+        bounds.y + (bounds.height - height) / 2.,
+        width,
+        height,
+    );
+    let shown = placed.intersection(bounds)?;
+    let fade = [bounds.x, bounds.y, bounds.width, bounds.height];
+    Some(Quad {
+        rect: [shown.x, shown.y, shown.width, shown.height],
+        uv: [
+            (shown.x - placed.x) / width,
+            (shown.y - placed.y) / height,
+            shown.width / width,
+            shown.height / height,
+        ],
+        color: [1., 1., 1., opacity],
+        fade,
+        options: [edge_fade, 2., 0., 1.],
+        shape: [0., 0., 0., 1.],
+        border: decoration::shadow_corners(style, bounds.width, bounds.height, 0.),
+        mask: NO_MASK,
+    })
+}
+/// `style`'s border alone at `bounds`: a ring of its side widths (top,
+/// right, bottom, left) inside its rounded box (`draw.wgsl`'s ring mode,
+/// two widths a lane in 16ths of a pixel, up to 255 px).
+fn ring_quad(style: &zgui::scene::QuadStyle, bounds: Rect, opacity: f32, edge_fade: f32) -> Quad {
+    let sides = style.border_sides();
+    let width = |value: f32| match value.is_finite() {
+        true => (value.max(0.) * 16.).round().min(4095.),
+        false => 0.,
+    };
+    let fade = [bounds.x, bounds.y, bounds.width, bounds.height];
+    Quad {
+        rect: fade,
+        uv: [0.; 4],
+        color: rgba(style.border_color, opacity),
+        fade,
+        options: [edge_fade, 0., 0., 1.],
+        shape: [
+            width(sides.top) + 4096. * width(sides.right),
+            -1.,
+            width(sides.bottom) + 4096. * width(sides.left),
+            1.,
+        ],
+        border: decoration::shadow_corners(style, bounds.width, bounds.height, 0.),
         mask: NO_MASK,
     }
 }
@@ -5620,18 +6115,31 @@ fn create_quad_pipelines(
             },
         ],
     });
+    // The viewport, and the frame's clip regions (`Region`).
     let viewport_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("viewport"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("quads"),

@@ -37,6 +37,7 @@ fn quad(fill: Color, shadow: bool) -> NodeKind {
             spread: 0.,
         }),
         decoration: None,
+        border_over: false,
     })
 }
 

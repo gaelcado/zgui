@@ -67,13 +67,18 @@ pub(crate) fn mount_style(
 /// Resolved styles, typography, intrinsic size and content layout target.
 type AppliedInputs = (Styles, Typography, Option<(f32, f32)>, Option<NodeId>);
 /// Paint properties an animation changes every frame: `Styles`' opacity,
-/// blur, edge fade, transform and text colour.
+/// blurs, edge fade, mask offset, translation, local transform and text
+/// colour.
 #[derive(Clone, Copy, PartialEq)]
 struct Paint {
     opacity: Option<f32>,
     blur: Option<f32>,
     edge_fade: Option<f32>,
+    filter_blur: Option<f32>,
+    mask_offset: Option<(f32, f32)>,
+    clip_inset: Option<crate::scene::ClipInset>,
     transform: Option<crate::scene::Transform>,
+    local: crate::style::TransformPatch,
     text_color: Option<crate::scene::Color>,
 }
 impl Paint {
@@ -83,7 +88,11 @@ impl Paint {
             opacity: styles.opacity.take(),
             blur: styles.blur.take(),
             edge_fade: styles.edge_fade.take(),
+            filter_blur: styles.filter_blur.take(),
+            mask_offset: styles.mask_offset.take(),
+            clip_inset: styles.clip_inset.take(),
             transform: styles.transform.take(),
+            local: std::mem::take(&mut styles.local_transform),
             text_color: styles.text_color.take(),
         }
     }
@@ -91,18 +100,26 @@ impl Paint {
         styles.opacity = self.opacity;
         styles.blur = self.blur;
         styles.edge_fade = self.edge_fade;
+        styles.filter_blur = self.filter_blur;
+        styles.mask_offset = self.mask_offset;
+        styles.clip_inset = self.clip_inset;
         styles.transform = self.transform;
+        styles.local_transform = self.local;
         styles.text_color = self.text_color;
     }
     /// Which properties are set, whatever their values.
-    fn set(&self) -> [bool; 5] {
-        [
+    fn set(&self) -> ([bool; 8], u8) {
+        let set = [
+            self.clip_inset.is_some(),
             self.opacity.is_some(),
             self.blur.is_some(),
             self.edge_fade.is_some(),
+            self.filter_blur.is_some(),
+            self.mask_offset.is_some(),
             self.transform.is_some(),
             self.text_color.is_some(),
-        ]
+        ];
+        (set, self.local.set)
     }
     /// `self` with what `over` sets laid over it, as `Styles::merge` does.
     fn over(self, over: Self) -> Self {
@@ -110,7 +127,11 @@ impl Paint {
             opacity: over.opacity.or(self.opacity),
             blur: over.blur.or(self.blur),
             edge_fade: over.edge_fade.or(self.edge_fade),
+            filter_blur: over.filter_blur.or(self.filter_blur),
+            mask_offset: over.mask_offset.or(self.mask_offset),
+            clip_inset: over.clip_inset.or(self.clip_inset),
             transform: over.transform.or(self.transform),
+            local: self.local.over(over.local),
             text_color: over.text_color.or(self.text_color),
         }
     }
@@ -119,10 +140,37 @@ impl Paint {
             opacity: styles.opacity,
             blur: styles.blur,
             edge_fade: styles.edge_fade,
+            filter_blur: styles.filter_blur,
+            mask_offset: styles.mask_offset,
+            clip_inset: styles.clip_inset,
             transform: styles.transform,
+            local: styles.local_transform,
             text_color: styles.text_color,
         }
     }
+}
+/// Set `node`'s mask from `resolved`: its image and size, or else the
+/// node's own mask, at its offset if set. Nodes without one cost nothing.
+fn apply_mask(
+    scene: &mut crate::scene::Scene,
+    node: NodeId,
+    resolved: &Styles,
+    original: &Option<crate::scene::ImageMask>,
+) {
+    let mask = match &resolved.rare().mask {
+        Some(mask) => mask.as_ref().map(|(image, size)| crate::scene::ImageMask {
+            image: image.clone(),
+            offset: (0., 0.),
+            size: *size,
+        }),
+        None if original.is_none() => return,
+        None => original.clone(),
+    };
+    let mask = mask.map(|mask| crate::scene::ImageMask {
+        offset: resolved.mask_offset.unwrap_or(mask.offset),
+        ..mask
+    });
+    scene.set_mask(node, mask);
 }
 /// The inputs of the last full application besides paint: the dynamic
 /// styles without their paint properties, the interaction and disabled
@@ -130,7 +178,7 @@ impl Paint {
 /// layout target. A run that matches them changes paint alone.
 struct Settled {
     dynamic: Option<Styles>,
-    paint: Option<[bool; 5]>,
+    paint: Option<([bool; 8], u8)>,
     state: Interaction,
     disabled: bool,
     parent: Option<Typography>,
@@ -250,7 +298,10 @@ pub(crate) fn mount_style_with_intrinsic(
     let original_style = ui.scene.borrow().style(node);
     let original_effects = ui.scene.borrow().effects(node);
     let original_transform = ui.scene.borrow().transform(node);
+    let original_local = ui.scene.borrow().local_transform(node);
     let original_isolated = ui.scene.borrow().is_isolated(node);
+    let original_mask = ui.scene.borrow().mask(node).cloned();
+    let original_inset = ui.scene.borrow().clip_inset(node);
     let original_kind = ui.scene.borrow().kind(node).clone();
     let mut previous_disabled = None;
     // What re-runs compare against, kept from a node's second run: most
@@ -297,6 +348,7 @@ pub(crate) fn mount_style_with_intrinsic(
                 if let Some(value) = resolved.opacity { effects.opacity = value; }
                 if let Some(value) = resolved.blur { effects.blur_radius = value; }
                 if let Some(value) = resolved.edge_fade { effects.edge_fade = value; }
+                if let Some(value) = resolved.filter_blur { effects.filter_blur = value; }
                 if applied.1.color != color {
                     applied.1.color = color;
                     if let Some(output) = &output {
@@ -305,7 +357,10 @@ pub(crate) fn mount_style_with_intrinsic(
                 }
                 let mut scene = ui.scene.borrow_mut();
                 scene.set_effects(node, effects);
+                apply_mask(&mut scene, node, &applied.0, &original_mask);
+                scene.set_clip_inset(node, applied.0.clip_inset.or(original_inset));
                 scene.set_transform(node, resolved.transform.unwrap_or(original_transform));
+                scene.set_local_transform(node, resolved.local.resolve(original_local));
                 if let NodeKind::Text { text, font_size, color: old } = scene.kind(node)
                     && *old != color
                 {
@@ -375,21 +430,25 @@ pub(crate) fn mount_style_with_intrinsic(
             && previous.2 == inputs.2
             && previous.3 == inputs.3
         {
-            let before = (previous.0.opacity, previous.0.blur, previous.0.edge_fade, previous.0.transform);
+            let before = (previous.0.opacity, previous.0.blur, previous.0.edge_fade, previous.0.filter_blur, previous.0.mask_offset, previous.0.clip_inset, previous.0.transform, previous.0.local_transform);
             let next = &inputs.0;
-            (previous.0.opacity, previous.0.blur, previous.0.edge_fade, previous.0.transform) =
-                (next.opacity, next.blur, next.edge_fade, next.transform);
+            (previous.0.opacity, previous.0.blur, previous.0.edge_fade, previous.0.filter_blur, previous.0.mask_offset, previous.0.clip_inset, previous.0.transform, previous.0.local_transform) =
+                (next.opacity, next.blur, next.edge_fade, next.filter_blur, next.mask_offset, next.clip_inset, next.transform, next.local_transform);
             if previous.0 == *next {
                 let mut effects = original_effects;
                 if let Some(value) = next.opacity { effects.opacity = value; }
                 if let Some(value) = next.blur { effects.blur_radius = value; }
                 if let Some(value) = next.edge_fade { effects.edge_fade = value; }
+                if let Some(value) = next.filter_blur { effects.filter_blur = value; }
                 let mut scene = ui.scene.borrow_mut();
                 scene.set_effects(node, effects);
+                apply_mask(&mut scene, node, next, &original_mask);
+                scene.set_clip_inset(node, next.clip_inset.or(original_inset));
                 scene.set_transform(node, next.transform.unwrap_or(original_transform));
+                scene.set_local_transform(node, next.local_transform.resolve(original_local));
                 return;
             }
-            (previous.0.opacity, previous.0.blur, previous.0.edge_fade, previous.0.transform) = before;
+            (previous.0.opacity, previous.0.blur, previous.0.edge_fade, previous.0.filter_blur, previous.0.mask_offset, previous.0.clip_inset, previous.0.transform, previous.0.local_transform) = before;
         }
         let mut first: Option<AppliedInputs> = None;
         let (resolved, current, _, _) = match &mut memo {
@@ -421,6 +480,8 @@ pub(crate) fn mount_style_with_intrinsic(
         field!(absolute,gap,clip,flex_grow,flex_shrink,align,justify,text_wrap,margin);
         if let Some(value) = rare.fade_edges { style.fade_edges = value; }
         if let Some(value) = rare.fade_insets { style.fade_insets = value; }
+        if let Some(value) = rare.fade_edges_x { style.fade_edges_x = value; }
+        if let Some(value) = rare.fade_insets_x { style.fade_insets_x = value; }
         if matches!(original_kind, NodeKind::Text { .. } | NodeKind::RichText { .. }) { style.text_wrap = current.wrap; style.text_options = current.display; }
         if let Some(padding) = resolved.padding { style.padding_edges = Some(padding); }
         if let Some((width, height)) = intrinsic_size {
@@ -446,6 +507,7 @@ pub(crate) fn mount_style_with_intrinsic(
         if let Some(value) = resolved.opacity { effects.opacity = value; }
         if let Some(value) = resolved.blur { effects.blur_radius = value; }
         if let Some(value) = resolved.edge_fade { effects.edge_fade = value; }
+        if let Some(value) = resolved.filter_blur { effects.filter_blur = value; }
         let mut scene = ui.scene.borrow_mut();
         scene.set_style(node, style);
         if let Some(content) = content_layout {
@@ -460,7 +522,10 @@ pub(crate) fn mount_style_with_intrinsic(
 
         scene.set_cursor(node, resolved.cursor);
         scene.set_effects(node, effects);
+        apply_mask(&mut scene, node, resolved, &original_mask);
+        scene.set_clip_inset(node, resolved.clip_inset.or(original_inset));
         scene.set_transform(node, resolved.transform.unwrap_or(original_transform));
+        scene.set_local_transform(node, resolved.local_transform.resolve(original_local));
         scene.set_isolated(node, resolved.isolated.unwrap_or(original_isolated));
         let kind = match &original_kind {
             NodeKind::Container(layout) | NodeKind::Panel { layout, .. } => {
@@ -470,6 +535,7 @@ pub(crate) fn mount_style_with_intrinsic(
                 if let Some(value) = resolved.border_color { quad.border_color = value; }
                 if let Some(value) = resolved.border_width { quad.border_width = value; }
                 if let Some(value) = resolved.rare().shadow { quad.shadow = value; }
+                if let Some(value) = resolved.rare().border_over { quad.border_over = value; }
                 if quad.decoration.is_some() || resolved.paint_background.is_some() || resolved.corners.is_some() || resolved.border_edges.is_some() || resolved.rare().border_style.is_some() || resolved.rare().shadows.is_some() {
                     let mut detail = quad.decoration.as_deref().cloned().unwrap_or_default();
                     if let Some(value) = &resolved.paint_background { detail.background = value.clone(); }

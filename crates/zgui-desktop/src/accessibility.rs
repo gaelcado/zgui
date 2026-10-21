@@ -147,7 +147,8 @@ impl AccessibilityTree {
                 || scene
                     .ancestors(id)
                     .any(|ancestor| semantics.get(ancestor).is_some_and(|s| s.disabled));
-            let r = scene.bounds(id);
+            // Assistive bounds: the box around where it shows.
+            let r = scene.transformed_bounds(id);
             let revision = semantics
                 .node_revision(id)
                 .expect("projected semantic node");

@@ -553,14 +553,7 @@ impl Layer {
     /// every pixel is, so the window server need not blend the layers over
     /// what lies behind them.
     pub fn show(&mut self, buffer: &Buffer, opaque: bool, steady: bool) {
-        if self.opaque.replace(opaque) != opaque {
-            transaction(|| {
-                self.plain.setOpaque(opaque);
-                if let Some(video) = &self.video {
-                    video.layer.setOpaque(opaque);
-                }
-            });
-        }
+        self.set_opaque(opaque);
         if steady && self.video.is_none() {
             self.video = Some(Video::new(&self.host, opaque));
         }
@@ -587,20 +580,45 @@ impl Layer {
         })
         .schedule();
     }
+    /// Show `buffer` on the plain layer now, dropping the video layer. Its
+    /// contents change in the caller's Core Animation transaction, so during
+    /// a window resize the frame lands with the new window size; the video
+    /// layer shows frames on its own thread, a refresh or more later, laid
+    /// out against bounds that have moved on (content shifts a few points,
+    /// or edges show gaps).
+    pub fn show_plain(&mut self, buffer: &Buffer, opaque: bool) {
+        self.set_opaque(opaque);
+        let video = self.video.take();
+        if video.is_some() {
+            self.generation.set(self.generation.get() + 1);
+        }
+        // SAFETY: An IOSurface is a layer's valid contents.
+        let surface = &*buffer.surface as *const IOSurfaceRef as *const AnyObject;
+        transaction(|| {
+            unsafe { self.plain.setContents(Some(&*surface)) };
+            if let Some(video) = &video {
+                video.layer.removeFromSuperlayer();
+            }
+        });
+        self.plain_shows.set(true);
+    }
+    fn set_opaque(&self, opaque: bool) {
+        if self.opaque.replace(opaque) != opaque {
+            transaction(|| {
+                self.plain.setOpaque(opaque);
+                if let Some(video) = &self.video {
+                    video.layer.setOpaque(opaque);
+                }
+            });
+        }
+    }
     /// The window is at rest showing `shown`: show it on the plain layer
     /// and drop the video layer.
     pub fn rest(&mut self, shown: &Buffer) {
-        let Some(video) = self.video.take() else {
-            return;
-        };
-        self.generation.set(self.generation.get() + 1);
-        // SAFETY: An IOSurface is a layer's valid contents.
-        let surface = &*shown.surface as *const IOSurfaceRef as *const AnyObject;
-        transaction(|| {
-            unsafe { self.plain.setContents(Some(&*surface)) };
-            video.layer.removeFromSuperlayer();
-        });
-        self.plain_shows.set(true);
+        if self.video.is_some() {
+            let opaque = self.opaque.get();
+            self.show_plain(shown, opaque);
+        }
     }
 }
 impl Drop for Layer {

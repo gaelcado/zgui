@@ -165,11 +165,194 @@ pub struct Transform {
     pub x: f32,
     pub y: f32,
 }
+/// Scale, rotation and skew about an origin, applied after layout and on
+/// top of the node's translation (`Transform`). Identity by default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalTransform {
+    pub scale: (f32, f32),
+    /// Radians, clockwise on screen (positive Y down).
+    pub rotate: f32,
+    /// Radians, along x then y, as CSS `skew(x, y)`.
+    pub skew: (f32, f32),
+    /// The pivot as a fraction of the node's own laid-out size; (0.5, 0.5) is its centre (CSS default).
+    pub origin: (f32, f32),
+}
+impl Default for LocalTransform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+impl LocalTransform {
+    pub const IDENTITY: Self = Self {
+        scale: (1., 1.),
+        rotate: 0.,
+        skew: (0., 0.),
+        origin: (0.5, 0.5),
+    };
+    /// Whether it moves nothing, whatever its origin.
+    pub fn is_identity(&self) -> bool {
+        self.scale == (1., 1.) && self.rotate == 0. && self.skew == (0., 0.)
+    }
+    /// The matrix for a node at `bounds` (layout rect, untranslated): translate(origin) · rotate · skew · scale · translate(-origin)
+    pub fn matrix(&self, bounds: Rect) -> crate::affine::Affine {
+        use crate::affine::Affine;
+        let skew = Affine {
+            b: self.skew.1.tan(),
+            c: self.skew.0.tan(),
+            ..Affine::IDENTITY
+        };
+        Affine::scale(self.scale.0, self.scale.1)
+            .then(skew)
+            .then(Affine::rotation(self.rotate))
+            .around(
+                bounds.x + bounds.width * self.origin.0,
+                bounds.y + bounds.height * self.origin.1,
+            )
+    }
+    /// Each nonfinite component takes its identity value, so equal writes
+    /// compare equal (NaN never would).
+    fn normalized(self) -> Self {
+        let finite = |value: f32, default: f32| if value.is_finite() { value } else { default };
+        Self {
+            scale: (finite(self.scale.0, 1.), finite(self.scale.1, 1.)),
+            rotate: finite(self.rotate, 0.),
+            skew: (finite(self.skew.0, 0.), finite(self.skew.1, 0.)),
+            origin: (finite(self.origin.0, 0.5), finite(self.origin.1, 0.5)),
+        }
+    }
+    /// The larger axis scale: how much bigger than laid out its content shows.
+    pub fn magnification(&self) -> f32 {
+        self.scale.0.abs().max(self.scale.1.abs())
+    }
+}
+/// A transformed or filtered ancestor's mapping of its layer's content onto
+/// the viewport, how far a content blur spreads it there, and the viewport
+/// clip around that layer (see `Scene::descend`).
+#[derive(Clone, Copy)]
+struct Placement {
+    matrix: crate::affine::Affine,
+    /// Viewport units: what a layer's content paints shows this much past
+    /// its mapped box (nested blurs, each stretched by the matrices after it).
+    spread: f32,
+    clip: Rect,
+}
+impl Placement {
+    /// Where pixels `rect` paints inside the layer can change on screen.
+    fn shows(&self, rect: Rect) -> Option<Rect> {
+        let mapped = self.matrix.bounds(rect);
+        let mapped = if self.spread > 0. {
+            mapped.expand(self.spread)
+        } else {
+            mapped
+        };
+        mapped.intersection(self.clip)
+    }
+}
+/// How far a content blur of `sigma` spreads pixels: three standard
+/// deviations, past which the Gaussian leaves under half an 8-bit step.
+pub fn filter_spread(sigma: f32) -> f32 {
+    3. * sigma
+}
+/// How far `matrix` moves a point that is one unit away, at most along an
+/// axis: a spread inside a layer times this is its spread outside.
+fn stretch(matrix: crate::affine::Affine) -> f32 {
+    let linear = crate::affine::Affine {
+        tx: 0.,
+        ty: 0.,
+        ..matrix
+    };
+    let unit = linear.bounds(Rect::new(-1., -1., 2., 2.));
+    (unit.width.max(unit.height) / 2.).max(0.)
+}
+/// A clip inset (CSS `clip-path: inset(top right bottom left)`): the node
+/// and its descendants paint only inside its box inset by these lengths,
+/// pixels or fractions of its own laid-out size (`Length::Percent(1.)` is
+/// 100%: top and bottom of its height, left and right of its width,
+/// following it as it resizes). Negative insets reach past the box, so a
+/// shadow or ring isn't cut. `Auto` is 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ClipInset {
+    pub top: crate::layout::Length,
+    pub right: crate::layout::Length,
+    pub bottom: crate::layout::Length,
+    pub left: crate::layout::Length,
+}
+impl ClipInset {
+    /// All four sides in pixels.
+    pub fn px(top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        use crate::layout::Length::Px;
+        Self {
+            top: Px(top),
+            right: Px(right),
+            bottom: Px(bottom),
+            left: Px(left),
+        }
+    }
+    /// The box `bounds` inset by these lengths; empty when they cross.
+    pub fn apply(&self, bounds: Rect) -> Rect {
+        let length = |length: crate::layout::Length, basis: f32| match length {
+            crate::layout::Length::Px(value) if value.is_finite() => value,
+            crate::layout::Length::Percent(fraction) if fraction.is_finite() => fraction * basis,
+            _ => 0.,
+        };
+        let (top, bottom) = (
+            length(self.top, bounds.height),
+            length(self.bottom, bounds.height),
+        );
+        let (left, right) = (
+            length(self.left, bounds.width),
+            length(self.right, bounds.width),
+        );
+        Rect::new(
+            bounds.x + left,
+            bounds.y + top,
+            (bounds.width - left - right).max(0.),
+            (bounds.height - top - bottom).max(0.),
+        )
+    }
+}
+/// An alpha mask over a node (CSS `mask-image` with `mask-position` and
+/// `mask-size`, no repeat): its subtree, rendered as a layer and after any
+/// `Effects::filter_blur`, shows by the image's alpha, sampled nearest. The
+/// image is drawn `size` large with its top-left `offset` from the node's
+/// laid-out origin, in the node's own (untransformed) space; outside it
+/// nothing shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageMask {
+    pub image: Arc<crate::image::ImageData>,
+    pub offset: (f32, f32),
+    pub size: (f32, f32),
+}
+impl ImageMask {
+    /// Nonfinite components zeroed, so equal writes compare equal.
+    fn normalized(mut self) -> Self {
+        let finite = |value: f32| if value.is_finite() { value } else { 0. };
+        self.offset = (finite(self.offset.0), finite(self.offset.1));
+        self.size = (finite(self.size.0).max(0.), finite(self.size.1).max(0.));
+        self
+    }
+}
+/// A clip that cuts nothing, as `clipped_bounds` starts from.
+const UNCLIPPED: Rect = Rect {
+    x: -f32::MAX / 4.,
+    y: -f32::MAX / 4.,
+    width: f32::MAX / 2.,
+    height: f32::MAX / 2.,
+};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Effects {
     pub opacity: f32,
+    /// Backdrop blur (CSS `backdrop-filter: blur()`), the Gaussian sigma in
+    /// logical pixels: what lies behind the node, inside its bounds, blurs.
+    /// Its own content stays sharp.
     pub blur_radius: f32,
     pub edge_fade: f32,
+    /// Content blur (CSS `filter: blur()`), the Gaussian sigma in logical
+    /// pixels: the node's own subtree, painted once as a cached layer,
+    /// composites blurred, spreading `filter_spread` past its bounds. Opacity
+    /// applies to the blurred result. Changing it composites again without
+    /// repainting the subtree; at 0 the node paints as any other.
+    pub filter_blur: f32,
 }
 impl Default for Effects {
     fn default() -> Self {
@@ -177,6 +360,7 @@ impl Default for Effects {
             opacity: 1.0,
             blur_radius: 0.0,
             edge_fade: 0.0,
+            filter_blur: 0.0,
         }
     }
 }
@@ -202,6 +386,10 @@ pub struct QuadStyle {
     pub border_width: f32,
     pub shadow: Option<BoxShadow>,
     pub decoration: Option<Arc<crate::decoration::Decoration>>,
+    /// Paint the border over the node's descendants (an inset stroke, as a
+    /// CSS outline drawn inside): the fill paints first, the border after
+    /// everything inside (`PaintItem::border_pass`).
+    pub border_over: bool,
 }
 impl Default for QuadStyle {
     fn default() -> Self {
@@ -212,10 +400,27 @@ impl Default for QuadStyle {
             border_width: 0.,
             shadow: None,
             decoration: None,
+            border_over: false,
         }
     }
 }
 impl QuadStyle {
+    /// Its border's widths (top, right, bottom, left): per side from the
+    /// decoration, or `border_width` all round.
+    pub fn border_sides(&self) -> Insets {
+        self.decoration
+            .as_ref()
+            .and_then(|detail| detail.border_widths)
+            .unwrap_or(Insets::all(self.border_width))
+    }
+    /// Whether it has a visible border.
+    pub fn has_border(&self) -> bool {
+        let sides = self.border_sides();
+        self.border_color.3 > 0
+            && [sides.top, sides.right, sides.bottom, sides.left]
+                .into_iter()
+                .any(|width| width.is_finite() && width > 0.)
+    }
     pub fn shadows(&self) -> &[BoxShadow] {
         self.decoration
             .as_ref()
@@ -329,6 +534,11 @@ pub struct Style {
     /// bottom): content past them is hidden, so a scroll view running on
     /// under a bar can be faded out by the bar's edge.
     pub fade_insets: [f32; 2],
+    /// `fade_edges` at the left and right edges: a horizontally scrolling
+    /// row fading its overflow.
+    pub fade_edges_x: [f32; 2],
+    /// `fade_insets` at the left and right edges.
+    pub fade_insets_x: [f32; 2],
     pub min_width: Option<f32>,
     pub max_width: Option<f32>,
     pub min_height: Option<f32>,
@@ -368,6 +578,9 @@ struct Node {
     measurement: Option<Measurement>,
     /// Other recent results under different constraints, most recent first.
     alternates: Vec<Measurement>,
+    /// Sizes of older results, without their children's places: enough for
+    /// an ancestor's probe (see `Scene::measure`), most recent first.
+    sizes: Vec<ProbeSize>,
     /// Everything this subtree can paint, including its own translation but not
     /// its ancestors'. Rendering skips subtrees whose ink misses the damage.
     /// A valid visible node has only valid descendants, so invalidation stops
@@ -384,11 +597,53 @@ struct Node {
     text_size: std::cell::Cell<TextSizes>,
     advanced_layout: Option<Box<advanced_layout::AdvancedLayoutCache>>,
     arrange_dirty: bool,
+    /// Whether its size can depend on the available width and height it is
+    /// measured under (`Scene::reads_available`): `READS_KNOWN` once worked
+    /// out, cleared with its layout.
+    reads: std::cell::Cell<u8>,
     isolated: bool,
+    /// Scale, rotation and skew; a node with one paints as a layer. Boxed:
+    /// few nodes have one, and every node's size costs each tree walk.
+    local: Option<Box<LocalTransform>>,
+    /// An alpha mask over the subtree (`Scene::set_mask`): a layer too.
+    image_mask: Option<Box<ImageMask>>,
+    /// Its clip inset (`Scene::set_clip_inset`).
+    clip_inset: Option<Box<ClipInset>>,
+    /// Has had a local transform, content blur or mask: its layer revision
+    /// keeps counting while it has none, so a renderer can keep its texture
+    /// (see `invalidate`).
+    promoted: bool,
     layer_revision: u64,
     /// Scroll content: a translation is reported as a `ScrollMove` the
     /// renderer may apply by copying pixels (see `set_scroll_copy`).
     scroll_copy: bool,
+}
+impl Node {
+    fn local(&self) -> LocalTransform {
+        self.local.as_deref().copied().unwrap_or_default()
+    }
+    /// Whether it has a local transform other than the identity.
+    fn transformed(&self) -> bool {
+        self.local
+            .as_deref()
+            .is_some_and(|local| !local.is_identity())
+    }
+    /// Whether it composites through a content blur.
+    fn filtered(&self) -> bool {
+        self.effects.filter_blur > 0.
+    }
+    /// Whether it paints as a layer for an effect on its content: a content
+    /// blur or a mask.
+    fn effect_layer(&self) -> bool {
+        self.filtered() || self.image_mask.is_some()
+    }
+    fn set_local(&mut self, transform: LocalTransform) {
+        match &mut self.local {
+            _ if transform == LocalTransform::IDENTITY => self.local = None,
+            Some(local) => **local = transform,
+            None => self.local = Some(Box::new(transform)),
+        }
+    }
 }
 /// A text node's measured sizes for its most recent wrap limits. Layout
 /// measures a paragraph at more than one width per pass (intrinsic, then
@@ -437,9 +692,44 @@ struct Measurement {
     pass: u64,
 }
 /// Flex layout measures a child with its natural, flexed and stretched
-/// constraints in one pass. Keeping a few results lets a clean child answer all
-/// of them instead of re-measuring its whole subtree each time an ancestor lays out.
-const MEASUREMENT_ALTERNATES: usize = 3;
+/// constraints in one pass, and taffy adds min- and max-content probes, each
+/// ancestor on a changed path asking again. Every result of the pass in
+/// progress is kept (up to `PASS_RESULTS`), so each probe of a subtree is laid
+/// out once per pass however many ancestors repeat it; with too few, each
+/// level of nesting multiplied the work. Afterwards a node keeps this many,
+/// most recently used first, for the next pass's clean probes.
+const MEASUREMENT_ALTERNATES: usize = 7;
+/// A bound on one pass's results per node, against pathological probing.
+const PASS_RESULTS: usize = 64;
+/// Sizes a node keeps of results it no longer holds whole (`Node::sizes`):
+/// the probes a clean subtree answers every frame of an animation around it.
+const PROBE_SIZES: usize = 32;
+/// A result's size alone (see `Node::sizes`).
+#[derive(Clone, Copy)]
+struct ProbeSize {
+    constraints: Constraints,
+    size: (f32, f32),
+    pass: u64,
+}
+impl From<&Measurement> for ProbeSize {
+    fn from(m: &Measurement) -> Self {
+        Self {
+            constraints: m.constraints,
+            size: m.size,
+            pass: m.pass,
+        }
+    }
+}
+/// Put `evicted` (most recent first) ahead of `sizes`' older entries, each
+/// constraint kept once, at most `PROBE_SIZES`.
+fn keep_sizes(sizes: &mut Vec<ProbeSize>, evicted: Vec<ProbeSize>) {
+    if evicted.is_empty() {
+        return;
+    }
+    sizes.retain(|kept| !evicted.iter().any(|m| m.constraints == kept.constraints));
+    sizes.splice(0..0, evicted);
+    sizes.truncate(PROBE_SIZES);
+}
 fn dimension(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
     value
         .max(0.0)
@@ -500,13 +790,32 @@ fn exposed(clip: Rect, dx: f32, dy: f32) -> Vec<Rect> {
     }
     strips
 }
-/// A `fade_edges` ancestor's clip (less its `fade_insets`) and its (top,
-/// bottom) bands.
-pub type FadeMask = (Rect, [f32; 2]);
+/// A `fade_edges` ancestor's clip (less its `fade_insets`) and its bands
+/// (top, right, bottom, left).
+pub type FadeMask = (Rect, [f32; 4]);
+/// A box with rounded corners: its radii top-left, top-right, bottom-right,
+/// bottom-left, each at most half its shorter side.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RoundRect {
+    pub rect: Rect,
+    pub radii: [f32; 4],
+}
+/// The rounded clips around a paint item, innermost first: those of its
+/// nearest ancestors that clip (`overflow: hidden`) with rounded corners
+/// (`QuadStyle::radius` or per-corner decoration corners). Rectangular
+/// clipping stays `PaintItem::clip`; these cut the corners, in the item's
+/// layer's space. Two cover a rounded thumbnail inside a rounded card;
+/// further out, the corners are those of the outer two.
+pub type RoundedClip = [Option<RoundRect>; 2];
 #[derive(Clone)]
 pub struct PaintItem<'a> {
-    /// An explicit isolated subtree represented by its cached layer image.
+    /// A layer (an isolated or transformed subtree) represented by its cached image.
     pub isolated: bool,
+    /// A transformed layer: where its content, laid out in `bounds`' space,
+    /// lands in this item's (see `LocalTransform::matrix`). Its `clip` is
+    /// then its parent's; its own clips inside the layer. Always `None`
+    /// from `paint_items`.
+    pub matrix: Option<crate::affine::Affine>,
     pub id: NodeId,
     pub bounds: Rect,
     pub kind: &'a NodeKind,
@@ -516,6 +825,11 @@ pub struct PaintItem<'a> {
     pub clip: Option<Rect>,
     /// The nearest `fade_edges` ancestor's clip and bands (top, bottom).
     pub mask: Option<FadeMask>,
+    /// Rounded clips around it (see `RoundedClip`).
+    pub rounded: RoundedClip,
+    /// This item paints `id`'s border alone, after its descendants
+    /// (`QuadStyle::border_over`); the node's first item painted the rest.
+    pub border_pass: bool,
 }
 type FontMeasurer =
     dyn Fn(&std::sync::Arc<str>, f32, Option<f32>, &crate::text_layout::FontStyle) -> (f32, f32);
@@ -534,6 +848,14 @@ pub struct Scene {
     viewport: Rect,
     blur_nodes: Vec<NodeId>,
     isolation_count: usize,
+    /// Nodes with a local transform: none keeps every geometry query on
+    /// the translation-only paths.
+    transformed: usize,
+    /// Nodes with a content blur: with `transformed`, whether damage takes
+    /// the placed paths (`descend`).
+    filtered: usize,
+    /// Nodes that ever had one, a content blur or a mask (`Node::promoted`).
+    promoted_count: usize,
     text_measurer: Option<Box<dyn TextMeasurer>>,
     text_shaper: Option<Box<dyn crate::text_layout::TextShaper>>,
     font_shaper: Option<Box<dyn crate::text_layout::FontTextShaper>>,
@@ -550,6 +872,12 @@ pub struct Scene {
     walk_hints: std::cell::Cell<(usize, usize)>,
     /// Dirty fixed-size containers whose ancestors stayed clean.
     layout_roots: Vec<NodeId>,
+    /// Nodes holding more than `MEASUREMENT_ALTERNATES` results of this pass,
+    /// trimmed when it ends.
+    overfull: Vec<NodeId>,
+    /// `measure` calls, for tests of how much work layout does.
+    #[cfg(test)]
+    measure_calls: u64,
     geometry_revision: u64,
     cursor_styles: usize,
     /// Scroll content translated since the last flush: its transform before
@@ -604,12 +932,18 @@ impl Scene {
                     queued: true,
                     measurement: None,
                     alternates: Vec::new(),
+                    sizes: Vec::new(),
                     ink: std::cell::Cell::new(None),
                     ink_valid: std::cell::Cell::new(false),
                     text_size: Default::default(),
                     advanced_layout: None,
                     arrange_dirty: true,
+                    reads: std::cell::Cell::new(0),
                     isolated: false,
+                    local: None,
+                    image_mask: None,
+                    clip_inset: None,
+                    promoted: false,
                     scroll_copy: false,
                     layer_revision: 0,
                 }),
@@ -626,6 +960,9 @@ impl Scene {
             moves: Vec::new(),
             flush_serial: 0,
             isolation_count: 0,
+            transformed: 0,
+            filtered: 0,
+            promoted_count: 0,
             text_measurer: None,
             text_shaper: None,
             font_shaper: None,
@@ -639,6 +976,9 @@ impl Scene {
             content_revision: 0,
             walk_hints: Default::default(),
             layout_roots: Vec::new(),
+            overfull: Vec::new(),
+            #[cfg(test)]
+            measure_calls: 0,
             geometry_revision: 0,
             cursor_styles: 0,
         }
@@ -687,7 +1027,148 @@ impl Scene {
         if effects.opacity <= 0. {
             return None;
         }
+        if self.transformed > 0 {
+            let (bounds, clip, placement) = self.placed(id);
+            let visible = bounds.intersection(clip.unwrap_or(UNCLIPPED))?;
+            return match placement {
+                Some(placement) => placement
+                    .matrix
+                    .bounds(visible)
+                    .intersection(placement.clip),
+                None => Some(visible),
+            };
+        }
         bounds.intersection(clip.unwrap_or(self.viewport))
+    }
+    /// Where `id`'s box shows: the viewport-aligned box around its corners
+    /// after its own and its ancestors' local transforms, unclipped. `bounds`
+    /// is the box as laid out and translated.
+    pub fn transformed_bounds(&self, id: NodeId) -> Rect {
+        if self.transformed == 0 {
+            return self.bounds(id);
+        }
+        let (bounds, _, placement) = self.placed(id);
+        placement.map_or(bounds, |placement| placement.matrix.bounds(bounds))
+    }
+    /// `id`'s translated box, the clip it paints within (in its layer's
+    /// space; `None` cuts nothing) and its layer's placement, if transformed.
+    fn placed(&self, id: NodeId) -> (Rect, Option<Rect>, Option<Placement>) {
+        let (transform, clip, placement) = match self.node(id).parent {
+            Some(parent) => self.context(parent),
+            None => (Transform::default(), Some(self.viewport), None),
+        };
+        let (_, bounds, clip, placement) = self.descend(self.node(id), transform, clip, placement);
+        (bounds, clip, placement)
+    }
+    pub fn local_transform(&self, id: NodeId) -> LocalTransform {
+        self.node(id).local()
+    }
+    /// Set scale, rotation, skew and origin, normalizing each nonfinite
+    /// component to its identity value. Changes composite only: the subtree
+    /// is drawn as a cached layer, damaged where it was and where it lands.
+    pub fn set_local_transform(&mut self, id: NodeId, transform: LocalTransform) {
+        let transform = transform.normalized();
+        let old = self.node(id).local();
+        if old == transform {
+            return;
+        }
+        if old.is_identity() && transform.is_identity() {
+            // Only the origin of nothing moved.
+            self.node_mut(id).set_local(transform);
+            return;
+        }
+        self.damage_subtree(id);
+        if old.is_identity() != transform.is_identity() {
+            if transform.is_identity() {
+                self.transformed -= 1;
+            } else {
+                self.transformed += 1;
+            }
+        }
+        let node = self.node_mut(id);
+        node.set_local(transform);
+        if !std::mem::replace(&mut node.promoted, true) {
+            self.promoted_count += 1;
+        }
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.damage_subtree(id);
+        self.invalidate(id, COMPOSITE);
+    }
+    /// Whether `id` paints as a cached layer: isolated, transformed, blurred
+    /// (`Effects::filter_blur`) or masked.
+    pub fn is_layer(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.isolated || node.transformed() || node.effect_layer()
+    }
+    /// `id`'s content blur (`Effects::filter_blur`).
+    pub fn filter_blur(&self, id: NodeId) -> f32 {
+        self.node(id).effects.filter_blur
+    }
+    /// Set `id`'s content blur (`Effects::filter_blur`), keeping its other
+    /// effects. Composites only: damaged where the blur reached and reaches.
+    pub fn set_filter_blur(&mut self, id: NodeId, sigma: f32) {
+        let effects = Effects {
+            filter_blur: sigma,
+            ..self.node(id).effects
+        };
+        self.set_effects(id, effects);
+    }
+    pub fn mask(&self, id: NodeId) -> Option<&ImageMask> {
+        self.node(id).image_mask.as_deref()
+    }
+    /// Mask `id`'s subtree (see `ImageMask`), or with `None` show it whole.
+    /// Nonfinite offsets and sizes are zeroed. A masked node paints as a
+    /// cached layer: changing the mask composites again, damaging the
+    /// subtree, without repainting it.
+    pub fn set_mask(&mut self, id: NodeId, mask: Option<ImageMask>) {
+        let mask = mask.map(ImageMask::normalized);
+        let old = self.node(id).image_mask.as_deref();
+        if old == mask.as_ref() {
+            return;
+        }
+        // A renderer keeps mask textures for the images nodes show.
+        if old.map(|old| old.image.id()) != mask.as_ref().map(|mask| mask.image.id()) {
+            self.content_revision = self.content_revision.wrapping_add(1);
+        }
+        // A mask only hides: what it reveals or hides lies within what the
+        // subtree paints anyway.
+        self.damage_subtree(id);
+        let node = self.node_mut(id);
+        node.image_mask = mask.map(Box::new);
+        if node.image_mask.is_some() && !std::mem::replace(&mut node.promoted, true) {
+            self.promoted_count += 1;
+        }
+        self.invalidate(id, COMPOSITE);
+    }
+    pub fn clip_inset(&self, id: NodeId) -> Option<ClipInset> {
+        self.node(id).clip_inset.as_deref().copied()
+    }
+    /// Clip `id` and its descendants to its box inset by `inset` (see
+    /// `ClipInset`), or with `None` stop. Animating it composites again,
+    /// damaging the subtree, without layout or repainting cached layers
+    /// (a transformed node clips inside its layer, which repaints).
+    pub fn set_clip_inset(&mut self, id: NodeId, inset: Option<ClipInset>) {
+        if self.clip_inset(id) == inset {
+            return;
+        }
+        // Clipping more or less shows nothing the subtree doesn't paint.
+        self.damage_subtree(id);
+        let node = self.node_mut(id);
+        node.clip_inset = inset.map(Box::new);
+        let flags = if node.transformed() { PAINT } else { COMPOSITE };
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.invalidate(id, flags);
+    }
+    /// Move `id`'s mask (a shimmer's band, a progress ramp): composites only.
+    /// Without a mask, nothing.
+    pub fn set_mask_offset(&mut self, id: NodeId, offset: (f32, f32)) {
+        if let Some(mask) = self.mask(id) {
+            let mask = ImageMask {
+                offset,
+                ..mask.clone()
+            };
+            self.set_mask(id, Some(mask));
+        }
     }
     /// An explicit cursor inherits through visual ancestors, including disabled regions.
     pub fn cursor_for(&self, mut id: NodeId) -> Option<crate::cursor::Cursor> {
@@ -742,39 +1223,69 @@ impl Scene {
         std::iter::successors(self.parent(id), |id| self.parent(*id))
     }
     /// Front-to-back hit targets, including containers; call after flushing layout.
+    /// The point maps through each transformed ancestor's inverse, so nodes
+    /// are hit where they are drawn; a singular transform hits nothing.
     pub fn hit_test_all(&self, x: f32, y: f32) -> Vec<NodeId> {
-        let contains = |r: Rect| x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height;
-        let mut hits: Vec<_> = self
-            .paint_items()
-            .filter(|item| {
-                item.effects.opacity > 0.0
-                    && match item.kind {
-                        NodeKind::Image(image) => image
-                            .paint_transform(item.bounds)
-                            .inverse()
-                            .is_some_and(|inverse| {
-                                let (x, y) = inverse.point(x, y);
-                                x >= item.bounds.x
-                                    && y >= item.bounds.y
-                                    && x < item.bounds.x + item.bounds.width
-                                    && y < item.bounds.y + item.bounds.height
-                            }),
-                        NodeKind::Svg(svg) => svg
-                            .paint_transform(item.bounds)
-                            .inverse()
-                            .is_some_and(|inverse| {
-                                let (x, y) = inverse.point(x, y);
-                                x >= item.bounds.x
-                                    && y >= item.bounds.y
-                                    && x < item.bounds.x + item.bounds.width
-                                    && y < item.bounds.y + item.bounds.height
-                            }),
-                        _ => contains(item.bounds),
-                    }
-                    && item.clip.is_none_or(contains)
-            })
-            .map(|item| item.id)
-            .collect();
+        let inside = |r: Rect, (x, y): (f32, f32)| {
+            x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height
+        };
+        let mut hits = Vec::new();
+        // A node, its parent's translation, opacity and clip, and the point
+        // in its parent's layer space.
+        let mut stack = vec![(self.root, Transform::default(), 1.0, self.viewport, (x, y))];
+        while let Some((id, parent_transform, parent_opacity, parent_clip, point)) = stack.pop() {
+            let node = self.node(id);
+            let transform = Transform {
+                x: parent_transform.x + node.transform.x,
+                y: parent_transform.y + node.transform.y,
+            };
+            let bounds = node.bounds.translated(transform);
+            let opacity = if own_visible(&node.style) {
+                node.effects.opacity * parent_opacity
+            } else {
+                0.
+            };
+            let (point, parent_clip) = if !node.transformed() {
+                (point, parent_clip)
+            } else {
+                // Clipped around it, or flattened to nothing, nothing in it is hit.
+                let Some(inverse) = node.local().matrix(bounds).inverse() else {
+                    continue;
+                };
+                if !inside(parent_clip, point) {
+                    continue;
+                }
+                (inverse.point(point.0, point.1), UNCLIPPED)
+            };
+            let clip =
+                clipped_bounds(Some(parent_clip), bounds, &node.style).unwrap_or(parent_clip);
+            // Clipped by its inset too, in its own space.
+            let clip = match node.clip_inset.as_deref() {
+                Some(inset) => clip.intersection(inset.apply(bounds)).unwrap_or_default(),
+                None => clip,
+            };
+            stack.extend(
+                node.children
+                    .iter()
+                    .rev()
+                    .map(|child| (*child, transform, opacity, clip, point)),
+            );
+            let painted = |transform: crate::affine::Affine| {
+                transform
+                    .inverse()
+                    .is_some_and(|inverse| inside(bounds, inverse.point(point.0, point.1)))
+            };
+            let hit = opacity > 0.0
+                && match &node.kind {
+                    NodeKind::Image(image) => painted(image.paint_transform(bounds)),
+                    NodeKind::Svg(svg) => painted(svg.paint_transform(bounds)),
+                    _ => inside(bounds, point),
+                }
+                && inside(clip, point);
+            if hit {
+                hits.push(id);
+            }
+        }
         hits.reverse();
         hits
     }
@@ -1123,12 +1634,18 @@ impl Scene {
             queued: true,
             measurement: None,
             alternates: Vec::new(),
+            sizes: Vec::new(),
             ink: std::cell::Cell::new(None),
             ink_valid: std::cell::Cell::new(false),
             text_size: Default::default(),
             advanced_layout: None,
             arrange_dirty: true,
+            reads: std::cell::Cell::new(0),
             isolated: false,
+            local: None,
+            image_mask: None,
+            clip_inset: None,
+            promoted: false,
             scroll_copy: false,
             layer_revision: 0,
         };
@@ -1180,6 +1697,9 @@ impl Scene {
         if node.isolated {
             self.isolation_count -= 1;
         }
+        self.transformed -= usize::from(node.transformed());
+        self.filtered -= usize::from(node.filtered());
+        self.promoted_count -= usize::from(node.promoted);
         if node.effects.blur_radius > 0.0 {
             self.blur_nodes.retain(|entry| *entry != id);
         }
@@ -1238,6 +1758,8 @@ impl Scene {
         let paints = old.clip != style.clip
             || old.fade_edges != style.fade_edges
             || old.fade_insets != style.fade_insets
+            || old.fade_edges_x != style.fade_edges_x
+            || old.fade_insets_x != style.fade_insets_x
             || old.padding != style.padding
             || old.padding_edges != style.padding_edges
             || old.text_wrap != style.text_wrap
@@ -1322,6 +1844,7 @@ impl Scene {
         };
         effects.blur_radius = radius(effects.blur_radius);
         effects.edge_fade = radius(effects.edge_fade);
+        effects.filter_blur = radius(effects.filter_blur);
         if self.node(id).effects == effects {
             return;
         }
@@ -1335,17 +1858,32 @@ impl Scene {
         if old_blur && effects.blur_radius == 0.0 {
             self.blur_nodes.retain(|entry| *entry != id);
         }
+        // A content blur's spread damages under the old effects, then the new.
         self.damage_subtree(id);
+        let old_filter = self.node(id).filtered();
+        if old_filter != (effects.filter_blur > 0.) {
+            if old_filter {
+                self.filtered -= 1;
+            } else {
+                // A layer from now on: its texture outlives a blur back at 0.
+                self.filtered += 1;
+                if !std::mem::replace(&mut self.node_mut(id).promoted, true) {
+                    self.promoted_count += 1;
+                }
+            }
+        }
         self.node_mut(id).effects = effects;
         self.damage_subtree(id);
         self.invalidate(id, COMPOSITE);
     }
     fn invalidate(&mut self, id: NodeId, flags: u8) {
-        if self.isolation_count > 0 {
+        if self.isolation_count + self.promoted_count > 0 {
             let mut current = Some(id);
             while let Some(ancestor) = current {
                 let node = self.node_mut(ancestor);
-                if node.isolated && (ancestor != id || flags & (LAYOUT | PAINT | PAINTED) != 0) {
+                if (node.isolated || node.promoted)
+                    && (ancestor != id || flags & (LAYOUT | PAINT | PAINTED) != 0)
+                {
                     node.layer_revision = node.layer_revision.wrapping_add(1);
                 }
                 current = node.parent;
@@ -1363,6 +1901,7 @@ impl Scene {
         node.dirty |= flags;
         if flags & LAYOUT != 0 {
             node.text_size.set(TextSizes::default());
+            node.reads.set(0);
         }
         if !node.queued {
             node.queued = true;
@@ -1510,6 +2049,14 @@ impl Scene {
         }
         // Resolve the ancestors once, then carry translation and clipping down
         // instead of walking back up from every descendant.
+        if self.transformed + self.filtered > 0 {
+            let (transform, clip, placement) = match self.node(id).parent {
+                Some(parent) => self.context(parent),
+                None => (Transform::default(), Some(self.viewport), None),
+            };
+            self.damage_subtree_placed(id, transform, clip, placement);
+            return;
+        }
         let (transform, clip) = match self.node(id).parent {
             Some(parent) => self.world_context(parent),
             None => (Transform::default(), Some(self.viewport)),
@@ -1540,6 +2087,92 @@ impl Scene {
             let child = self.node(id).children[index];
             self.damage_subtree_in(child, transform, clip);
         }
+    }
+    /// `damage_subtree_in` where local transforms exist (see `descend`).
+    fn damage_subtree_placed(
+        &mut self,
+        id: NodeId,
+        parent: Transform,
+        parent_clip: Option<Rect>,
+        placement: Option<Placement>,
+    ) {
+        let node = self.node(id);
+        let unplaced = node.measurement.is_none() && node.bounds == Rect::default();
+        if !own_visible(&node.style) || unplaced || self.damage_is_full() {
+            return;
+        }
+        let (transform, bounds, clip, placement) =
+            self.descend(node, parent, parent_clip, placement);
+        self.damage_painted_placed(id, bounds, node.effects.blur_radius, clip, placement);
+        for index in 0..self.node(id).children.len() {
+            let child = self.node(id).children[index];
+            self.damage_subtree_placed(child, transform, clip, placement);
+        }
+    }
+    /// What `node` paints under, given what its parent passes on: its
+    /// translation, translated box, clip (in its layer's space; `None` cuts
+    /// nothing, only inside a transformed layer) and its layer's placement.
+    /// A local transform starts a layer: the clip around it moves into the
+    /// placement, leaving only the node's own clip inside.
+    fn descend(
+        &self,
+        node: &Node,
+        parent: Transform,
+        parent_clip: Option<Rect>,
+        placement: Option<Placement>,
+    ) -> (Transform, Rect, Option<Rect>, Option<Placement>) {
+        let transform = Transform {
+            x: parent.x + node.transform.x,
+            y: parent.y + node.transform.y,
+        };
+        let bounds = node.bounds.translated(transform);
+        if !node.transformed() && !node.filtered() {
+            let clip = if clip_axes(&node.style) != (false, false) {
+                clipped_bounds(parent_clip, bounds, &node.style)
+            } else {
+                parent_clip
+            };
+            return (transform, bounds, clip, placement);
+        }
+        // A content blur starts a layer as a transform does: it spreads
+        // what the layer paints, in the layer's space, and its own clip
+        // applies inside, before the blur.
+        let matrix = node.local().matrix(bounds);
+        let spread = match node.filtered() {
+            true => filter_spread(node.effects.filter_blur) * stretch(matrix),
+            false => 0.,
+        };
+        let placement = match placement {
+            None => Placement {
+                matrix,
+                spread,
+                clip: parent_clip.unwrap_or(self.viewport),
+            },
+            Some(outer) => Placement {
+                matrix: matrix.then(outer.matrix),
+                spread: outer.spread + spread * stretch(outer.matrix),
+                // The outer layer's blur reaches past clips inside it.
+                clip: match parent_clip {
+                    Some(clip) => outer.shows(clip).unwrap_or_default(),
+                    None => outer.clip,
+                },
+            },
+        };
+        let clip = clip_axes(&node.style)
+            .ne(&(false, false))
+            .then(|| clipped_bounds(None, bounds, &node.style))
+            .flatten();
+        (transform, bounds, clip, Some(placement))
+    }
+    /// What `id`'s children paint under (see `descend`), from the root down.
+    fn context(&self, id: NodeId) -> (Transform, Option<Rect>, Option<Placement>) {
+        let node = self.node(id);
+        let (transform, clip, placement) = match node.parent {
+            Some(parent) => self.context(parent),
+            None => (Transform::default(), Some(self.viewport), None),
+        };
+        let (transform, _, clip, placement) = self.descend(node, transform, clip, placement);
+        (transform, clip, placement)
     }
     /// World translation of `id` including its own, and the clip its children
     /// paint within.
@@ -1574,6 +2207,16 @@ impl Scene {
         }
         let ink = ink
             .and_then(|ink| clipped_bounds(Some(ink), node.bounds, &node.style))
+            .map(|ink| match node.filtered() {
+                false => ink,
+                // Blurred in its layer's space, before the transform.
+                true => ink.expand(filter_spread(node.effects.filter_blur)),
+            })
+            .map(|ink| match node.transformed() {
+                false => ink,
+                // About its untranslated box: translating after commutes.
+                true => node.local().matrix(node.bounds).bounds(ink),
+            })
             .map(|ink| ink.translated(node.transform));
         node.ink.set(ink);
         node.ink_valid.set(true);
@@ -1721,32 +2364,197 @@ impl Scene {
         if self.damage_is_full() || !self.shown(id) {
             return;
         }
+        if self.transformed + self.filtered > 0 {
+            let (bounds, clip, placement) = self.placed(id);
+            let blur_radius = self.node(id).effects.blur_radius;
+            self.damage_painted_placed(id, bounds, blur_radius, clip, placement);
+            return;
+        }
         let (bounds, effects, clip) = self.world(id);
         self.damage_painted(id, bounds, effects.blur_radius, clip);
     }
     fn damage_painted(&mut self, id: NodeId, bounds: Rect, blur_radius: f32, clip: Option<Rect>) {
-        if !matches!(self.node(id).kind, NodeKind::Container(_)) || blur_radius > 0.0 {
-            let bounds = match &self.node(id).kind {
-                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paint_bounds(bounds),
-                NodeKind::Image(image) => image.paint_bounds(bounds),
-                NodeKind::Svg(svg) => svg.paint_bounds(bounds),
-                NodeKind::Text { .. } | NodeKind::RichText { .. } if blur_radius <= 0.0 => {
-                    self.text_ink(id, bounds)
-                }
-                _ => bounds,
-            };
+        if let Some(bounds) = self.painted(id, bounds, blur_radius)
             // A backdrop filter samples only inside its bounds.
-            if let Some(bounds) = clip.and_then(|clip| bounds.intersection(clip)) {
-                self.add_damage(bounds);
-            }
+            && let Some(bounds) = clip.and_then(|clip| bounds.intersection(clip))
+        {
+            self.add_damage(bounds);
         }
     }
+    /// Damage what `id` itself paints at `bounds` within `clip`, mapped onto
+    /// the viewport by its layer's `placement`. Inside a transformed layer, no
+    /// `clip` cuts nothing; outside one, everything.
+    fn damage_painted_placed(
+        &mut self,
+        id: NodeId,
+        bounds: Rect,
+        blur_radius: f32,
+        clip: Option<Rect>,
+        placement: Option<Placement>,
+    ) {
+        let Some(placement) = placement else {
+            return self.damage_painted(id, bounds, blur_radius, clip);
+        };
+        if let Some(bounds) = self
+            .painted(id, bounds, blur_radius)
+            .and_then(|bounds| bounds.intersection(clip.unwrap_or(UNCLIPPED)))
+            .and_then(|visible| placement.shows(visible))
+        {
+            self.add_damage(bounds);
+        }
+    }
+    /// What `id` itself paints when laid out at `bounds`, if anything.
+    #[inline]
+    fn painted(&self, id: NodeId, bounds: Rect, blur_radius: f32) -> Option<Rect> {
+        if matches!(self.node(id).kind, NodeKind::Container(_)) && blur_radius <= 0.0 {
+            return None;
+        }
+        Some(match &self.node(id).kind {
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paint_bounds(bounds),
+            NodeKind::Image(image) => image.paint_bounds(bounds),
+            NodeKind::Svg(svg) => svg.paint_bounds(bounds),
+            NodeKind::Text { .. } | NodeKind::RichText { .. } if blur_radius <= 0.0 => {
+                self.text_ink(id, bounds)
+            }
+            _ => bounds,
+        })
+    }
+    /// `constraints` with what `id`'s result cannot depend on dropped, so
+    /// probes that differ only there share one result: an available size
+    /// a forced one overrides, percentage bases it has no percentages
+    /// against, and available sizes a leaf never reads (text lays out at
+    /// its available width only when it wraps).
+    fn relevant(&self, id: NodeId, mut constraints: Constraints) -> Constraints {
+        let (widths, heights) = self.percent_bases(id);
+        if !widths {
+            constraints.percent_width = None;
+        }
+        if !heights {
+            constraints.percent_height = None;
+        }
+        let (reads_width, reads_height) = self.reads_available(id);
+        if constraints.force_width.is_some() || !reads_width {
+            constraints.width = constraints.force_width;
+        }
+        if constraints.force_height.is_some() || !reads_height {
+            constraints.height = constraints.force_height;
+        }
+        constraints
+    }
+    /// Whether `id` resolves percentages against the (width, height) basis
+    /// its parent passes (`Constraints::percent_width`, `percent_height`): its
+    /// own percentage sizes, limits and padding. Its children's bases come
+    /// from its own size.
+    pub(super) fn percent_bases(&self, id: NodeId) -> (bool, bool) {
+        let node = self.node(id);
+        let style = &node.style;
+        let options = style.layout_options.as_deref();
+        let percent = |length: Option<crate::layout::Length>| {
+            matches!(length, Some(crate::layout::Length::Percent(_)))
+        };
+        let widths = node.parent.is_some()
+            && (style.width_percent.is_some()
+                || options.is_some_and(|o| {
+                    percent(o.min_width)
+                        || percent(o.max_width)
+                        || [
+                            o.padding.left,
+                            o.padding.right,
+                            o.padding.top,
+                            o.padding.bottom,
+                        ]
+                        .into_iter()
+                        .any(percent)
+                }));
+        let heights = style.height_percent.is_some()
+            || options.is_some_and(|o| percent(o.min_height) || percent(o.max_height));
+        (widths, heights)
+    }
+    /// Whether `id`'s size can depend on the available (width, height) it is
+    /// measured under, unless forced. Text reads its width when it wraps;
+    /// other leaves size themselves. A container passes what it is given to
+    /// its children unless its own size fixes it, so it reads what they do;
+    /// a taffy-laid-out one also fits its auto width to the room, and wraps
+    /// a column or sizes grid tracks within the height. Most subtrees read
+    /// no height: probes that differ only in it share one result. Cached
+    /// until its layout is invalidated, which reaches every ancestor up to a
+    /// fixed-size boundary (which reads neither).
+    fn reads_available(&self, id: NodeId) -> (bool, bool) {
+        const KNOWN: u8 = 1;
+        const WIDTH: u8 = 2;
+        const HEIGHT: u8 = 4;
+        let node = self.node(id);
+        let cached = node.reads.get();
+        if cached & KNOWN != 0 {
+            return (cached & WIDTH != 0, cached & HEIGHT != 0);
+        }
+        let style = &node.style;
+        let (width, height) = match &node.kind {
+            NodeKind::Text { .. } => (
+                style.text_wrap || style.text_options != Default::default(),
+                false,
+            ),
+            NodeKind::RichText { text } => (
+                style.text_wrap || text.options() != Default::default(),
+                false,
+            ),
+            NodeKind::Container(layout) | NodeKind::Panel { layout, .. } => {
+                let mut children = (false, false);
+                for child in &node.children {
+                    if self.node(*child).style.absolute {
+                        continue;
+                    }
+                    let (w, h) = self.reads_available(*child);
+                    children = (children.0 || w, children.1 || h);
+                }
+                // A row fits its shrinkable children into the room it has.
+                if *layout == Layout::Row
+                    && node.children.iter().any(|child| {
+                        let s = &self.node(*child).style;
+                        !s.absolute && s.flex_shrink > 0.
+                    })
+                {
+                    children.0 = true;
+                }
+                let (width, height) = if self.uses_advanced_layout(id) {
+                    let options = style.layout_options.as_deref().copied().unwrap_or_default();
+                    let wraps_column = *layout != Layout::Row && options.wrap.is_some();
+                    let grid = options.display == Some(crate::layout::Display::Grid);
+                    (true, children.1 || wraps_column || grid)
+                } else {
+                    children
+                };
+                (
+                    width && style.width.is_none(),
+                    height && style.height.is_none(),
+                )
+            }
+            _ => (false, false),
+        };
+        node.reads
+            .set(KNOWN | if width { WIDTH } else { 0 } | if height { HEIGHT } else { 0 });
+        (width, height)
+    }
+    /// `id`'s size under `constraints`, for a probe: a kept size serves,
+    /// leaving whichever result `id` holds whole as it was.
     fn measure(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
+        self.measured(id, constraints, false)
+    }
+    /// `id` laid out under `constraints`, the result it then holds (with its
+    /// children's places) for `arrange`.
+    fn measure_full(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
+        self.measured(id, constraints, true)
+    }
+    fn measured(&mut self, id: NodeId, constraints: Constraints, full: bool) -> (f32, f32) {
+        #[cfg(test)]
+        {
+            self.measure_calls += 1;
+        }
+        let constraints = self.relevant(id, constraints);
         let node = self.node(id);
         let pass = self.layout_pass;
-        let usable = |m: &Measurement| {
-            m.constraints == constraints && (node.dirty & LAYOUT == 0 || m.pass == pass)
-        };
+        let clean = node.dirty & LAYOUT == 0;
+        let usable = |m: &Measurement| m.constraints == constraints && (clean || m.pass == pass);
         if let Some(current) = &node.measurement
             && usable(current)
         {
@@ -1762,6 +2570,14 @@ impl Scene {
             }
             node.arrange_dirty = true;
             return size;
+        }
+        if !full
+            && let Some(kept) = node
+                .sizes
+                .iter()
+                .find(|m| m.constraints == constraints && (clean || m.pass == pass))
+        {
+            return kept.size;
         }
         let node = self.node(id);
         if let NodeKind::Container(layout) | NodeKind::Panel { layout, .. } = node.kind
@@ -1810,6 +2626,7 @@ impl Scene {
         let percent_height = explicit_h.map(|h| (h - vertical_padding).max(0.0));
         let kind = self.node(id).kind.clone();
         let mut children = Vec::new();
+        let mut child_constraints = Vec::new();
         let (mut width, mut height) = match kind {
             NodeKind::Text {
                 text, font_size, ..
@@ -1874,22 +2691,65 @@ impl Scene {
                     .iter()
                     .copied()
                     .partition(|child| self.node(*child).style.absolute);
-                let mut sizes: Vec<_> = ids
+                let horizontal = layout == Layout::Row;
+                // The axes a child fills (stretch): the cross axis, both in an
+                // overlay, unless it sizes itself there.
+                let stretches = |s: &Style| {
+                    let fills = style.align == Align::Stretch;
+                    (
+                        fills
+                            && layout != Layout::Row
+                            && s.width.is_none()
+                            && percentage(s.width_percent, percent_width).is_none(),
+                        fills
+                            && layout != Layout::Column
+                            && s.height.is_none()
+                            && percentage(s.height_percent, percent_height).is_none(),
+                    )
+                };
+                // Where this container's own size fixes a stretched axis, its
+                // children are sized at the stretched size from the start, as
+                // CSS sizes a flex item's content at its stretched cross size:
+                // wrapping text then takes the lines it will show, and its
+                // height is the one flex distributes.
+                let filled = |scene: &Self, child: NodeId| {
+                    let s = &scene.node(child).style;
+                    let (w, h) = stretches(s);
+                    let m = s.margin;
+                    (
+                        explicit_w
+                            .filter(|_| w)
+                            .map(|outer| (outer - horizontal_padding - m.left - m.right).max(0.)),
+                        explicit_h
+                            .filter(|_| h)
+                            .map(|outer| (outer - vertical_padding - m.top - m.bottom).max(0.)),
+                    )
+                };
+                let natural = Constraints {
+                    width: available_w,
+                    height: available_h,
+                    percent_width,
+                    percent_height,
+                    ..Constraints::default()
+                };
+                // What each child's size was last asked under: its place is
+                // that result's (see `store_measurement`).
+                let mut asked: Vec<_> = ids
                     .iter()
                     .map(|child| {
-                        self.measure(
-                            *child,
-                            Constraints {
-                                width: available_w,
-                                height: available_h,
-                                percent_width,
-                                percent_height,
-                                ..Constraints::default()
-                            },
-                        )
+                        let (width, height) = filled(self, *child);
+                        Constraints {
+                            force_width: width,
+                            force_height: height,
+                            ..natural
+                        }
                     })
                     .collect();
-                let horizontal = layout == Layout::Row;
+                let mut sizes: Vec<_> = (0..ids.len())
+                    .map(|i| self.measure(ids[i], asked[i]))
+                    .collect();
+                // Children whose main size flex distribution decided.
+                let mut allocated = vec![false; ids.len()];
                 let main_margin = |s: &Style| {
                     if horizontal {
                         s.margin.left + s.margin.right
@@ -1898,6 +2758,20 @@ impl Scene {
                     }
                 };
                 let main = |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
+                // `asked` with the main size set to `size`, the cross kept.
+                let along = |asked: Constraints, size: f32| Constraints {
+                    force_width: if horizontal {
+                        Some(size)
+                    } else {
+                        asked.force_width
+                    },
+                    force_height: if horizontal {
+                        asked.force_height
+                    } else {
+                        Some(size)
+                    },
+                    ..asked
+                };
                 let gaps = style.gap * ids.len().saturating_sub(1) as f32;
                 let natural_main = sizes
                     .iter()
@@ -1906,13 +2780,14 @@ impl Scene {
                     .sum::<f32>()
                     + gaps;
                 let main_limit = if horizontal {
-                    Some(
-                        dimension(
-                            explicit_w.unwrap_or(natural_main + horizontal_padding),
-                            style.min_width,
-                            style.max_width,
-                        ) - horizontal_padding,
-                    )
+                    // A row sized by its content, given less room than that,
+                    // fits it (CSS fit-content): shrinkable children shrink,
+                    // and what cannot shrink still overflows.
+                    let content = explicit_w.unwrap_or(match available_w {
+                        Some(room) => natural_main.min(room) + horizontal_padding,
+                        None => natural_main + horizontal_padding,
+                    });
+                    Some(dimension(content, style.min_width, style.max_width) - horizontal_padding)
                 } else {
                     Some(
                         dimension(
@@ -1963,26 +2838,18 @@ impl Scene {
                             }
                             let s = &self.node(*child).style;
                             let wanted = main(sizes[i]) + remaining * weights[i] / weight;
-                            let allocated = if horizontal {
+                            let size = if horizontal {
                                 dimension(wanted, s.min_width, s.max_width)
                             } else {
                                 dimension(wanted, s.min_height, s.max_height)
                             };
-                            if (allocated - wanted).abs() > 0.001 {
+                            if (size - wanted).abs() > 0.001 {
                                 frozen[i] = true;
                                 clamped = true;
                             }
-                            sizes[i] = self.measure(
-                                *child,
-                                Constraints {
-                                    width: available_w,
-                                    height: available_h,
-                                    percent_width,
-                                    percent_height,
-                                    force_width: horizontal.then_some(allocated),
-                                    force_height: (!horizontal).then_some(allocated),
-                                },
-                            );
+                            asked[i] = along(asked[i], size);
+                            allocated[i] = true;
+                            sizes[i] = self.measure(*child, asked[i]);
                         }
                         if !clamped {
                             break;
@@ -2002,56 +2869,90 @@ impl Scene {
                     for (i, child) in ids.iter().enumerate() {
                         let child_style = &self.node(*child).style;
                         if child_style.flex_grow > 0.0 || child_style.flex_shrink > 0.0 {
-                            sizes[i] = self.measure(
-                                *child,
-                                Constraints {
-                                    width: available_w,
-                                    height: available_h,
-                                    percent_width,
-                                    percent_height,
-                                    force_width: horizontal.then_some(sizes[i].0),
-                                    force_height: (!horizontal).then_some(sizes[i].1),
-                                },
-                            );
+                            asked[i] = along(asked[i], main(sizes[i]));
+                            allocated[i] = true;
+                            sizes[i] = self.measure(*child, asked[i]);
                         }
                     }
                 }
-                let mut natural_w = 0.0_f32;
-                let mut natural_h = 0.0_f32;
-                for (i, child) in ids.iter().enumerate() {
-                    let m = self.node(*child).style.margin;
-                    let (w, h) = (sizes[i].0 + m.left + m.right, sizes[i].1 + m.top + m.bottom);
+                // The children's extent: across rows (or columns) and gaps,
+                // and the widest (or tallest), with their margins.
+                let margins: Vec<Insets> = ids.iter().map(|c| self.node(*c).style.margin).collect();
+                let extent = |sizes: &[(f32, f32)]| {
+                    let (mut natural_w, mut natural_h) = (0.0_f32, 0.0_f32);
+                    for (i, m) in margins.iter().enumerate() {
+                        let (w, h) = (sizes[i].0 + m.left + m.right, sizes[i].1 + m.top + m.bottom);
+                        match layout {
+                            Layout::Row => {
+                                natural_w += w;
+                                natural_h = natural_h.max(h);
+                            }
+                            Layout::Column => {
+                                natural_h += h;
+                                natural_w = natural_w.max(w);
+                            }
+                            Layout::Overlay => {
+                                natural_w = natural_w.max(w);
+                                natural_h = natural_h.max(h);
+                            }
+                        }
+                    }
                     match layout {
-                        Layout::Row => {
-                            natural_w += w;
-                            natural_h = natural_h.max(h);
-                        }
-                        Layout::Column => {
-                            natural_h += h;
-                            natural_w = natural_w.max(w);
-                        }
-                        Layout::Overlay => {
-                            natural_w = natural_w.max(w);
-                            natural_h = natural_h.max(h);
-                        }
+                        Layout::Row => (natural_w + gaps, natural_h),
+                        Layout::Column => (natural_w, natural_h + gaps),
+                        Layout::Overlay => (natural_w, natural_h),
                     }
+                };
+                let inner = |(natural_w, natural_h): (f32, f32)| {
+                    (
+                        dimension(
+                            explicit_w.unwrap_or(natural_w + horizontal_padding),
+                            style.min_width,
+                            style.max_width,
+                        ) - horizontal_padding,
+                        dimension(
+                            explicit_h.unwrap_or(natural_h + vertical_padding),
+                            style.min_height,
+                            style.max_height,
+                        ) - vertical_padding,
+                    )
+                };
+                // Stretched along an axis the container sizes to its widest
+                // (or tallest) child: there, now that it is known. The main
+                // size stays forced only where flex decided it; otherwise the
+                // child takes its natural main size at the stretched size
+                // (wrapped text grows taller), and the extent follows.
+                let (inner_w, inner_h) = inner(extent(&sizes));
+                for (i, child) in ids.iter().enumerate() {
+                    let s = &self.node(*child).style;
+                    let (w, h) = stretches(s);
+                    let m = s.margin;
+                    let stretch_w = w && asked[i].force_width.is_none();
+                    let stretch_h = h && asked[i].force_height.is_none();
+                    if !stretch_w && !stretch_h {
+                        continue;
+                    }
+                    asked[i] = Constraints {
+                        force_width: match stretch_w {
+                            true => Some((inner_w - m.left - m.right).max(0.0)),
+                            false => asked[i].force_width,
+                        },
+                        force_height: match stretch_h {
+                            true => Some((inner_h - m.top - m.bottom).max(0.0)),
+                            false => asked[i].force_height,
+                        },
+                        ..asked[i]
+                    };
+                    if horizontal && allocated[i] {
+                        asked[i].force_width = Some(sizes[i].0);
+                    }
+                    if !horizontal && layout != Layout::Overlay && allocated[i] {
+                        asked[i].force_height = Some(sizes[i].1);
+                    }
+                    sizes[i] = self.measure(*child, asked[i]);
                 }
-                if layout == Layout::Row {
-                    natural_w += gaps;
-                }
-                if layout == Layout::Column {
-                    natural_h += gaps;
-                }
-                let inner_w = dimension(
-                    explicit_w.unwrap_or(natural_w + horizontal_padding),
-                    style.min_width,
-                    style.max_width,
-                ) - horizontal_padding;
-                let inner_h = dimension(
-                    explicit_h.unwrap_or(natural_h + vertical_padding),
-                    style.min_height,
-                    style.max_height,
-                ) - vertical_padding;
+                let (natural_w, natural_h) = extent(&sizes);
+                let (inner_w, inner_h) = inner((natural_w, natural_h));
                 let extra = if horizontal {
                     inner_w - natural_w
                 } else {
@@ -2077,39 +2978,6 @@ impl Scene {
                 for (i, child) in ids.iter().enumerate() {
                     let s = self.node(*child).style.clone();
                     let m = s.margin;
-                    if style.align == Align::Stretch {
-                        let stretch_w = layout != Layout::Row
-                            && s.width.is_none()
-                            && percentage(s.width_percent, percent_width).is_none();
-                        let stretch_h = layout != Layout::Column
-                            && s.height.is_none()
-                            && percentage(s.height_percent, percent_height).is_none();
-                        if stretch_w || stretch_h {
-                            sizes[i] = self.measure(
-                                *child,
-                                Constraints {
-                                    width: available_w,
-                                    height: available_h,
-                                    percent_width,
-                                    percent_height,
-                                    force_width: if stretch_w {
-                                        Some((inner_w - m.left - m.right).max(0.0))
-                                    } else if horizontal {
-                                        Some(sizes[i].0)
-                                    } else {
-                                        None
-                                    },
-                                    force_height: if stretch_h {
-                                        Some((inner_h - m.top - m.bottom).max(0.0))
-                                    } else if !horizontal {
-                                        Some(sizes[i].1)
-                                    } else {
-                                        None
-                                    },
-                                },
-                            );
-                        }
-                    }
                     let (w, h) = sizes[i];
                     let cross_free = if horizontal {
                         inner_h - h - m.top - m.bottom
@@ -2127,20 +2995,20 @@ impl Scene {
                         Layout::Overlay => (cross + m.left, m.top),
                     };
                     children.push((*child, Rect::new(cx + padding.left, cy + padding.top, w, h)));
+                    child_constraints.push(Some(asked[i]));
                     cursor += main(sizes[i]) + main_margin(&s) + style.gap + extra_gap;
                 }
                 for child in absolute {
                     let margin = self.node(child).style.margin;
-                    let (w, h) = self.measure(
-                        child,
-                        Constraints {
-                            width: Some((inner_w - margin.left - margin.right).max(0.0)),
-                            height: Some((inner_h - margin.top - margin.bottom).max(0.0)),
-                            percent_width: Some(inner_w.max(0.0)),
-                            percent_height: Some(inner_h.max(0.0)),
-                            ..Constraints::default()
-                        },
-                    );
+                    let placed = Constraints {
+                        width: Some((inner_w - margin.left - margin.right).max(0.0)),
+                        height: Some((inner_h - margin.top - margin.bottom).max(0.0)),
+                        percent_width: Some(inner_w.max(0.0)),
+                        percent_height: Some(inner_h.max(0.0)),
+                        ..Constraints::default()
+                    };
+                    let (w, h) = self.measure(child, placed);
+                    child_constraints.push(Some(placed));
                     children.push((
                         child,
                         Rect::new(padding.left + margin.left, padding.top + margin.top, w, h),
@@ -2159,36 +3027,57 @@ impl Scene {
             style.min_height,
             style.max_height,
         );
-        self.store_measurement(id, constraints, (width, height), children);
+        self.store_measurement(
+            id,
+            constraints,
+            (width, height),
+            children,
+            child_constraints,
+        );
         (width, height)
     }
     /// Make a new result current, keeping earlier ones that are still valid.
+    /// `child_constraints`: what each child's place was measured under,
+    /// which `arrange` lays it out by again.
     fn store_measurement(
         &mut self,
         id: NodeId,
         constraints: Constraints,
         size: (f32, f32),
         children: Vec<(NodeId, Rect)>,
+        child_constraints: Vec<Option<Constraints>>,
     ) {
+        // As `measure` looks results up (`measure_hidden` stores directly).
+        let constraints = self.relevant(id, constraints);
         let pass = self.layout_pass;
-        let child_constraints = children
-            .iter()
-            .map(|(child, _)| {
-                self.node(*child)
-                    .measurement
-                    .as_ref()
-                    .map(|m| m.constraints)
-            })
-            .collect();
         let node = self.node_mut(id);
         let dirty = node.dirty & LAYOUT != 0;
         if let Some(previous) = node.measurement.take() {
             node.alternates.insert(0, previous);
         }
-        // Results from before a node changed are stale.
-        node.alternates
-            .retain(|m| m.constraints != constraints && (!dirty || m.pass == pass));
-        node.alternates.truncate(MEASUREMENT_ALTERNATES);
+        // Results from before a node changed are stale; of the rest, all of
+        // this pass's and the most recent few of earlier ones.
+        // Earlier results past the few kept whole keep their sizes.
+        let mut earlier = 0;
+        let mut evicted = Vec::new();
+        node.alternates.retain(|m| {
+            let valid = m.constraints != constraints && (m.pass == pass || !dirty);
+            let whole = m.pass == pass || earlier < MEASUREMENT_ALTERNATES;
+            earlier += usize::from(valid && whole && m.pass != pass);
+            if valid && !whole {
+                evicted.push(ProbeSize::from(m));
+            }
+            valid && whole
+        });
+        evicted.extend(
+            node.alternates
+                .drain(PASS_RESULTS.min(node.alternates.len())..)
+                .map(|m| ProbeSize::from(&m)),
+        );
+        node.sizes
+            .retain(|m| m.constraints != constraints && (m.pass == pass || !dirty));
+        keep_sizes(&mut node.sizes, evicted);
+        let overfull = node.alternates.len() == MEASUREMENT_ALTERNATES + 1;
         node.arrange_dirty = true;
         node.measurement = Some(Measurement {
             constraints,
@@ -2197,6 +3086,9 @@ impl Scene {
             child_constraints,
             pass,
         });
+        if overfull {
+            self.overfull.push(id);
+        }
     }
     /// `covered`: an ancestor moved and already damaged this whole subtree at
     /// its old and new positions.
@@ -2223,7 +3115,7 @@ impl Scene {
         for ((child, rect), constraints) in children.into_iter().zip(child_constraints) {
             // Cached: promotes the matching result; evicted: re-measures.
             if let Some(constraints) = constraints {
-                self.measure(child, constraints);
+                self.measure_full(child, constraints);
             }
             self.arrange(child, x + rect.x, y + rect.y, report, covered || changed);
         }
@@ -2248,7 +3140,7 @@ impl Scene {
         self.layout_pass = self.layout_pass.wrapping_add(1);
         let mut report = FrameReport::default();
         if self.node(self.root).dirty & LAYOUT != 0 {
-            self.measure(self.root, Constraints::default());
+            self.measure_full(self.root, Constraints::default());
             self.arrange(self.root, 0.0, 0.0, &mut report, false);
         }
         // Boundaries under clean ancestors keep their place and size; lay out
@@ -2272,7 +3164,7 @@ impl Scene {
                 self.invalidate_layout_to_root(id);
                 continue;
             };
-            if self.measure(id, constraints) != size {
+            if self.measure_full(id, constraints) != size {
                 // Not actually independent of its content: lay out normally.
                 relayout_all = true;
                 self.invalidate_layout_to_root(id);
@@ -2282,8 +3174,21 @@ impl Scene {
             self.arrange(id, bounds.x, bounds.y, &mut report, false);
         }
         if relayout_all && self.node(self.root).dirty & LAYOUT != 0 {
-            self.measure(self.root, Constraints::default());
+            self.measure_full(self.root, Constraints::default());
             self.arrange(self.root, 0.0, 0.0, &mut report, false);
+        }
+        // Probes this pass answered stay only as the next pass's few.
+        for id in std::mem::take(&mut self.overfull) {
+            if self.contains(id) {
+                let node = self.node_mut(id);
+                let at = MEASUREMENT_ALTERNATES.min(node.alternates.len());
+                let evicted: Vec<_> = node
+                    .alternates
+                    .drain(at..)
+                    .map(|m| ProbeSize::from(&m))
+                    .collect();
+                keep_sizes(&mut node.sizes, evicted);
+            }
         }
         self.pending_layout_nodes += report.layout_nodes;
         self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -2326,6 +3231,10 @@ impl Scene {
                     let (bounds, effects, _) = self.world(*id);
                     // Fully transparent filters cannot change the visible backdrop.
                     // Hide/show still damages both old and new subtree bounds.
+                    let bounds = match self.transformed {
+                        0 => bounds,
+                        _ => self.transformed_bounds(*id),
+                    };
                     (effects.opacity > 0.0).then_some((bounds, false))
                 })
                 .collect();
@@ -2401,6 +3310,24 @@ impl Scene {
             }
             let to = self.node(id).transform;
             let (dx, dy) = (to.x - from.x, to.y - from.y);
+            // A layer's pixels are its own: a copy of the window's moves
+            // nothing in it.
+            let layered = std::iter::once(id)
+                .chain(self.ancestors(id))
+                .any(|node| self.is_layer(node));
+            if again && self.transformed + self.filtered > 0 {
+                // Its clip, wherever transformed or blurred ancestors show it.
+                let (_, clip, placement) = self.placed(id);
+                let shown = match (placement, clip) {
+                    (Some(placement), Some(clip)) => placement.shows(clip),
+                    (Some(placement), None) => Some(placement.clip),
+                    (None, clip) => Some(clip.unwrap_or(self.viewport)),
+                };
+                if let Some(shown) = shown {
+                    self.add_damage(shown);
+                }
+                continue;
+            }
             if again {
                 // Descendants changed at an intermediate position (a measured
                 // list re-anchoring between layout passes, possibly back to
@@ -2416,15 +3343,7 @@ impl Scene {
                 continue;
             }
             let (_, _, clip) = self.world(id);
-            let isolated = {
-                let mut current = Some(id);
-                let mut found = false;
-                while let Some(node) = current {
-                    found |= self.node(node).isolated;
-                    current = self.node(node).parent;
-                }
-                found
-            };
+            let isolated = layered;
             let filtered = |scene: &Self, clip: Rect| {
                 scene.blur_nodes.iter().any(|blur| {
                     let (bounds, effects, _) = scene.world(*blur);
@@ -2524,12 +3443,18 @@ impl Scene {
                 })
         })
     }
-    /// World-space content bounds, without ancestor clipping, for offscreen allocation.
+    /// World-space content bounds, without ancestor clipping, for offscreen
+    /// allocation. A transformed layer's are in its own untransformed space,
+    /// where its content is laid out.
     pub fn layer_bounds(&self, id: NodeId) -> Rect {
         let mut bounds = self.bounds(id);
         for item in self.layer_items(Some(id)) {
             let r = if item.isolated {
-                self.layer_bounds(item.id)
+                // A nested blur's output, spread past its own content.
+                let nested = self
+                    .layer_bounds(item.id)
+                    .expand(filter_spread(item.effects.filter_blur));
+                item.matrix.map_or(nested, |matrix| matrix.bounds(nested))
             } else if let NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } = item.kind {
                 quad.paint_bounds(item.bounds)
             } else if let NodeKind::Svg(svg) = item.kind {
@@ -2605,10 +3530,20 @@ impl Scene {
         // Sized as the last walk was, rather than grown from nothing each frame.
         let (stack_hint, items_hint) = self.walk_hints.get();
         let mut stack = Vec::with_capacity(stack_hint.max(1));
-        stack.push((start, transform, 1., clip, None::<(Rect, [f32; 2])>));
+        stack.push((
+            start,
+            transform,
+            1.,
+            clip,
+            None::<FadeMask>,
+            RoundedClip::default(),
+            false,
+        ));
         let mut result = Vec::with_capacity(items_hint);
         let mut deepest = 0;
-        while let Some((id, parent_transform, parent_opacity, parent_clip, mask)) = stack.pop() {
+        while let Some((id, parent_transform, parent_opacity, parent_clip, mask, rounded, border)) =
+            stack.pop()
+        {
             let node = self.node(id);
             let transform = Transform {
                 x: parent_transform.x + node.transform.x,
@@ -2616,7 +3551,9 @@ impl Scene {
             };
             let bounds = node.bounds.translated(transform);
             let is_root = root == Some(id);
-            let isolated = node.isolated && !is_root;
+            let transformed = node.transformed();
+            let effect = node.effect_layer();
+            let isolated = (node.isolated || transformed || effect) && !is_root;
             let mut effects = if is_root {
                 Effects::default()
             } else {
@@ -2628,20 +3565,81 @@ impl Scene {
             if effects.opacity <= 0.0 || !own_visible(&node.style) {
                 continue;
             }
-            let clip = clipped_bounds(parent_clip, bounds, &node.style);
+            // A transformed layer clips itself, inside, to its rotated box; a
+            // blurred or masked one clips inside, before its effect.
+            let matrix = (isolated && transformed).then(|| node.local().matrix(bounds));
+            let clip = match isolated && (transformed || effect) {
+                true => parent_clip,
+                false => clipped_bounds(parent_clip, bounds, &node.style),
+            };
             let child_mask = fade_mask(mask, clip, &node.style);
-            if !isolated {
+            let mut child_rounded = rounded_clip(rounded, node, bounds);
+            // Its clip inset: on its item and descendants here, on the
+            // composite of an untransformed layer (after its effect), and
+            // inside a transformed one, where its own space is.
+            let inset = node
+                .clip_inset
+                .as_deref()
+                .filter(|_| match (is_root, isolated) {
+                    (true, _) => transformed,
+                    (false, true) => !transformed,
+                    (false, false) => true,
+                })
+                .map(|inset| inset.apply(bounds));
+            let clip = match inset {
+                None => clip,
+                Some(inset) => {
+                    Some(clip.map_or(inset, |clip| clip.intersection(inset).unwrap_or_default()))
+                }
+            };
+            // Its rounded clip rounds the inset box instead.
+            let mut item_rounded = rounded;
+            if let Some(inset) = inset
+                && child_rounded != rounded
+                && let Some(own) = &mut child_rounded[0]
+            {
+                own.rect = inset;
+                item_rounded = child_rounded;
+            }
+            // Its border over what it holds: a second item once they paint.
+            let border_over = matches!(&node.kind,
+                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } if quad.border_over && quad.has_border());
+            if !isolated && !border && border_over {
+                let opacity = parent_opacity;
+                stack.push((
+                    id,
+                    parent_transform,
+                    opacity,
+                    parent_clip,
+                    mask,
+                    rounded,
+                    true,
+                ));
+            }
+            if !isolated && !border {
                 stack.extend(
                     node.children
                         .iter()
                         .rev()
                         .filter(|child| touches(self.ink(**child), transform))
-                        .map(|child| (*child, transform, effects.opacity, clip, child_mask)),
+                        .map(|child| {
+                            let opacity = effects.opacity;
+                            (
+                                *child,
+                                transform,
+                                opacity,
+                                clip,
+                                child_mask,
+                                child_rounded,
+                                false,
+                            )
+                        }),
                 );
                 deepest = deepest.max(stack.len());
             }
             result.push(PaintItem {
                 isolated,
+                matrix,
                 id,
                 bounds,
                 kind: &node.kind,
@@ -2650,6 +3648,8 @@ impl Scene {
                 effects,
                 clip,
                 mask,
+                rounded: item_rounded,
+                border_pass: border,
             });
         }
         self.walk_hints.set((deepest, result.len()));
@@ -2658,24 +3658,78 @@ impl Scene {
     pub fn paint_items(&self) -> impl Iterator<Item = PaintItem<'_>> {
         PaintIter {
             scene: self,
-            stack: vec![(self.root, Transform::default(), 1.0, self.viewport, None)],
+            stack: vec![(
+                self.root,
+                Transform::default(),
+                1.0,
+                self.viewport,
+                None,
+                RoundedClip::default(),
+            )],
         }
     }
 }
 /// The mask a node passes to its children: its own when it fades its edges
 /// (over its clip, less `fade_insets`), otherwise the one it inherited.
 fn fade_mask(inherited: Option<FadeMask>, clip: Option<Rect>, style: &Style) -> Option<FadeMask> {
+    let [top, bottom] = style.fade_edges;
+    let [left, right] = style.fade_edges_x;
+    let bands =
+        [top, right, bottom, left].map(|band| if band.is_finite() { band.max(0.) } else { 0. });
     match clip {
-        Some(clip) if style.fade_edges.iter().any(|band| *band > 0.) => {
-            let [top, bottom] = style
-                .fade_insets
-                .map(|inset| if inset.is_finite() { inset.max(0.) } else { 0. });
-            let height = (clip.height - top - bottom).max(0.);
-            let rect = Rect::new(clip.x, clip.y + top.min(clip.height), clip.width, height);
-            Some((rect, style.fade_edges.map(|band| band.max(0.))))
+        Some(clip) if bands.iter().any(|band| *band > 0.) => {
+            let inset = |inset: f32| if inset.is_finite() { inset.max(0.) } else { 0. };
+            let ([top, bottom], [left, right]) =
+                (style.fade_insets.map(inset), style.fade_insets_x.map(inset));
+            let rect = Rect::new(
+                clip.x + left.min(clip.width),
+                clip.y + top.min(clip.height),
+                (clip.width - left - right).max(0.),
+                (clip.height - top - bottom).max(0.),
+            );
+            Some((rect, bands))
         }
         _ => inherited,
     }
+}
+/// The rounded clips a node passes to its children: its own box first when
+/// it clips both axes with rounded corners, otherwise those it inherited.
+fn rounded_clip(inherited: RoundedClip, node: &Node, bounds: Rect) -> RoundedClip {
+    let (NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }) = &node.kind else {
+        return inherited;
+    };
+    if clip_axes(&node.style) != (true, true) {
+        return inherited;
+    }
+    let corners = quad
+        .decoration
+        .as_ref()
+        .and_then(|detail| detail.corners)
+        .unwrap_or(crate::decoration::Corners::all(quad.radius));
+    let most = bounds.width.min(bounds.height).max(0.) / 2.;
+    let radius = |value: f32| {
+        if value.is_finite() {
+            value.clamp(0., most)
+        } else {
+            0.
+        }
+    };
+    let radii = [
+        radius(corners.top_left),
+        radius(corners.top_right),
+        radius(corners.bottom_right),
+        radius(corners.bottom_left),
+    ];
+    if radii.iter().all(|radius| *radius <= 0.) {
+        return inherited;
+    }
+    [
+        Some(RoundRect {
+            rect: bounds,
+            radii,
+        }),
+        inherited[0],
+    ]
 }
 fn clip_axes(style: &Style) -> (bool, bool) {
     let options = style.layout_options.as_deref();
@@ -2689,8 +3743,7 @@ fn clipped_bounds(parent: Option<Rect>, bounds: Rect, style: &Style) -> Option<R
     if !x && !y {
         return parent;
     }
-    let extent = f32::MAX / 4.;
-    let base = parent.unwrap_or(Rect::new(-extent, -extent, extent * 2., extent * 2.));
+    let base = parent.unwrap_or(UNCLIPPED);
     let mask = Rect::new(
         if x { bounds.x } else { base.x },
         if y { bounds.y } else { base.y },
@@ -2701,12 +3754,13 @@ fn clipped_bounds(parent: Option<Rect>, bounds: Rect, style: &Style) -> Option<R
 }
 struct PaintIter<'a> {
     scene: &'a Scene,
-    stack: Vec<(NodeId, Transform, f32, Rect, Option<FadeMask>)>,
+    stack: Vec<(NodeId, Transform, f32, Rect, Option<FadeMask>, RoundedClip)>,
 }
 impl<'a> Iterator for PaintIter<'a> {
     type Item = PaintItem<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        let (id, parent_transform, parent_opacity, parent_clip, mask) = self.stack.pop()?;
+        let (id, parent_transform, parent_opacity, parent_clip, mask, rounded) =
+            self.stack.pop()?;
         let node = self.scene.node(id);
         let transform = Transform {
             x: parent_transform.x + node.transform.x,
@@ -2720,14 +3774,18 @@ impl<'a> Iterator for PaintIter<'a> {
         effects.opacity *= parent_opacity;
         let clip = clipped_bounds(Some(parent_clip), bounds, &node.style).unwrap_or(parent_clip);
         let child_mask = fade_mask(mask, Some(clip), &node.style);
-        self.stack.extend(
-            node.children
-                .iter()
-                .rev()
-                .map(|child| (*child, transform, effects.opacity, clip, child_mask)),
-        );
+        let clip = match node.clip_inset.as_deref() {
+            Some(inset) => clip.intersection(inset.apply(bounds)).unwrap_or_default(),
+            None => clip,
+        };
+        let child_rounded = rounded_clip(rounded, node, bounds);
+        self.stack.extend(node.children.iter().rev().map(|child| {
+            let opacity = effects.opacity;
+            (*child, transform, opacity, clip, child_mask, child_rounded)
+        }));
         Some(PaintItem {
             isolated: false,
+            matrix: None,
             id,
             bounds,
             kind: &node.kind,
@@ -2736,6 +3794,8 @@ impl<'a> Iterator for PaintIter<'a> {
             effects,
             clip: Some(clip),
             mask,
+            rounded,
+            border_pass: false,
         })
     }
 }
@@ -3255,6 +4315,96 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod measure_work_tests {
+    use super::*;
+    use crate::layout::{LayoutOptions, Length};
+    /// A stack `depth` deep of layout boxes as zgui-script lowers them: an
+    /// outer column and a middle one stretching their items, laid out by
+    /// taffy (their children set layout options), each holding wrapping
+    /// text, a fixed-width row and the next box. The middle columns of a
+    /// few levels animate a negative bottom margin every frame (entering
+    /// boxes growing open). Returns the scene's measure calls per frame.
+    fn measures_per_frame(depth: usize) -> u64 {
+        let mut scene = Scene::new(600., 4000.);
+        let shrinkable = Some(Arc::new(LayoutOptions {
+            min_width: Some(Length::Px(0.)),
+            ..Default::default()
+        }));
+        let column = |scene: &mut Scene, parent| {
+            scene.append(
+                parent,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    align: Align::Stretch,
+                    layout_options: shrinkable.clone(),
+                    ..Default::default()
+                },
+            )
+        };
+        let mut parent = scene.root();
+        let mut middles = Vec::new();
+        for level in 0..depth {
+            let outer = column(&mut scene, parent);
+            let middle = column(&mut scene, outer);
+            scene.append(
+                middle,
+                NodeKind::Text {
+                    text: format!("level {level} says something long enough to wrap").into(),
+                    color: Color(255, 255, 255, 255),
+                    font_size: 14.,
+                },
+                Style {
+                    text_wrap: true,
+                    layout_options: shrinkable.clone(),
+                    ..Default::default()
+                },
+            );
+            let row = scene.append(middle, NodeKind::Container(Layout::Row), Style::default());
+            for _ in 0..3 {
+                scene.append(
+                    row,
+                    NodeKind::Rect(Color(1, 2, 3, 255)),
+                    Style {
+                        width: Some(40.),
+                        height: Some(10.),
+                        ..Default::default()
+                    },
+                );
+            }
+            middles.push(middle);
+            parent = middle;
+        }
+        scene.flush();
+        let animated: Vec<_> = middles.iter().copied().step_by(4).collect();
+        let before = scene.measure_calls;
+        let frames = 12;
+        for frame in 0..frames {
+            for (i, id) in animated.iter().enumerate() {
+                let mut style = scene.style(*id);
+                style.margin.bottom = -((frames - frame) as f32) * 7. - i as f32;
+                scene.set_style(*id, style);
+            }
+            scene.flush();
+        }
+        (scene.measure_calls - before) / frames as u64
+    }
+    #[test]
+    fn nested_animated_margins_measure_their_paths_not_every_probe_combination() {
+        let shallow = measures_per_frame(8);
+        let deep = measures_per_frame(32);
+        // Four times as deep, with four times the animated boxes: about
+        // sixteen times the work on their paths at most, never the
+        // exponential growth of each level re-probing the next.
+        assert!(
+            deep <= 20 * shallow,
+            "{shallow} calls at depth 8, {deep} at 32"
+        );
+        // A handful of probes per node on a changed path and its children.
+        let nodes = 32 * 7;
+        assert!(deep < 40 * nodes as u64, "{deep} calls for {nodes} nodes");
+    }
+}
 #[cfg(test)]
 mod paint_geometry_tests {
     use super::*;
@@ -4046,6 +5196,7 @@ mod nonfinite_effect_tests {
             opacity: f32::NAN,
             blur_radius: f32::INFINITY,
             edge_fade: f32::NEG_INFINITY,
+            filter_blur: f32::NAN,
         };
         scene.set_effects(node, invalid);
         assert_eq!(scene.effects(node), Effects::default());
@@ -4056,8 +5207,10 @@ mod nonfinite_effect_tests {
         }
         assert!(scene.paint_items().all(|p| p.effects.opacity.is_finite()
             && p.effects.blur_radius.is_finite()
-            && p.effects.edge_fade.is_finite()));
+            && p.effects.edge_fade.is_finite()
+            && p.effects.filter_blur.is_finite()));
         assert!(scene.blur_nodes.is_empty());
+        assert_eq!(scene.filtered, 0);
     }
     #[test]
     fn opacity_infinities_keep_clamped_endpoints_and_invalid_filters_remove_blur_tracking() {
@@ -4077,6 +5230,7 @@ mod nonfinite_effect_tests {
                 opacity: 0.5,
                 blur_radius: 4.,
                 edge_fade: 3.,
+                filter_blur: 0.,
             },
         );
         scene.flush();
@@ -4087,6 +5241,7 @@ mod nonfinite_effect_tests {
                 opacity: f32::NEG_INFINITY,
                 blur_radius: f32::NAN,
                 edge_fade: f32::INFINITY,
+                filter_blur: 0.,
             },
         );
         assert_eq!(
@@ -4105,6 +5260,7 @@ mod nonfinite_effect_tests {
                 opacity: f32::INFINITY,
                 blur_radius: -2.,
                 edge_fade: -0.,
+                filter_blur: 0.,
             },
         );
         assert_eq!(scene.effects(node), Effects::default());
@@ -4116,6 +5272,7 @@ mod nonfinite_effect_tests {
                 opacity: 2.,
                 blur_radius: f32::NEG_INFINITY,
                 edge_fade: f32::NAN,
+                filter_blur: 0.,
             },
         );
         assert!(scene.flush().is_idle());
@@ -4216,5 +5373,520 @@ mod cursor_count_tests {
         scene.remove(parent);
         assert_eq!(scene.cursor_styles, 0);
         assert_eq!(scene.cursor_at(10., 10.), None);
+    }
+}
+#[cfg(test)]
+mod local_transform_tests {
+    use super::*;
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+    fn fixed(width: f32, height: f32) -> Style {
+        Style {
+            width: Some(width),
+            height: Some(height),
+            ..Style::default()
+        }
+    }
+    fn rotated(radians: f32) -> LocalTransform {
+        LocalTransform {
+            rotate: radians,
+            ..LocalTransform::IDENTITY
+        }
+    }
+    /// A scene with an overlay root and one `width` × `height` rect at (100, 100).
+    fn placed(width: f32, height: f32) -> (Scene, NodeId) {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let id = scene.append(
+            scene.root(),
+            NodeKind::Rect(Color(1, 2, 3, 255)),
+            fixed(width, height),
+        );
+        scene.set_transform(id, Transform { x: 100., y: 100. });
+        scene.flush();
+        (scene, id)
+    }
+    fn union(damage: &[Rect]) -> Rect {
+        damage.iter().copied().reduce(Rect::union).unwrap()
+    }
+    fn near(a: Rect, b: Rect) -> bool {
+        (a.x - b.x).abs() <= 1.
+            && (a.y - b.y).abs() <= 1.
+            && (a.width - b.width).abs() <= 2.
+            && (a.height - b.height).abs() <= 2.
+    }
+    #[test]
+    fn matrix_is_css_order_about_the_origin() {
+        let bounds = Rect::new(10., 20., 40., 20.);
+        let transform = LocalTransform {
+            scale: (2., 1.),
+            rotate: FRAC_PI_2,
+            ..LocalTransform::IDENTITY
+        };
+        let matrix = transform.matrix(bounds);
+        // The centre stays; scale applies first, along x, then rotation.
+        let (x, y) = matrix.point(30., 30.);
+        assert!((x - 30.).abs() < 1e-4 && (y - 30.).abs() < 1e-4);
+        let (x, y) = matrix.point(40., 30.);
+        assert!((x - 30.).abs() < 1e-4 && (y - 50.).abs() < 1e-4);
+        let corner = LocalTransform {
+            origin: (0., 0.),
+            ..transform
+        };
+        let (x, y) = corner.matrix(bounds).point(10., 20.);
+        assert!((x - 10.).abs() < 1e-4 && (y - 20.).abs() < 1e-4);
+        let skew = LocalTransform {
+            skew: (FRAC_PI_4, 0.),
+            origin: (0., 0.),
+            ..LocalTransform::IDENTITY
+        };
+        let (x, y) = skew.matrix(bounds).point(10., 30.);
+        assert!((x - 20.).abs() < 1e-4 && (y - 30.).abs() < 1e-4);
+        assert!(LocalTransform::IDENTITY.matrix(bounds) == crate::affine::Affine::IDENTITY);
+    }
+    #[test]
+    fn equal_and_normalized_writes_do_nothing() {
+        let (mut scene, id) = placed(40., 20.);
+        scene.set_local_transform(id, rotated(0.3));
+        assert!(!scene.flush().is_idle());
+        let revision = scene.interaction_revision();
+        scene.set_local_transform(id, rotated(0.3));
+        assert!(scene.flush().is_idle());
+        assert_eq!(scene.interaction_revision(), revision);
+        // Nonfinite components normalize before comparing: NaN never equals.
+        scene.set_local_transform(
+            id,
+            LocalTransform {
+                scale: (f32::NAN, 1.),
+                skew: (0., f32::INFINITY),
+                origin: (f32::NAN, 0.5),
+                ..rotated(0.3)
+            },
+        );
+        assert!(scene.flush().is_idle());
+        assert_eq!(scene.local_transform(id), rotated(0.3));
+        // Moving the origin of an identity transform moves nothing.
+        scene.set_local_transform(id, LocalTransform::IDENTITY);
+        scene.flush();
+        scene.set_local_transform(
+            id,
+            LocalTransform {
+                origin: (0., 0.),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        assert!(scene.flush().is_idle());
+        assert!(!scene.is_layer(id));
+    }
+    #[test]
+    fn transform_changes_damage_old_and_new_transformed_bounds_only() {
+        let (mut scene, id) = placed(40., 20.);
+        let layout = scene.layout_revision();
+        scene.set_local_transform(id, rotated(FRAC_PI_2));
+        let frame = scene.flush();
+        assert_eq!(frame.layout_nodes, 0);
+        assert_eq!(frame.paint_nodes, 0);
+        assert_eq!(frame.composite_nodes, 1);
+        assert_eq!(scene.layout_revision(), layout);
+        // Old box (100, 100, 40, 20) and the upright one about its centre
+        // (110, 90, 20, 40), merged as they overlap.
+        assert!(near(union(&frame.damage), Rect::new(100., 90., 40., 40.)));
+        assert!(near(
+            scene.transformed_bounds(id),
+            Rect::new(110., 90., 20., 40.)
+        ));
+        assert_eq!(scene.bounds(id), Rect::new(100., 100., 40., 20.));
+        assert!(scene.is_layer(id));
+        // The layer's pixels are kept: its revision does not move.
+        let revision = scene.layer_revision(id);
+        scene.set_local_transform(id, rotated(1.0));
+        scene.flush();
+        assert_eq!(scene.layer_revision(id), revision);
+        // Translating it carries the rotated box along.
+        scene.set_local_transform(id, rotated(FRAC_PI_2));
+        scene.flush();
+        scene.set_transform(id, Transform { x: 200., y: 100. });
+        let frame = scene.flush();
+        assert!(
+            frame
+                .damage
+                .iter()
+                .any(|d| near(*d, Rect::new(110., 90., 20., 40.)))
+        );
+        assert!(
+            frame
+                .damage
+                .iter()
+                .any(|d| near(*d, Rect::new(210., 90., 20., 40.)))
+        );
+    }
+    #[test]
+    fn descendants_damage_where_a_transformed_ancestor_shows_them() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let parent = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            fixed(40., 40.),
+        );
+        scene.set_transform(parent, Transform { x: 100., y: 100. });
+        let child = scene.append(parent, NodeKind::Rect(Color(9, 9, 9, 255)), fixed(10., 10.));
+        scene.set_local_transform(
+            parent,
+            LocalTransform {
+                scale: (2., 2.),
+                origin: (0., 0.),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        scene.flush();
+        let revision = scene.layer_revision(parent);
+        scene.set_kind(child, NodeKind::Rect(Color(1, 1, 1, 255)));
+        let frame = scene.flush();
+        // The 10 × 10 child at the parent's origin shows twice the size.
+        assert!(near(union(&frame.damage), Rect::new(100., 100., 20., 20.)));
+        assert_ne!(scene.layer_revision(parent), revision);
+        assert!(near(
+            scene.transformed_bounds(child),
+            Rect::new(100., 100., 20., 20.)
+        ));
+        assert!(near(
+            scene.visible_bounds(child).unwrap(),
+            Rect::new(100., 100., 20., 20.)
+        ));
+    }
+    #[test]
+    fn rotated_ink_culls_by_where_it_paints() {
+        let (mut scene, id) = placed(40., 20.);
+        scene.set_local_transform(id, rotated(FRAC_PI_2));
+        scene.flush();
+        let visits = |scene: &Scene, damage: Rect| {
+            scene
+                .layer_items_within(None, Some(&[damage]))
+                .iter()
+                .any(|item| item.id == id && item.isolated && item.matrix.is_some())
+        };
+        // Above the laid-out box, inside the rotated one.
+        assert!(visits(&scene, Rect::new(118., 92., 4., 4.)));
+        // Inside the laid-out box's corner, outside the rotated one.
+        assert!(!visits(&scene, Rect::new(101., 101., 4., 4.)));
+        // Its own items are drawn in its unrotated space.
+        let items = scene.layer_items(Some(id));
+        assert_eq!(items[0].bounds, Rect::new(100., 100., 40., 20.));
+        assert_eq!(items[0].matrix, None);
+    }
+    #[test]
+    fn hit_tests_map_through_rotation_scale_and_skew() {
+        let (mut scene, id) = placed(40., 40.);
+        let root = scene.root();
+        scene.set_local_transform(id, rotated(FRAC_PI_4));
+        scene.flush();
+        // The diamond's top point reaches 28 px above the centre (120, 120).
+        assert_eq!(scene.hit_test(120., 94.), Some(id));
+        assert_eq!(scene.hit_test(102., 102.), Some(root));
+        scene.set_local_transform(
+            id,
+            LocalTransform {
+                scale: (1.5, 1.5),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        scene.flush();
+        assert_eq!(scene.hit_test(92., 92.), Some(id));
+        assert_eq!(scene.hit_test(88., 88.), Some(root));
+        scene.set_local_transform(
+            id,
+            LocalTransform {
+                scale: (0., 1.),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        scene.flush();
+        assert_eq!(scene.hit_test(120., 120.), Some(root));
+        // Skewed along x by 45°: rows shift right with their distance below
+        // the centre.
+        scene.set_local_transform(
+            id,
+            LocalTransform {
+                skew: (FRAC_PI_4, 0.),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        scene.flush();
+        assert_eq!(scene.hit_test(150., 135.), Some(id));
+        assert_eq!(scene.hit_test(105., 135.), Some(root));
+    }
+    #[test]
+    fn descendants_and_clips_hit_where_drawn() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let root = scene.root();
+        let card = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(40., 40.)
+            },
+        );
+        scene.set_transform(card, Transform { x: 100., y: 100. });
+        // Overflows the card to the right; the card clips it.
+        let wide = scene.append(card, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(80., 10.));
+        scene.set_local_transform(card, rotated(FRAC_PI_2));
+        scene.flush();
+        // Rotated about (120, 120): the child's row runs down the card's
+        // right side (x 130..140), inside the clip from y 100 to 140.
+        assert_eq!(scene.hit_test(135., 105.), Some(wide));
+        assert_eq!(scene.hit_test(135., 135.), Some(wide));
+        // Where it would be unrotated: the card, not the child.
+        assert_eq!(scene.hit_test(105., 105.), Some(card));
+        // Below the card the child is clipped away, rotated or not.
+        assert_eq!(scene.hit_test(135., 150.), Some(root));
+        assert_eq!(scene.hit_test_all(135., 105.), vec![wide, card, root]);
+    }
+    #[test]
+    fn nested_transforms_compose() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let panel = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            fixed(100., 100.),
+        );
+        let card = scene.append(panel, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(20., 20.));
+        scene.set_transform(card, Transform { x: 40., y: 40. });
+        scene.set_local_transform(
+            panel,
+            LocalTransform {
+                scale: (2., 2.),
+                origin: (0., 0.),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        scene.set_local_transform(card, rotated(FRAC_PI_4));
+        scene.flush();
+        // The card's centre (50, 50) lands at (100, 100); its diamond spans
+        // 2 × 14.1 px either side there.
+        assert!(near(
+            scene.transformed_bounds(card),
+            Rect::new(71.7, 71.7, 56.6, 56.6)
+        ));
+        assert_eq!(scene.hit_test(100., 74.), Some(card));
+        assert_eq!(scene.hit_test(82., 82.), Some(panel));
+        let items = scene.layer_items(Some(panel));
+        let inner = items.iter().find(|item| item.id == card).unwrap();
+        assert!(inner.isolated && inner.matrix.is_some());
+    }
+    #[test]
+    fn removing_transformed_nodes_restores_counts() {
+        let (mut scene, id) = placed(10., 10.);
+        scene.set_local_transform(id, rotated(1.));
+        scene.flush();
+        assert_eq!((scene.transformed, scene.promoted_count), (1, 1));
+        scene.set_local_transform(id, LocalTransform::IDENTITY);
+        assert_eq!((scene.transformed, scene.promoted_count), (0, 1));
+        scene.remove(id);
+        assert_eq!((scene.transformed, scene.promoted_count), (0, 0));
+    }
+    #[test]
+    fn content_blur_promotes_and_animates_by_compositing_alone() {
+        let (mut scene, id) = placed(40., 20.);
+        assert!(!scene.is_layer(id));
+        scene.set_filter_blur(id, 2.);
+        let frame = scene.flush();
+        assert!(scene.is_layer(id));
+        assert_eq!((frame.layout_nodes, frame.paint_nodes), (0, 0));
+        assert_eq!(frame.composite_nodes, 1);
+        // The box (100, 100, 40, 20) spread three sigma all round.
+        assert!(near(union(&frame.damage), Rect::new(94., 94., 52., 32.)));
+        // Its own items paint unblurred inside the layer; the window sees
+        // one layer item.
+        let items = scene.layer_items(None);
+        let item = items.iter().find(|item| item.id == id).unwrap();
+        assert!(item.isolated && item.matrix.is_none());
+        assert_eq!(item.effects.filter_blur, 2.);
+        assert_eq!(scene.layer_items(Some(id))[0].effects, Effects::default());
+        // Animating the sigma neither lays out nor repaints the content.
+        let (revision, content, layout) = (
+            scene.layer_revision(id),
+            scene.content_revision(),
+            scene.layout_revision(),
+        );
+        scene.set_effects(
+            id,
+            Effects {
+                opacity: 0.5,
+                filter_blur: 4.,
+                ..Effects::default()
+            },
+        );
+        let frame = scene.flush();
+        assert_eq!((frame.layout_nodes, frame.paint_nodes), (0, 0));
+        assert!(near(union(&frame.damage), Rect::new(88., 88., 64., 44.)));
+        assert_eq!(scene.layer_revision(id), revision);
+        assert_eq!(scene.content_revision(), content);
+        assert_eq!(scene.layout_revision(), layout);
+        // Culling sees the spread: damage beside the box reaches the layer.
+        let visits = |scene: &Scene, damage: Rect| {
+            scene
+                .layer_items_within(None, Some(&[damage]))
+                .iter()
+                .any(|item| item.id == id)
+        };
+        assert!(visits(&scene, Rect::new(90., 90., 4., 4.)));
+        assert!(!visits(&scene, Rect::new(80., 80., 4., 4.)));
+        // Back at 0, it paints as any node again, damaging the old spread.
+        scene.set_filter_blur(id, 0.);
+        let frame = scene.flush();
+        assert!(!scene.is_layer(id));
+        assert!(near(union(&frame.damage), Rect::new(88., 88., 64., 44.)));
+        assert!(
+            scene
+                .layer_items(None)
+                .iter()
+                .any(|item| item.id == id && !item.isolated)
+        );
+        assert_eq!((scene.filtered, scene.promoted_count), (0, 1));
+        scene.set_filter_blur(id, 1.);
+        scene.remove(id);
+        assert_eq!((scene.filtered, scene.promoted_count), (0, 0));
+    }
+    #[test]
+    fn descendants_of_a_blurred_node_damage_its_spread() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let row = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(40., 40.)
+            },
+        );
+        scene.set_transform(row, Transform { x: 100., y: 100. });
+        let word = scene.append(row, NodeKind::Rect(Color(9, 9, 9, 255)), fixed(10., 10.));
+        scene.set_filter_blur(row, 2.);
+        scene.flush();
+        let revision = scene.layer_revision(row);
+        scene.set_kind(word, NodeKind::Rect(Color(1, 1, 1, 255)));
+        let frame = scene.flush();
+        // The 10 × 10 word at the row's origin, blurred out 6 px past it
+        // (the row clips before its blur, not after).
+        assert!(near(union(&frame.damage), Rect::new(94., 94., 22., 22.)));
+        assert_ne!(scene.layer_revision(row), revision);
+        // Scaled up twice, the spread doubles with the content.
+        scene.set_local_transform(
+            row,
+            LocalTransform {
+                scale: (2., 2.),
+                origin: (0., 0.),
+                ..LocalTransform::IDENTITY
+            },
+        );
+        scene.flush();
+        scene.set_kind(word, NodeKind::Rect(Color(2, 2, 2, 255)));
+        let frame = scene.flush();
+        assert!(near(union(&frame.damage), Rect::new(88., 88., 44., 44.)));
+        // A blurred child spreads its parent layer's bounds.
+        let mut scene = Scene::new(400., 300.);
+        let parent = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            fixed(40., 40.),
+        );
+        let child = scene.append(parent, NodeKind::Rect(Color(9, 9, 9, 255)), fixed(10., 10.));
+        scene.set_isolated(parent, true);
+        scene.set_filter_blur(child, 5.);
+        scene.flush();
+        assert_eq!(scene.layer_bounds(parent), Rect::new(-15., -15., 55., 55.));
+    }
+    #[test]
+    fn clip_insets_clip_items_follow_size_and_composite_alone() {
+        use crate::layout::Length::{Percent, Px};
+        let (mut scene, id) = placed(40., 20.);
+        let child = scene.append(id, NodeKind::Rect(Color(9, 9, 9, 255)), fixed(40., 20.));
+        scene.flush();
+        let clip_of = |scene: &Scene, node: NodeId| {
+            scene
+                .layer_items(None)
+                .into_iter()
+                .find(|item| item.id == node)
+                .and_then(|item| item.clip)
+        };
+        // Closed to the top half: top 0, bottom 50% of its 20 px height.
+        let half = ClipInset {
+            top: Px(0.),
+            right: Px(-5.),
+            bottom: Percent(0.5),
+            left: Px(2.),
+        };
+        let layout = scene.layout_revision();
+        scene.set_clip_inset(id, Some(half));
+        let frame = scene.flush();
+        assert_eq!((frame.layout_nodes, frame.paint_nodes), (0, 0));
+        assert_eq!(scene.layout_revision(), layout);
+        assert!(near(union(&frame.damage), Rect::new(100., 100., 40., 20.)));
+        let inset = Rect::new(102., 100., 43., 10.);
+        assert_eq!(clip_of(&scene, id), Some(inset));
+        assert_eq!(clip_of(&scene, child), Some(inset));
+        // Hits only inside it.
+        assert_eq!(scene.hit_test(110., 105.), Some(id));
+        assert_eq!(scene.hit_test(110., 115.), Some(scene.root()));
+        // The percentage follows the box as it grows.
+        let mut style = scene.style(id);
+        style.height = Some(40.);
+        scene.set_style(id, style);
+        scene.flush();
+        assert_eq!(clip_of(&scene, id), Some(Rect::new(102., 100., 43., 20.)));
+        // A blurred layer's composite is clipped; its pixels keep.
+        scene.set_filter_blur(id, 2.);
+        scene.flush();
+        let revision = scene.layer_revision(id);
+        scene.set_clip_inset(id, Some(ClipInset::px(1., 1., 1., 1.)));
+        scene.flush();
+        assert_eq!(scene.layer_revision(id), revision);
+        assert_eq!(clip_of(&scene, id), Some(Rect::new(101., 101., 38., 38.)));
+        scene.set_clip_inset(id, None);
+        assert!(!scene.flush().damage.is_empty());
+        assert_eq!(scene.clip_inset(id), None);
+    }
+    #[test]
+    fn masks_promote_and_move_by_compositing_alone() {
+        let image = Arc::new(crate::image::ImageData::new(2, 1, vec![255; 8]).unwrap());
+        let (mut scene, id) = placed(40., 20.);
+        let content = scene.content_revision();
+        scene.set_mask(
+            id,
+            Some(ImageMask {
+                image: image.clone(),
+                offset: (0., 0.),
+                size: (20., 20.),
+            }),
+        );
+        let frame = scene.flush();
+        assert!(scene.is_layer(id));
+        assert_eq!((frame.layout_nodes, frame.paint_nodes), (0, 0));
+        // A mask only hides: damage stays within the box.
+        assert!(near(union(&frame.damage), Rect::new(100., 100., 40., 20.)));
+        assert_ne!(scene.content_revision(), content);
+        let items = scene.layer_items(None);
+        assert!(items.iter().any(|item| item.id == id && item.isolated));
+        let (revision, content) = (scene.layer_revision(id), scene.content_revision());
+        scene.set_mask_offset(id, (12.5, f32::NAN));
+        let frame = scene.flush();
+        assert_eq!((frame.layout_nodes, frame.paint_nodes), (0, 0));
+        assert_eq!(frame.composite_nodes, 1);
+        assert!(near(union(&frame.damage), Rect::new(100., 100., 40., 20.)));
+        assert_eq!(scene.mask(id).unwrap().offset, (12.5, 0.));
+        assert_eq!(scene.layer_revision(id), revision);
+        assert_eq!(scene.content_revision(), content);
+        // The same offset again changes nothing.
+        scene.set_mask_offset(id, (12.5, 0.));
+        assert!(scene.flush().is_idle());
+        scene.set_mask(id, None);
+        scene.flush();
+        assert!(!scene.is_layer(id));
+        // Without a mask, moving one does nothing.
+        scene.set_mask_offset(id, (1., 1.));
+        assert!(scene.flush().is_idle());
     }
 }

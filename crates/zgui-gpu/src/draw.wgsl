@@ -6,6 +6,31 @@ struct Out { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>, @
 // Group 1: one immutable buffer per viewport size, so layers never rewrite it.
 @group(1) @binding(0) var<uniform> viewport:vec4<f32>;
 @group(0) @binding(1) var atlas:texture_2d<f32>;
+// A clip region quads share (`mask.x`: its index plus one, 0 for none): up
+// to two rounded boxes (x, y, width, height; a negative width for none)
+// with their radii (top-left, top-right, bottom-right, bottom-left), cut
+// with antialiased corners; and a box (x0, y0, x1, y1) whose content fades
+// out over bands at its edges (top, right, bottom, left), quadratically, as
+// Zeron fades transcript edges. Logical units of the target, where the
+// pixel is on screen (a transformed quad's `point` is its own).
+struct Region { round0:vec4<f32>, radii0:vec4<f32>, round1:vec4<f32>, radii1:vec4<f32>, fade_box:vec4<f32>, fade:vec4<f32> }
+@group(1) @binding(1) var<storage, read> regions:array<Region>;
+fn rounded(b:vec4<f32>, r:vec4<f32>, p:vec2<f32>)->f32 {
+ if b.z<0. {return 1.;}
+ let half=b.zw*.5; let q=p-b.xy-half;
+ let radius=select(select(r.w,r.z,q.x>0.),select(r.x,r.y,q.x>0.),q.y<0.);
+ let d=abs(q)-half+vec2(radius); let sdf=length(max(d,vec2(0.)))+min(max(d.x,d.y),0.)-radius;
+ return clamp(.5-sdf*viewport.z,0.,1.);
+}
+fn region(index:f32, position:vec2<f32>)->f32 {
+ let g=regions[u32(index)-1u]; let p=position/viewport.z;
+ var k=rounded(g.round0,g.radii0,p)*rounded(g.round1,g.radii1,p);
+ if g.fade.x>0. {let t=clamp((p.y-g.fade_box.y)/g.fade.x,0.,1.); k*=t*t;}
+ if g.fade.y>0. {let t=clamp((g.fade_box.z-p.x)/g.fade.y,0.,1.); k*=t*t;}
+ if g.fade.z>0. {let t=clamp((g.fade_box.w-p.y)/g.fade.z,0.,1.); k*=t*t;}
+ if g.fade.w>0. {let t=clamp((p.x-g.fade_box.x)/g.fade.w,0.,1.); k*=t*t;}
+ return k;
+}
 @group(0) @binding(2) var tex_sampler:sampler;
 @vertex fn vs(v:Vertex,@builtin(vertex_index) i:u32)->Out {
  // A quad is a four-vertex strip, (0,0) (1,0) (0,1) (1,1): its two
@@ -34,7 +59,22 @@ fn shade(input:Out)->vec4<f32> {
    let radius=clamp(corner,0.,min(v.fade.z,v.fade.w)*0.5);
    let q=abs(v.point-v.fade.xy-v.fade.zw*0.5)-(v.fade.zw*0.5-vec2(radius));
    let distance=length(max(q,vec2(0.)))+min(max(q.x,q.y),0.)-radius;
-   if v.shape.z>0. {color.a*=exp(-0.5*pow(max(distance,0.)/v.shape.z,2.));}
+   if v.shape.y<0. {
+     // A ring (a border alone, `ring_quad`): side widths (top, right,
+     // bottom, left) packed two to a lane in 16ths of a pixel; inside, the
+     // box inset by them, its corners as much rounder as they are thinner.
+     let a=u32(v.shape.x); let b=u32(v.shape.z);
+     let sides=vec4(f32(a&4095u),f32(a>>12u),f32(b&4095u),f32(b>>12u))/16.;
+     let right=v.point.x>v.fade.x+v.fade.z*0.5; let bottom=v.point.y>v.fade.y+v.fade.w*0.5;
+     let across=select(sides.w,sides.y,right); let down=select(sides.x,sides.z,bottom);
+     let box=vec4(v.fade.xy+sides.wx,max(v.fade.zw-sides.wx-sides.yz,vec2(0.)));
+     let inner_radius=clamp(radius-(across+down)*0.5,0.,min(box.z,box.w)*0.5);
+     let iq=abs(v.point-box.xy-box.zw*0.5)-(box.zw*0.5-vec2(inner_radius));
+     let inside=length(max(iq,vec2(0.)))+min(max(iq.x,iq.y),0.)-inner_radius;
+     let aa=max(fwidth(distance),0.5);
+     let hollow=select(0.,clamp(0.5-inside/aa,0.,1.),box.z>0.&&box.w>0.);
+     color.a*=max(clamp(0.5-distance/aa,0.,1.)-hollow,0.);
+   } else if v.shape.z>0. {color.a*=exp(-0.5*pow(max(distance,0.)/v.shape.z,2.));}
    else {let aa=max(fwidth(distance),0.5);let outer=clamp(0.5-distance/aa,0.,1.);let inner=clamp(0.5-(distance+v.shape.y)/aa,0.,1.);let alpha=color.a*inner+v.border.a*(outer-inner);let rgb=select(vec3(0.),(color.rgb*color.a*inner+v.border.rgb*v.border.a*(outer-inner))/max(alpha,0.00001),alpha>0.);color=vec4(rgb,alpha);}
  }
 
@@ -48,19 +88,15 @@ fn shade(input:Out)->vec4<f32> {
    else {color=vec4(color.rgb*tex.rgb,color.a*tex.a);}
  }
  if v.options.x>0. {let distance=min(v.point-v.fade.xy,v.fade.xy+v.fade.zw-v.point); let f=clamp(min(distance.x,distance.y)/v.options.x,0.,1.); color.a*=f; scale*=f;}
- // A `fade_edges` ancestor: a quadratic ramp over each band, as Zeron fades
- // transcript edges, where the pixel is on screen (a transformed quad's
- // `point` is its own, untransformed).
- let y=v.position.y/viewport.z;
- if v.mask.z>0. {let t=clamp((y-v.mask.x)/v.mask.z,0.,1.); color.a*=t*t; scale*=t*t;}
- if v.mask.w>0. {let b=clamp((v.mask.y-y)/v.mask.w,0.,1.); color.a*=b*b; scale*=b*b;}
+ // Rounded clips and `fade_edges` around it (see `Region`).
+ if v.mask.x>.5 {let k=region(v.mask.x,v.position.xy); color.a*=k; scale*=k;}
  return select(vec4(color.rgb*color.a,color.a),vec4(rgb*scale,color.a),premultiplied);
 }
 @fragment fn fs(v:Out)->@location(0) vec4<f32> { return shade(v); }
 // Single-pass presentation: the same colour to the retained target and the drawable.
 struct Both { @location(0) retained:vec4<f32>, @location(1) drawable:vec4<f32> }
 @fragment fn fs_both(v:Out)->Both { let c=shade(v); return Both(c,c); }
-// Plain quads (no corners, borders, shadows, fades, masks or transforms):
+// Plain quads (no corners, borders, shadows, fades, regions or transforms):
 // most text and backgrounds. A software rasterizer runs a fragment shader on
 // the CPU for every pixel, and every branch of `shade` with it, so these use
 // this one where drawing is split (see `push_draw`). Same results as `shade`.

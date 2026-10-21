@@ -36,6 +36,7 @@ fn reactive_nonfinite_effects_normalize_before_equality_and_restore_sparse_base(
             opacity,
             blur_radius: 0.,
             edge_fade: 0.,
+            filter_blur: 0.,
         };
         assert_eq!(ui.scene.borrow().effects(view.node()), expected);
         ui.scene.borrow_mut().flush();
@@ -61,7 +62,8 @@ fn reactive_nonfinite_effects_normalize_before_equality_and_restore_sparse_base(
             Effects {
                 opacity: 0.4,
                 blur_radius: 6.,
-                edge_fade: 8.
+                edge_fade: 8.,
+                filter_blur: 0.,
             }
         );
         let frame = ui.scene.borrow_mut().flush();
