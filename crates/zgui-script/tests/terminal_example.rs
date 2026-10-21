@@ -402,6 +402,45 @@ fn resizing_the_window_moves_the_panes_without_running_script() {
 }
 
 #[test]
+fn agents_in_tabs_not_shown_are_listed_and_a_click_opens_their_tab() {
+    // Two tabs, the second shown; an agent works in the first, which no
+    // window shows: the session server reports it all the same.
+    let layout = Value::from_json(
+        r#"{"version":1,"active":"t3","next_id":7,"kinds":[],"pages":[],"zoom":[],"ratios":{},
+            "focus":{"t1":"p6","t3":"p4"},"dirs":{},
+            "tabs":[{"id":"t1","root":{"id":"s5","kind":"split","axis":"row",
+                        "a":{"id":"p2","kind":"pane"},"b":{"id":"p6","kind":"pane"}}},
+                    {"id":"t3","root":{"id":"p4","kind":"pane"}}]}"#,
+    )
+    .unwrap();
+    let mut app = App::with_saved(layout);
+    app.run("toggle_sidebar");
+    assert_eq!(app.panes().len(), 1, "the second tab, one pane");
+    let agents = app.h.host.shared("agents", Value::Nil);
+    agents.set(
+        Value::from_json(
+            r#"{"sessions":{
+                "p2":{"process":"claude","idle":false,"title":"◐ Fix the build",
+                      "pwd":"file:///Users/someone/zgui",
+                      "status":{"state":"working","since_ms":1000,"reported":false}},
+                "p4":{"process":"zsh","idle":true,"title":"","pwd":"file:///Users/someone",
+                      "status":{"state":"idle","since_ms":1000,"reported":false}}}}"#,
+        )
+        .unwrap(),
+    );
+    app.settle();
+    let texts = app.texts();
+    assert!(texts.iter().any(|t| t == "Fix the build"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Working · zgui"), "{texts:?}");
+    assert!(app.h.find("agent:p4").is_none(), "a shell is no agent");
+    // Its row opens its tab, with its pane focused.
+    app.h.click("agent:p2");
+    app.settle();
+    assert_eq!(app.panes().len(), 2, "the first tab, two panes");
+    assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
 fn the_agents_sidebar_opens_beside_the_panes() {
     let mut app = App::new();
     let wide = app.panes();

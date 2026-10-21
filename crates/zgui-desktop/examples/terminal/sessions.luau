@@ -2,7 +2,6 @@
 -- host's session server) and web pages. The host keeps both across reloads;
 -- this run asks for them by pane id.
 local state = require("./state")
-local attention = require("./attention")
 local names = require("@lib/names")
 
 local M = {}
@@ -46,15 +45,6 @@ function M.session(pane: string): Term?
 		-- The process exited (no question), or a close binding asked.
 		on_close = function(alive)
 			M.close_pane(pane, not alive)
-		end,
-		-- An agent asking for the user, or saying it is done.
-		on_notify = function(title: string, body: string)
-			attention.note(pane, if body ~= "" then body else title)
-		end,
-		on_bell = function()
-			if not ui.term(pane).focused then
-				attention.note(pane, "bell")
-			end
 		end,
 	})
 end

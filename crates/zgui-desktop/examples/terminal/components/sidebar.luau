@@ -183,6 +183,7 @@ local function row(agent: () -> agents.Agent): Node
 		return state.active:get() == a.tab and (state.focus:get())[a.tab] == a.pane
 	end
 	return ui.button {
+		id = "agent:" .. agent().pane,
 		px = 10,
 		py = 7,
 		gap = 10,
@@ -325,11 +326,18 @@ function M.Sidebar(): Node
 								return #agents.list:get() == 0
 							end,
 							ui.text {
-								"No agents running",
+								function()
+									-- A session server from before an update keeps the
+									-- shells but cannot report them.
+									return if agents.unsupported:get()
+										then "Restart zterm's sessions to list agents"
+										else "No agents running"
+								end,
 								px = 8,
 								pt = 6,
 								text_size = 12.5,
 								color = theme.tertiary,
+								wrap = true,
 							}
 						),
 						ui.each(agents.list, function(agent: agents.Agent)

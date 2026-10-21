@@ -38,6 +38,10 @@ const RESIZE: u8 = 3;
 const INFO: u8 = 4;
 const KILL: u8 = 5;
 const KEEP: u8 = 6;
+/// A window looked at a session (focused its pane): what it finished is seen.
+const SEEN: u8 = 7;
+/// Stay connected and hear every session's activity as it changes.
+const WATCH: u8 = 8;
 const OUTPUT: u8 = 10;
 const EXIT: u8 = 11;
 const REPLY: u8 = 12;
@@ -132,6 +136,38 @@ pub fn kill(id: &str) {
 /// End every session but `ids` (the panes a restored layout has).
 pub fn keep(ids: &[String]) {
     request(KEEP, serde_json::json!({ "ids": ids }));
+}
+/// Session `id`'s pane took focus: what it finished and said is seen.
+pub fn seen(id: &str) {
+    request(SEEN, serde_json::json!({ "id": id }));
+}
+/// Hear every session's activity (see `snapshot`) as it changes, until
+/// `heard` returns false; reconnects if the server goes and comes back. A
+/// server older than `WATCH` (still running from before an update, keeping
+/// its shells) answers nothing: then `{"unsupported":true}`, once.
+/// Blocks: run it on a thread of its own.
+pub fn watch(mut heard: impl FnMut(String) -> bool) {
+    let mut told = false;
+    loop {
+        if let Ok(mut stream) = UnixStream::connect(socket_path())
+            && write_frame(&mut stream, WATCH, b"{}").is_ok()
+        {
+            let mut answered = false;
+            while let Ok((REPLY, payload)) = read_frame(&mut stream) {
+                answered = true;
+                if !heard(String::from_utf8_lossy(&payload).into_owned()) {
+                    return;
+                }
+            }
+            if !answered && !told {
+                told = true;
+                if !heard(r#"{"unsupported":true}"#.into()) {
+                    return;
+                }
+            }
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
 }
 
 /// The command a pane's terminal runs to attach to session `id`, starting
@@ -248,6 +284,8 @@ mod tests {
             screen: vt100::Parser::new_with_callbacks(30, 100, SCROLLBACK, Recorder::default()),
             client: None,
             closed: false,
+            activity: crate::activity::Activity::new(0),
+            front: (0, String::new()),
         };
         live.with_screen(|screen| screen.process(b"\x1b]2;build\x07hello"));
         // vt100 panics on some wrapping after a resize; stand in for it.
@@ -411,15 +449,54 @@ struct Recorder {
     now_ms: u64,
     /// Replies owed to the program (a status feature query).
     reply: Vec<u8>,
+    /// What this output said to get attention (notifications, the bell) and
+    /// its progress reports, for the session's activity (`Live::observe`).
+    heard: Vec<Heard>,
+    /// The title, directory or a status report changed with this output.
+    changed: bool,
+}
+enum Heard {
+    Note(String),
+    Progress(u8),
 }
 impl vt100::Callbacks for Recorder {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.changed |= self.title.as_deref() != Some(title);
         self.title = Some(title.to_vec());
+    }
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.heard.push(Heard::Note("bell".into()));
     }
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
         match params.first().copied() {
-            Some(b"7") => self.pwd = Some(params[1..].join(&b';')),
+            Some(b"7") => {
+                let pwd = params[1..].join(&b';');
+                self.changed |= self.pwd.as_deref() != Some(&pwd[..]);
+                self.pwd = Some(pwd);
+            }
+            // A progress report (`9;4;state;value`), else a notification.
+            Some(b"9") if params.get(1) == Some(&&b"4"[..]) => {
+                let state = params.get(2).and_then(|s| std::str::from_utf8(s).ok());
+                self.heard.push(Heard::Progress(
+                    state.and_then(|s| s.parse().ok()).unwrap_or(0),
+                ));
+            }
+            Some(b"9") if params.len() > 1 => {
+                let text = String::from_utf8_lossy(&params[1..].join(&b';')).into_owned();
+                self.heard.push(Heard::Note(text));
+            }
+            // `777;notify;title;body`: the body, else the title.
+            Some(b"777") if params.get(1) == Some(&&b"notify"[..]) => {
+                let part = |i: usize| {
+                    params
+                        .get(i)
+                        .map(|p| String::from_utf8_lossy(p).into_owned())
+                };
+                let text = part(3).filter(|b| !b.is_empty()).or_else(|| part(2));
+                self.heard.extend(text.map(Heard::Note));
+            }
             Some(b"7501") => {
+                self.changed = true;
                 let payload = params[1..].join(&b';');
                 if self.status.report(&payload, self.group, self.now_ms) {
                     self.reply
@@ -428,6 +505,7 @@ impl vt100::Callbacks for Recorder {
             }
             // A shell prompt begins (OSC 133 A): busy reports end.
             Some(b"133") if params.get(1).is_some_and(|p| p.starts_with(b"A")) => {
+                self.changed = true;
                 self.status.prompt(self.now_ms)
             }
             _ => {}
@@ -454,6 +532,10 @@ struct Live {
     /// `master` is closed: nothing may write to it (its number may be
     /// another file's by now).
     closed: bool,
+    /// What its program is doing (the agents sidebar's source).
+    activity: crate::activity::Activity,
+    /// The foreground process group and its program's name.
+    front: (libc::pid_t, String),
 }
 impl Session {
     /// Its live state, even after a thread panicked holding it: a session
@@ -473,6 +555,35 @@ impl Session {
     }
 }
 impl Live {
+    /// After output: take what it said into the session's activity, and see
+    /// whether the program in front changed. Whether anything a watcher
+    /// shows changed.
+    fn observe(&mut self, session: &Session, now_ms: u64) -> bool {
+        let recorder = self.screen.callbacks_mut();
+        let heard = std::mem::take(&mut recorder.heard);
+        let mut changed = std::mem::take(&mut recorder.changed);
+        let title = recorder.title.clone();
+        let group = recorder.group;
+        for heard in heard {
+            changed |= match heard {
+                Heard::Note(text) => self.activity.note(&text, now_ms),
+                Heard::Progress(state) => self.activity.progress(state),
+            };
+        }
+        changed |= self.activity.observe(title.as_deref(), now_ms);
+        changed |= self.front_changed(session, group);
+        changed
+    }
+    /// Note the foreground group `group` (and its program's name) if it is
+    /// new.
+    fn front_changed(&mut self, session: &Session, group: libc::pid_t) -> bool {
+        if group == self.front.0 && !self.front.1.is_empty() {
+            return false;
+        }
+        let pid = if group > 0 { group } else { session.child };
+        self.front = (group, process_name(pid));
+        true
+    }
     /// Work on the screen model. `vt100` can panic on some sequences after a
     /// resize (a wide character wrapping): then the model starts over, blank
     /// at its size with its records kept, and the session goes on (the
@@ -536,11 +647,135 @@ pub fn daemon() -> ! {
             }
         });
     }
+    {
+        let server = server.clone();
+        thread::spawn(move || broadcast(server));
+    }
     for stream in listener.incoming().flatten() {
         let server = server.clone();
         thread::spawn(move || serve(stream, server));
     }
     std::process::exit(0)
+}
+
+/// The windows watching every session's activity (`WATCH`), and whether it
+/// changed since they last heard.
+#[derive(Default)]
+struct Watchers {
+    changed: Mutex<bool>,
+    wake: std::sync::Condvar,
+    streams: Mutex<Vec<UnixStream>>,
+}
+fn watchers() -> &'static Watchers {
+    static WATCHERS: std::sync::OnceLock<Watchers> = std::sync::OnceLock::new();
+    WATCHERS.get_or_init(Watchers::default)
+}
+impl Watchers {
+    /// Something a watcher shows changed: tell them (soon, coalesced).
+    fn changed(&self) {
+        *self
+            .changed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.wake.notify_one();
+    }
+}
+/// Tell watchers what changed: a snapshot of every session, at most every
+/// `COALESCE`, and only when it differs from the last they heard. Idle
+/// sessions send nothing.
+fn broadcast(server: Shared) {
+    const COALESCE: Duration = Duration::from_millis(80);
+    let watchers = watchers();
+    let mut last = String::new();
+    loop {
+        {
+            let mut changed = watchers
+                .changed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*changed {
+                changed = watchers
+                    .wake
+                    .wait(changed)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+        thread::sleep(COALESCE);
+        *watchers
+            .changed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        let mut streams = watchers
+            .streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if streams.is_empty() {
+            continue;
+        }
+        let snapshot = snapshot(&server);
+        if snapshot == last {
+            continue;
+        }
+        streams.retain_mut(|stream| write_frame(stream, REPLY, snapshot.as_bytes()).is_ok());
+        last = snapshot;
+    }
+}
+/// Every session's activity as JSON: `{ sessions = { [id] = { process,
+/// idle, title, pwd, status = { state, kind, since_ms, msg, app, reported }
+/// } } }`.
+fn snapshot(server: &Shared) -> String {
+    let sessions: Vec<(String, Arc<Session>)> = server
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sessions
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
+        .collect();
+    let now = unix_ms();
+    let mut out = serde_json::Map::new();
+    for (id, session) in sessions {
+        let mut live = session.live();
+        if live.closed {
+            continue;
+        }
+        let group = unsafe { libc::tcgetpgrp(session.master) };
+        live.front_changed(&session, group);
+        let recorder = live.screen.callbacks_mut();
+        recorder.status.foreground(group, now);
+        let reported = recorder.status.status();
+        let text = |bytes: &Option<Vec<u8>>| {
+            bytes
+                .as_deref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default()
+        };
+        let (title, pwd) = (text(&recorder.title), text(&recorder.pwd));
+        let status = live.activity.status(reported.as_ref());
+        let msg = reported
+            .as_ref()
+            .and_then(|r| r.msg.clone())
+            .or_else(|| live.activity.note_text().map(str::to_owned));
+        let pid = if group > 0 { group } else { session.child };
+        out.insert(
+            id,
+            serde_json::json!({
+                "process": live.front.1,
+                "idle": pid == session.child,
+                "title": title,
+                "pwd": pwd,
+                "status": {
+                    "state": status.state,
+                    "kind": status.kind,
+                    "since_ms": status.since_ms,
+                    "msg": msg,
+                    "app": reported.as_ref().and_then(|r| r.app.clone()),
+                    // The program reported it (OSC 7501), not worked out.
+                    "reported": reported.is_some(),
+                },
+            }),
+        );
+    }
+    serde_json::json!({ "sessions": out }).to_string()
 }
 
 fn session(server: &Shared, id: &str) -> Option<Arc<Session>> {
@@ -608,6 +843,22 @@ fn serve(mut stream: UnixStream, server: Shared) {
             end(&server, |session_id| !keep.iter().any(|k| k == session_id));
             let _ = write_frame(&mut stream, REPLY, b"{}");
         }
+        SEEN => {
+            if let Some(session) = session(&server, &id)
+                && session.live().activity.seen(unix_ms())
+            {
+                watchers().changed();
+            }
+            let _ = write_frame(&mut stream, REPLY, b"{}");
+        }
+        // What is true now, then every change.
+        WATCH if write_frame(&mut stream, REPLY, snapshot(&server).as_bytes()).is_ok() => {
+            watchers()
+                .streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(stream);
+        }
         _ => {}
     }
 }
@@ -652,6 +903,7 @@ fn attach_client(mut stream: UnixStream, server: Shared, id: &str, hello: &serde
                 thread::spawn(move || read_session(reading));
                 let (server, id, waiting) = (server.clone(), id.to_owned(), session.clone());
                 thread::spawn(move || wait_session(server, id, waiting));
+                watchers().changed();
                 session
             }
         }
@@ -770,6 +1022,9 @@ fn read_session(session: Arc<Session>) {
             recorder.now_ms = unix_ms();
         }
         live.with_screen(|screen| screen.process(bytes));
+        if live.observe(&session, unix_ms()) {
+            watchers().changed();
+        }
         let reply = std::mem::take(&mut live.screen.callbacks_mut().reply);
         if !reply.is_empty() {
             write_all(session.master, &reply);
@@ -821,6 +1076,7 @@ fn wait_session(server: Shared, id: String, session: Arc<Session>) {
             guard.empty_since = Some(Instant::now());
         }
     }
+    watchers().changed();
     {
         let mut live = session.live();
         if let Some((_, client)) = &mut live.client {
@@ -922,6 +1178,8 @@ fn spawn(hello: &serde_json::Value, cols: u16, rows: u16) -> Option<Session> {
             screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, Recorder::default()),
             client: None,
             closed: false,
+            activity: crate::activity::Activity::new(unix_ms()),
+            front: (0, String::new()),
         }),
     })
 }

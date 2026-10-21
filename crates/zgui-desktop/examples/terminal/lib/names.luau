@@ -114,20 +114,6 @@ function M.label(process: string): string
 	return LABELS[process] or (process:sub(1, 1):upper() .. process:sub(2))
 end
 
--- What an agent's title says of it: a spinner turns while it works
--- (Claude Code's, which shows ✳ at rest, or Codex's braille). Nil when the
--- title has neither.
-function M.title_working(title: string): boolean?
-	local glyph = trim(title):match("^([\128-\255]+)%s")
-	if glyph and SPINNER[glyph] then
-		return true
-	end
-	if not glyph or not CLAUDE_SPINNER[glyph] then
-		return nil
-	end
-	return glyph ~= "✳"
-end
-
 function M.is_shell(process: string): boolean
 	return process == "" or SHELLS[process] == true
 end
@@ -141,9 +127,14 @@ export type Description = {
 }
 
 function M.describe(term: Term, home: string): Description
-	local process = term.process
-	local title = trim(term.title)
-	local pwd = path_of(term.pwd)
+	return M.describe_parts(term.process, term.title, term.pwd, home)
+end
+
+-- `describe` from what runs, its title and its directory (a session the
+-- session server reports, shown in no window).
+function M.describe_parts(process: string, title: string, pwd: string, home: string): Description
+	title = trim(title)
+	pwd = path_of(pwd)
 	if M.is_shell(process) then
 		local dir = if pwd ~= "" then pwd else directory_in(title)
 		return {

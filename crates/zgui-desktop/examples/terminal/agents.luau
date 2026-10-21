@@ -1,13 +1,12 @@
 -- Coding agents running in panes, and what each is doing: what the sidebar
--- lists. A program that reports its own status (the Program Status Protocol,
--- OSC 7501) is taken at its word. For agents that do not (Claude Code and
--- Codex today), it is worked out from what they do show: a progress report
--- (OSC 9;4), Claude Code's title spinner, and their notifications and bell
--- (attention.luau).
+-- lists. The session server keeps every session's activity from all it
+-- prints (terminal/activity.rs), shown or not: an agent in a tab not open,
+-- or one that finished while the window was closed, is here. The host
+-- publishes it as `agents` as it changes; this matches sessions to panes
+-- and names them.
 local state = require("./state")
 local sessions = require("./sessions")
 local actions = require("./actions")
-local attention = require("./attention")
 local icons = require("./icons")
 local names = require("@lib/names")
 local layout = require("@lib/layout")
@@ -34,14 +33,35 @@ export type Agent = {
 	since: number,
 }
 
+-- A session as the server reports it.
+type Session = {
+	process: string,
+	idle: boolean,
+	title: string,
+	pwd: string,
+	status: {
+		state: Status,
+		kind: string?,
+		since_ms: number,
+		msg: string?,
+		app: string?,
+		-- The program reported it (OSC 7501), not worked out.
+		reported: boolean,
+	},
+}
+-- `unsupported`: the session server predates this (it still runs from
+-- before an update, keeping the shells): it lists nothing until restarted.
+type Reported = { sessions: { [string]: Session }?, unsupported: boolean? }
+local reported = ui.shared("agents", nil :: Reported?)
+
+-- Whether the session server is too old to report agents.
+M.unsupported = ui.computed(function(): boolean
+	local all = reported:get()
+	return all ~= nil and all.unsupported == true
+end)
+
 -- The sidebar's order: what needs the user first, what rests last.
 M.ORDER = { blocked = 1, error = 2, done = 3, working = 4, idle = 5 } :: { [Status]: number }
-
--- Per pane, what the sidebar remembers between changes: whether its agent
--- was working, since when, whether it finished while the user looked away,
--- and when the user last looked (gave the pane focus).
-type Memory = { working: boolean, since: number, done: boolean, seen: number }
-local memory = ui.state("memory", {} :: { [string]: Memory })
 
 -- Every terminal pane, with its tab.
 local function panes(): { { pane: string, tab: string } }
@@ -56,109 +76,41 @@ local function panes(): { { pane: string, tab: string } }
 	return out
 end
 
--- Whether what runs in `t` is an agent the sidebar lists.
-local function is_agent(t: Term): boolean
-	return t.status ~= nil or names.agent(t.process) ~= nil
-end
-
--- Whether the agent shows it is working (without reporting it).
-local function shows_work(t: Term): boolean
-	if t.progress ~= nil and not t.progress_error then
-		return true
-	end
-	return names.title_working(t.title) == true
-end
-
--- Remember transitions as they happen: finishing while the user looks away
--- makes "done" until they look; looking clears that and any notification.
-ui.effect(function()
-	local now = os.time()
-	for _, p in panes() do
-		local t = ui.term(p.pane)
-		if is_agent(t) then
-			local working = shows_work(t)
-			local focused = t.focused
-			local m = (memory:peek())[p.pane]
-			local next: Memory = if m
-				then table.clone(m)
-				else { working = working, since = now, done = false, seen = 0 }
-			if m and m.working ~= working then
-				next.working, next.since = working, now
-				next.done = not working and not focused
-				if working then
-					attention.clear(p.pane)
-				end
-			end
-			if focused then
-				next.seen, next.done = now, false
-				attention.clear(p.pane)
-			end
-			if not m or next.working ~= m.working or next.done ~= m.done or next.seen ~= m.seen then
-				memory:set_key(p.pane, next)
-			end
-		end
-	end
-end)
-
--- A pane's agent's status, and since when.
-local function status_of(t: Term, m: Memory?, note: attention.Note?): (Status, string?, number)
-	local mem = m or { working = false, since = os.time(), done = false, seen = 0 }
-	local reported = t.status
-	if reported then
-		if reported.child_blocked and reported.state ~= "error" then
-			return "blocked", reported.kind, reported.since
-		end
-		-- "done" means unseen: once the user has looked, it rests.
-		if reported.state == "done" and mem.seen >= reported.since then
-			return "idle", nil, reported.since
-		end
-		return reported.state, reported.kind, reported.since
-	end
-	if t.progress_error then
-		return "error", nil, mem.since
-	end
-	if note and note.kind == "permission" then
-		return "blocked", "permission", note.at
-	end
-	if mem.working then
-		return "working", nil, mem.since
-	end
-	if mem.done or note then
-		return "done", nil, if note then note.at else mem.since
-	end
-	return "idle", nil, mem.since
+-- Whether a session runs an agent the sidebar lists: one it knows, or any
+-- program that reports its own status.
+local function is_agent(s: Session): boolean
+	return names.agent(s.process) ~= nil or s.status.reported
 end
 
 -- Every agent, sorted: by status, then the most recent change first.
 M.list = ui.computed(function(): { Agent }
 	local out: { Agent } = {}
-	local remembered = memory:get()
-	local notes = attention.notes:get()
+	local all = reported:get()
+	local by_id = (if all then all.sessions else nil) or {}
 	for _, p in panes() do
-		local t = ui.term(p.pane)
-		if is_agent(t) then
-			local status, kind, since = status_of(t, remembered[p.pane], notes[p.pane])
-			local desc = names.describe(t, state.home)
-			local dir = names.path_of(t.pwd)
+		local s = by_id[p.pane]
+		if s and is_agent(s) then
+			local desc = names.describe_parts(s.process, s.title, s.pwd, state.home)
+			local dir = names.path_of(s.pwd)
 			local where = if dir ~= "" then names.short(dir, state.home) else ""
 			-- A title that only repeats the directory or the command line
 			-- ("claude --resume") says less than the agent's name.
 			local name = desc.name
-			local command = name:sub(1, #t.process + 1)
+			local command = name:sub(1, #s.process + 1)
 			local base = dir:match("([^/]+)/*$")
-			if name == where or name == dir or name == base or command == t.process or command == t.process .. " " then
-				name = names.label(t.process)
+			if name == where or name == dir or name == base or command == s.process or command == s.process .. " " then
+				name = names.label(s.process)
 			end
 			table.insert(out, {
 				pane = p.pane,
 				tab = p.tab,
-				status = status,
-				kind = kind,
+				status = s.status.state,
+				kind = s.status.kind,
 				name = name,
 				where = where,
 				icon = desc.icon,
 				tint = desc.tint,
-				since = since,
+				since = s.status.since_ms / 1000,
 			})
 		end
 	end
@@ -169,6 +121,25 @@ M.list = ui.computed(function(): { Agent }
 		return a.since > b.since
 	end)
 	return out
+end)
+
+-- Looking at an agent answers it: the pane focused in the window (with its
+-- terminal holding the keyboard) tells the server it was seen, so "done"
+-- and what it said to get attention clear (what a program reports itself
+-- stays until it reports otherwise).
+ui.effect(function()
+	local all = reported:get()
+	local tab = state.active:get()
+	local pane = (state.focus:get())[tab]
+	local by_id = if all then all.sessions else nil
+	if not (by_id and pane) or sessions.is_browser(pane) then
+		return
+	end
+	local s = by_id[pane]
+	local answers = s and (s.status.state == "done" or (s.status.state == "blocked" and not s.status.reported))
+	if answers and ui.term(pane).focused then
+		ui.invoke("seen_session", pane)
+	end
 end)
 
 -- Show `agent`'s tab and give its pane focus (out of a zoom on another).

@@ -9,6 +9,8 @@
 //! `--session-daemon`) and each pane attaches to its own (`--attach`), so
 //! closing the app detaches them and opening it again, with the tabs and
 //! panes it had, attaches them again (see `terminal/session.rs`).
+#[path = "terminal/activity.rs"]
+mod activity;
 #[path = "terminal/program_status.rs"]
 mod program_status;
 #[path = "support/script_menus.rs"]
@@ -83,8 +85,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     radius.set(r.into());
                 }
             });
+            // Opened from the Finder or `open`, the app starts in `/`: new
+            // shells start at home then, as Terminal's do.
             let launch = std::env::current_dir()
                 .ok()
+                .filter(|dir| dir != std::path::Path::new("/"))
                 .or_else(|| std::env::var_os("HOME").map(Into::into))
                 .map(|dir| dir.to_string_lossy().into_owned())
                 .unwrap_or_default();
@@ -105,6 +110,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             host.action("end_session", |id| {
                 if let Value::Str(id) = id {
                     session::kill(&id);
+                }
+            });
+            // Every session's activity, from the session server as it
+            // changes (an agent in a tab not shown, or finished while the
+            // window was closed): what the agents sidebar lists. A thread
+            // waits on the server; nothing runs while nothing changes.
+            let agents = host.shared("agents", Value::Nil);
+            let (heard, mut hearing) = zgui::task::latest::<String>();
+            std::thread::spawn(move || session::watch(|json| heard.send(json)));
+            cx.tasks.spawn(async move {
+                while let Some(json) = hearing.recv().await {
+                    agents.set(Value::from_json(&json).unwrap_or(Value::Nil));
+                }
+            });
+            host.action("seen_session", |id| {
+                if let Value::Str(id) = id {
+                    session::seen(&id);
                 }
             });
             host.action("keep_sessions", |ids| {

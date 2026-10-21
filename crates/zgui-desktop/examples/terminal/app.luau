@@ -11,8 +11,7 @@
 --   saved.luau     the layout across launches
 --   commands.luau  the menu bar's commands
 --   frames.luau    where the active tab's panes go
---   agents.luau    the coding agents in panes and their status (the sidebar)
---   attention.luau what programs said to get the user's attention
+--   agents.luau    the coding agents in every pane, as the session server sees them (the sidebar)
 --   components/    the views: the titlebar, sidebar, panes, dividers, the sheet
 --   lib/           plain logic: the split tree, pane names
 local theme = require("./theme")
