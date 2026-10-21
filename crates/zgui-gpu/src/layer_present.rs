@@ -35,7 +35,7 @@ use objc2_metal::{
     MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTextureDescriptor, MTLTextureType,
     MTLTextureUsage,
 };
-use objc2_quartz_core::{CAAutoresizingMask, CALayer, CAMetalLayer, CATransaction};
+use objc2_quartz_core::{CAAutoresizingMask, CALayer, CATransaction};
 use std::{cell::Cell, ffi::c_void, ptr::null, rc::Rc};
 
 /// A surface the renderer draws into and a layer shows.
@@ -204,7 +204,12 @@ unsafe extern "C" {
         attributes: *const c_void,
         pixels: *mut *const c_void,
     ) -> i32;
-    fn CVBufferSetAttachment(buffer: *const c_void, key: *const c_void, value: *const c_void, mode: u32);
+    fn CVBufferSetAttachment(
+        buffer: *const c_void,
+        key: *const c_void,
+        value: *const c_void,
+        mode: u32,
+    );
     fn CVPixelBufferGetIOSurface(pixels: *const c_void) -> *const c_void;
 }
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -235,7 +240,10 @@ impl Sample {
             {
                 return Err(failed("CVPixelBufferCreateWithIOSurface"));
             }
-            let mut this = Self { pixels, sample: null() };
+            let mut this = Self {
+                pixels,
+                sample: null(),
+            };
             // sRGB, as the surface itself is tagged (kCVAttachmentMode_ShouldPropagate).
             if let Some(space) = CGColorSpace::with_name(Some(kCGColorSpaceSRGB)) {
                 let space = CFRetained::as_ptr(&space).as_ptr().cast::<c_void>();
@@ -308,7 +316,8 @@ impl Drop for Sample {
 }
 
 /// Layers showing the presented surface, filling the window's `CAMetalLayer`
-/// (which follows the view's size and, given no drawables, shows nothing).
+/// (which follows the view's size and, given no drawables, shows nothing), or
+/// another host layer (an overlay plane above native views).
 ///
 /// While frames come at the display's full rate, a sample buffer display
 /// layer queues them (see the module's documentation). Once it exists its
@@ -316,7 +325,7 @@ impl Drop for Sample {
 /// nothing to show, so slower frames, and a window at rest, are a plain
 /// layer's contents instead, and the video layer is dropped at rest.
 pub(crate) struct Layer {
-    host: Retained<CAMetalLayer>,
+    host: Retained<CALayer>,
     plain: Retained<CALayer>,
     /// Whether `plain` has contents (shows a surface, or holds one under
     /// `video` until the video layer shows a frame of its own).
@@ -398,7 +407,8 @@ unsafe extern "C" {
 struct CMSampleBuffer([u8; 0]);
 // SAFETY: `opaqueCMSampleBuffer` is CoreMedia's struct tag for the type.
 unsafe impl RefEncode for CMSampleBuffer {
-    const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("opaqueCMSampleBuffer", &[]));
+    const ENCODING_REF: Encoding =
+        Encoding::Pointer(&Encoding::Struct("opaqueCMSampleBuffer", &[]));
 }
 #[repr(C)]
 struct CVBuffer([u8; 0]);
@@ -431,15 +441,22 @@ struct Video {
     reports_displayed: bool,
 }
 /// Fill `host` and follow its size, without implicit animation.
-fn fill(layer: &CALayer, host: &CAMetalLayer, opaque: bool) {
+fn fill(layer: &CALayer, host: &CALayer, opaque: bool) {
     layer.setFrame(host.bounds());
     layer.setContentsScale(host.contentsScale());
     layer.setOpaque(opaque);
     layer.setAutoresizingMask(
         CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
     );
-    let keys = ["contents", "contentsScale", "opaque", "bounds", "position", "hidden"]
-        .map(CFString::from_static_str);
+    let keys = [
+        "contents",
+        "contentsScale",
+        "opaque",
+        "bounds",
+        "position",
+        "hidden",
+    ]
+    .map(CFString::from_static_str);
     // SAFETY: CoreFoundation's null singleton.
     let null_value: &CFNull = unsafe { kCFNull }.expect("kCFNull");
     let actions = CFDictionary::<CFString, CFNull>::from_slices(
@@ -461,11 +478,12 @@ fn transaction(change: impl FnOnce()) {
     CATransaction::commit();
 }
 impl Video {
-    fn new(host: &CAMetalLayer, opaque: bool) -> Self {
+    fn new(host: &CALayer, opaque: bool) -> Self {
         // SAFETY: AVFoundation (linked above) defines the class; `new` makes
         // a layer, a CALayer subclass.
         let layer: Retained<CALayer> = unsafe {
-            let layer: Retained<AnyObject> = msg_send![objc2::class!(AVSampleBufferDisplayLayer), new];
+            let layer: Retained<AnyObject> =
+                msg_send![objc2::class!(AVSampleBufferDisplayLayer), new];
             Retained::cast_unchecked(layer)
         };
         // SAFETY: The layer's own properties, with an AVLayerVideoGravity
@@ -526,7 +544,7 @@ impl Video {
     }
 }
 impl Layer {
-    pub fn attach(host: &CAMetalLayer) -> Self {
+    pub fn attach(host: &CALayer) -> Self {
         let plain = CALayer::new();
         fill(&plain, host, false);
         transaction(|| host.addSublayer(&plain));

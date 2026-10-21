@@ -3,6 +3,7 @@
 mod common;
 
 use common::Harness;
+use std::{cell::RefCell, rc::Rc};
 use zgui::{
     input::{InputEvent, Key, Modifiers},
     scene::NodeKind,
@@ -362,7 +363,10 @@ fn border_over_reaches_the_scene() {
 
 #[test]
 fn bg_image_paints_and_survives_an_animated_bg() {
-    let png = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/images/components.png");
+    let png = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/images/components.png"
+    );
     let mut h = common::Harness::inline(&format!(
         r##"return ui.div {{ id = "d", w = 40, h = 40, bg = "#000000", rounded = 8, bg_image = "{png}", bg_fit = "cover",
             on_mount = function(el) anime.animate(el, {{ backgroundColor = "#ff0000", duration = 50 }}) end }}"##
@@ -398,4 +402,95 @@ fn fades_reach_each_edge() {
         stack.extend(scene.children(n).iter().copied());
     }
     assert!(found, "a right fade of 28 points");
+}
+
+/// Records a page's commands and answers evaluations.
+struct Page(RefCell<Vec<String>>);
+impl zgui::web_view::WebViewBackend for Page {
+    fn run(&self, command: zgui::web_view::WebViewCommand) {
+        self.0.borrow_mut().push(format!("{command:?}"));
+        if let zgui::web_view::WebViewCommand::Evaluate {
+            reply: Some(reply), ..
+        } = command
+        {
+            zgui::native_view::post(move || reply(Ok(r#"{"n":42,"tags":["a","b"]}"#.into())));
+        }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn web_views_load_their_source_and_report_page_events() {
+    use zgui::{native_view::NativeContent, web_view::WebViewEvent};
+    let mut h = Harness::inline(
+        r##"local web = ui.web { profile = "ephemeral" }
+        local tab = ui.state("tab", "a")
+        local log = ui.state("log", "")
+        local function note(s) log:set(log:get() .. s .. ";") end
+        return ui.column {
+            ui.webview {
+                id = "page", web = web, w = 200, h = 100, rounded = 8,
+                src = function() return "https://" .. tab:get() .. ".test/" end,
+                on_navigate = function(e) note(e.kind .. " " .. e.url) end,
+                on_load = function(url) note("load " .. url) end,
+                on_title = function(t) note("title " .. t) end,
+                on_message = function(m) note("message " .. m.kind .. " " .. m.count) end,
+                on_error = function(url, err) note("error " .. err) end,
+            },
+            ui.text { function() return web.title end, id = "title" },
+            ui.button { id = "b", w = 20, h = 20, on_click = function() tab:set("b") end },
+            ui.button { id = "eval", w = 20, h = 20, on_click = function()
+                web:eval("x", function(v) note("eval " .. v.n .. " " .. v.tags[2]) end)
+            end },
+            ui.text { "{log}", id = "log" },
+        }"##,
+    );
+    let page = h.find("page").unwrap();
+    assert_eq!(h.natives.nodes(), vec![page]);
+    let Some(NativeContent::Web(web)) = h.natives.content(page) else {
+        panic!("no page")
+    };
+    assert!(web.options().profile == zgui::web_view::WebProfile::Ephemeral);
+    // Unsupported headless: a labelled box, sized like any node.
+    assert_eq!(h.width("page"), 200.);
+    let backend = Rc::new(Page(RefCell::new(Vec::new())));
+    web.attach(backend.clone());
+    assert_eq!(
+        *backend.0.borrow(),
+        vec!["LoadUrl(\"https://a.test/\")".to_string()]
+    );
+    h.click("b");
+    assert_eq!(
+        backend.0.borrow().last().unwrap(),
+        "LoadUrl(\"https://b.test/\")"
+    );
+
+    web.emit(WebViewEvent::NavigationStarted {
+        url: "https://b.test/".into(),
+    });
+    web.emit(WebViewEvent::NavigationFinished {
+        url: "https://b.test/".into(),
+    });
+    web.update_state(|s| s.title = "B".into());
+    web.emit(WebViewEvent::TitleChanged { title: "B".into() });
+    web.emit(WebViewEvent::Message {
+        body: r#"{"kind":"ping","count":3}"#.into(),
+    });
+    web.emit(WebViewEvent::NavigationFailed {
+        url: "https://c.test/".into(),
+        error: "offline".into(),
+    });
+    h.settle();
+    assert_eq!(h.text("title"), "B");
+    assert_eq!(
+        h.text("log"),
+        "started https://b.test/;finished https://b.test/;load https://b.test/;title B;\
+         message ping 3;failed https://c.test/;error offline;"
+    );
+    h.click("eval");
+    zgui::native_view::deliver_posted();
+    h.settle();
+    assert!(h.text("log").ends_with("eval 42 b;"), "{}", h.text("log"));
 }

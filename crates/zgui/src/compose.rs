@@ -743,7 +743,6 @@ pub fn menu(label: impl Into<String>, open: Signal<bool>, anchor: View) -> View 
         anchor: Box::new(anchor),
     })
 }
-/// A menu action. Activation closes its menu before running `.on_click`.
 /// A side-opening child menu with an automatically owned menu-item trigger.
 pub fn submenu(label: impl Into<String>, open: Signal<bool>) -> View {
     View::new(Kind::Submenu {
@@ -751,6 +750,7 @@ pub fn submenu(label: impl Into<String>, open: Signal<bool>) -> View {
         open,
     })
 }
+/// A menu action. Activation closes its menu before running `.on_click`.
 pub fn menu_item(label: impl Into<String>) -> View {
     View::new(Kind::MenuItem(label.into()))
 }
@@ -1273,10 +1273,6 @@ fn mount(ui: &mut Ui, parent: NodeId, mut view: View, mut environment: Environme
             false,
         ),
         Kind::Submenu { label, open } => {
-            assert!(
-                environment.menu.is_some(),
-                "submenu requires an enclosing menu"
-            );
             let mut anchor = menu_item(label.clone());
             anchor.menu_trigger = Some(open.clone());
             anchor.id = view.trigger_id.take();
@@ -1556,12 +1552,8 @@ fn mount_element(
     let mut image_intrinsic = None;
     let is_menu_item = matches!(kind, Kind::MenuItem(_));
     let is_submenu_trigger = is_menu_item && view.menu_trigger.is_some();
-    let item_menu = is_menu_item.then(|| {
-        environment
-            .menu
-            .clone()
-            .expect("menu_item requires an enclosing menu")
-    });
+    // Outside a menu (a popover's list) an item is a plain action.
+    let item_menu = is_menu_item.then(|| environment.menu.clone()).flatten();
     let is_editor = matches!(kind, Kind::Editor { .. });
     assert!(
         view.read_only.is_none() || is_editor,
@@ -1714,7 +1706,9 @@ fn mount_element(
                 view.variants.hover = Some(Box::new(Styles::new().bg(ui.theme.hover)));
             }
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(Styles::new().border(1.).border_color(ui.theme.accent)));
+                view.variants.focus = Some(Box::new(
+                    Styles::new().border(1.).border_color(ui.theme.accent),
+                ));
             }
             ui.container(parent, Layout::Row, Default::default())
         }
@@ -1730,7 +1724,9 @@ fn mount_element(
                 view.variants.hover = Some(Box::new(Styles::new().bg(ui.theme.hover)));
             }
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(Styles::new().border(1.).border_color(ui.theme.accent)));
+                view.variants.focus = Some(Box::new(
+                    Styles::new().border(1.).border_color(ui.theme.accent),
+                ));
             }
             let root = ui.container(parent, Layout::Row, Default::default());
             let mut semantics = SemanticNode::new(Role::CheckBox, label.clone());
@@ -1783,7 +1779,9 @@ fn mount_element(
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(Styles::new().border(1.).border_color(ui.theme.accent)));
+                view.variants.focus = Some(Box::new(
+                    Styles::new().border(1.).border_color(ui.theme.accent),
+                ));
             }
             let root = ui.container(parent, Layout::Overlay, Default::default());
             let mut semantic = SemanticNode::new(Role::Slider, label);
@@ -1802,7 +1800,9 @@ fn mount_element(
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(Styles::new().border(1.).border_color(ui.theme.accent)));
+                view.variants.focus = Some(Box::new(
+                    Styles::new().border(1.).border_color(ui.theme.accent),
+                ));
             }
             let handle = ui.text_input_styled(parent, label, value, multiline);
             let root = handle.node;
@@ -1833,7 +1833,9 @@ fn mount_element(
             defaults.merge(&view.styles);
             view.styles = defaults;
             if keyboard_navigation && view.variants.focus.is_none() {
-                view.variants.focus = Some(Box::new(Styles::new().border(1.).border_color(ui.theme.accent)));
+                view.variants.focus = Some(Box::new(
+                    Styles::new().border(1.).border_color(ui.theme.accent),
+                ));
             }
             region = Some(Box::new(move |ui: &mut Ui, root, environment| {
                 build(ui, root, environment, scrollbar, keyboard_navigation)
@@ -1953,8 +1955,11 @@ fn mount_element(
                 }
                 let mut font = base.font.clone();
                 let rare = span.styles.rare();
-                let (fallbacks, features, spacing) =
-                    (rare.font_fallbacks.clone(), rare.font_features.clone(), rare.letter_spacing);
+                let (fallbacks, features, spacing) = (
+                    rare.font_fallbacks.clone(),
+                    rare.font_features.clone(),
+                    rare.letter_spacing,
+                );
                 if let Some(value) = fallbacks {
                     font.fallbacks = value;
                 }
@@ -2148,7 +2153,9 @@ fn mount_element(
         ui.semantics.borrow_mut().remove(indicator);
     }
     if let (Some((offset, horizontal)), Some((viewport, content))) = (scroll_offset, scroll_nodes) {
-        mount_scroll(ui, root, viewport, content, offset, horizontal, scrollbar, follow_end);
+        mount_scroll(
+            ui, root, viewport, content, offset, horizontal, scrollbar, follow_end,
+        );
     }
     if let Some(mut compute) = compute {
         let weak = ui.downgrade();
@@ -2906,8 +2913,9 @@ pub mod prelude {
     pub use super::{
         Context, Slot, VariableHeights, View, button, checkbox, column, component, div, image,
         image_signal, keyed, measured_rows, measured_virtual_list, menu, menu_item, modal, overlay,
-        popover, progress, provide, provide_with, row, scroll, scroll_x, scrollbar, slider, submenu,
-        switch, text, text_area, text_input, text_signal, variable_virtual_list, virtual_list,
+        popover, progress, provide, provide_with, row, scroll, scroll_x, scrollbar, slider,
+        submenu, switch, text, text_area, text_input, text_signal, variable_virtual_list,
+        virtual_list,
     };
     pub use super::{RichTextView, TextSpan, rich_text, rich_text_signal, text_span};
     pub use super::{animated_image, animated_image_controlled, async_image, canvas};
@@ -2921,9 +2929,10 @@ pub mod prelude {
     pub use crate::cursor::Cursor;
     pub use crate::decoration::{Background, BorderStyle, Corners};
     pub use crate::rich_text::Decoration;
-    pub use crate::style::{ObjectFit, Styled, Styles, rgb, rgba};
+    pub use crate::style::{ObjectFit, StrokeAlign, Styled, Styles, rgb, rgba};
     pub use crate::svg::SvgData;
     pub use crate::text_layout::{FontFamily, FontFeatures, TextAlign, TextOptions, TextOverflow};
+    pub use crate::web_view::{native_view, web_view, web_view_src};
 }
 
 #[cfg(test)]

@@ -376,3 +376,71 @@ fn scripts_require_modules_and_reload_when_they_change() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn shader_compile_errors_are_script_errors() {
+    let runtime = zgui::reactive::Runtime::new();
+    let host = ScriptHost::inline(
+        &runtime,
+        "app",
+        "local s = ui.shader(\"fn fill(input: FillInput) -> vec4<f32> {\\n  let from = 1.0;\\n  return vec4(from);\\n}\")\nreturn ui.div { bg_shader = s }",
+    );
+    let error = host.reload().unwrap_err();
+    assert!(
+        error.contains("ui.shader") && error.contains("line 2"),
+        "{error}"
+    );
+}
+
+#[test]
+fn modules_resolve_like_luau_and_keep_their_own_state() {
+    let dir = std::env::temp_dir().join(format!("zgui-modules-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("ui/components")).unwrap();
+    std::fs::create_dir_all(dir.join("ui/lib")).unwrap();
+    let write = |path: &str, code: &str| std::fs::write(dir.join(path), code).unwrap();
+    write(
+        ".luaurc",
+        r##"{ "aliases": { "components": "./ui/components" } }"##,
+    );
+    write(
+        "ui/components/theme.luau",
+        r##"return { accent = "#8b7cf6" }"##,
+    );
+    write(
+        "ui/components/card.luau",
+        r##"local theme = require("./theme")
+        assert(require("@self/theme") == theme, "@self is the module's directory")
+        local open = ui.state("open", "card")
+        return function(label) return ui.text { label .. " " .. open:get() .. " " .. theme.accent, id = "card" } end"##,
+    );
+    write(
+        "ui/lib/init.luau",
+        r##"local open = ui.state("open", "lib") return { open = open }"##,
+    );
+    write(
+        "app.luau",
+        r##"local card = require("@components/card")
+        local lib = require("./ui/lib")
+        local open = ui.state("open", "app")
+        return ui.column {
+            card("hi"),
+            ui.text { open:get() .. " " .. lib.open:get(), id = "keys" },
+        }"##,
+    );
+    let path = dir.join("app.luau");
+    let mut h = common::Harness::new(|runtime| zgui_script::ScriptHost::new(runtime, path));
+    assert_eq!(
+        h.text("card"),
+        "hi card #8b7cf6",
+        "a module's own state and a sibling module"
+    );
+    assert_eq!(h.text("keys"), "app lib", "each module's `open` is its own");
+    write(
+        "app.luau",
+        r##"return ui.text { tostring(require("../outside")), id = "t" }"##,
+    );
+    let error = h.host.reload().unwrap_err();
+    assert!(error.contains("directory or below"), "{error}");
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -240,8 +240,16 @@ impl Placement {
     /// Where pixels `rect` paints inside the layer can change on screen.
     fn shows(&self, rect: Rect) -> Option<Rect> {
         let mapped = self.matrix.bounds(rect);
-        let mapped = if self.spread > 0. {
-            mapped.expand(self.spread)
+        // Resampled (scaled, rotated off the right angles, skewed), its
+        // filtering reaches up to a pixel past the mapped box.
+        let m = self.matrix;
+        let zero = |v: f32| v.abs() < 1e-4;
+        let unit = |v: f32| (v.abs() - 1.).abs() < 1e-4;
+        let resampled = !((unit(m.a) && zero(m.b) && zero(m.c) && unit(m.d))
+            || (zero(m.a) && unit(m.b) && unit(m.c) && zero(m.d)));
+        let spread = self.spread.max(0.) + if resampled { 1. } else { 0. };
+        let mapped = if spread > 0. {
+            mapped.expand(spread)
         } else {
             mapped
         };
@@ -353,6 +361,13 @@ pub struct Effects {
     /// applies to the blurred result. Changing it composites again without
     /// repainting the subtree; at 0 the node paints as any other.
     pub filter_blur: f32,
+    /// CSS `filter: brightness()`: the subtree's colours scaled (1 leaves
+    /// them, 0 is black, past 1 brighter), as a group, under its opacity.
+    pub brightness: f32,
+    /// CSS `filter: contrast()`: colours pushed from (or towards) mid grey.
+    pub contrast: f32,
+    /// CSS `filter: saturate()`: 0 is greyscale, past 1 more vivid.
+    pub saturate: f32,
 }
 impl Default for Effects {
     fn default() -> Self {
@@ -361,8 +376,58 @@ impl Default for Effects {
             blur_radius: 0.0,
             edge_fade: 0.0,
             filter_blur: 0.0,
+            brightness: 1.0,
+            contrast: 1.0,
+            saturate: 1.0,
         }
     }
+}
+/// An affine map of straight-alpha RGB: each row the weights of R, G, B
+/// and an offset. Brightness, contrast and saturate filters compose into
+/// one; being affine, it can be applied to each primitive of a subtree
+/// before blending with the same result as to the subtree as a group.
+pub type ColorMatrix = [[f32; 4]; 3];
+impl Effects {
+    /// Its colour filters as one matrix (brightness, then contrast, then
+    /// saturate, as CSS lists them), or `None` when they change nothing.
+    pub fn color_matrix(&self) -> Option<ColorMatrix> {
+        if (self.brightness, self.contrast, self.saturate) == (1., 1., 1.) {
+            return None;
+        }
+        let (b, k, s) = (self.brightness, self.contrast, self.saturate);
+        // Contrast after brightness: (b·c - 0.5)·k + 0.5.
+        let (scale, offset) = (b * k, 0.5 - 0.5 * k);
+        // CSS's saturate matrix (Rec. 709 luma weights).
+        let saturate = [
+            [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+            [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+            [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
+        ];
+        Some(saturate.map(|row| {
+            [
+                row[0] * scale,
+                row[1] * scale,
+                row[2] * scale,
+                (row[0] + row[1] + row[2]) * offset,
+            ]
+        }))
+    }
+}
+/// `outer` applied after `inner`: a filtered subtree inside a filtered one.
+pub fn compose_color(
+    outer: Option<ColorMatrix>,
+    inner: Option<ColorMatrix>,
+) -> Option<ColorMatrix> {
+    let (outer, inner) = match (outer, inner) {
+        (None, inner) => return inner,
+        (outer, None) => return outer,
+        (Some(outer), Some(inner)) => (outer, inner),
+    };
+    Some(std::array::from_fn(|row| {
+        let o = outer[row];
+        let column = |c: usize| o[0] * inner[0][c] + o[1] * inner[1][c] + o[2] * inner[2][c];
+        [column(0), column(1), column(2), column(3) + o[3]]
+    }))
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -390,6 +455,29 @@ pub struct QuadStyle {
     /// CSS outline drawn inside): the fill paints first, the border after
     /// everything inside (`PaintItem::border_pass`).
     pub border_over: bool,
+    /// An outline around the box (CSS `outline` and `outline-offset`).
+    pub outline: Option<Outline>,
+}
+/// An outline (CSS `outline`, `outline-offset`): a ring `width` wide drawn
+/// `offset` outside the box (inside it when negative), its corners the
+/// box's radii grown by as much, over the node's descendants. It takes no
+/// room in layout. A design tool's stroke aligned outside is offset 0;
+/// centred, offset `-width / 2`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Outline {
+    pub width: f32,
+    pub color: Color,
+    pub offset: f32,
+}
+impl Outline {
+    /// Whether it draws anything.
+    pub fn visible(&self) -> bool {
+        self.width.is_finite() && self.width > 0. && self.offset.is_finite() && self.color.3 > 0
+    }
+    /// The box it rings for a node at `bounds`: its outer edge.
+    pub fn outer(&self, bounds: Rect) -> Rect {
+        bounds.expand(self.offset + self.width)
+    }
 }
 impl Default for QuadStyle {
     fn default() -> Self {
@@ -401,6 +489,7 @@ impl Default for QuadStyle {
             shadow: None,
             decoration: None,
             border_over: false,
+            outline: None,
         }
     }
 }
@@ -428,13 +517,22 @@ impl QuadStyle {
             .unwrap_or(self.shadow.as_slice())
     }
     pub fn paint_bounds(&self, bounds: Rect) -> Rect {
-        self.shadows().iter().fold(bounds, |paint, shadow| {
+        let painted = self.shadows().iter().fold(bounds, |paint, shadow| {
             paint.union(
                 bounds
                     .expand(shadow.spread.max(0.) + shadow.blur_radius.max(0.) * 3.)
                     .translated(shadow.offset),
             )
-        })
+        });
+        match self.outline.filter(Outline::visible) {
+            Some(outline) => painted.union(outline.outer(bounds)),
+            None => painted,
+        }
+    }
+    /// Whether it paints a second time after its descendants (its border
+    /// over them, its outline).
+    pub fn paints_over(&self) -> bool {
+        (self.border_over && self.has_border()) || self.outline.is_some_and(|o| o.visible())
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -609,6 +707,8 @@ struct Node {
     image_mask: Option<Box<ImageMask>>,
     /// Its clip inset (`Scene::set_clip_inset`).
     clip_inset: Option<Box<ClipInset>>,
+    /// Its shader fill's uniforms (`Scene::set_shader_uniforms`).
+    shader_uniforms: Option<Box<crate::decoration::ShaderUniforms>>,
     /// Has had a local transform, content blur or mask: its layer revision
     /// keeps counting while it has none, so a renderer can keep its texture
     /// (see `invalidate`).
@@ -830,6 +930,9 @@ pub struct PaintItem<'a> {
     /// This item paints `id`'s border alone, after its descendants
     /// (`QuadStyle::border_over`); the node's first item painted the rest.
     pub border_pass: bool,
+    /// Its and its ancestors' colour filters as one matrix (see
+    /// `Effects::color_matrix`); a layer's own, at its composite.
+    pub color: Option<ColorMatrix>,
 }
 type FontMeasurer =
     dyn Fn(&std::sync::Arc<str>, f32, Option<f32>, &crate::text_layout::FontStyle) -> (f32, f32);
@@ -847,6 +950,8 @@ pub struct Scene {
     damage_grid: Option<DamageGrid>,
     viewport: Rect,
     blur_nodes: Vec<NodeId>,
+    /// Nodes the platform paints (native views): their box is their ink.
+    platform_nodes: Vec<NodeId>,
     isolation_count: usize,
     /// Nodes with a local transform: none keeps every geometry query on
     /// the translation-only paths.
@@ -943,6 +1048,7 @@ impl Scene {
                     local: None,
                     image_mask: None,
                     clip_inset: None,
+                    shader_uniforms: None,
                     promoted: false,
                     scroll_copy: false,
                     layer_revision: 0,
@@ -956,6 +1062,7 @@ impl Scene {
             damage_grid: None,
             viewport: Rect::new(0.0, 0.0, width, height),
             blur_nodes: Vec::new(),
+            platform_nodes: Vec::new(),
             pending_moves: Vec::new(),
             moves: Vec::new(),
             flush_serial: 0,
@@ -989,6 +1096,32 @@ impl Scene {
     }
     pub fn root(&self) -> NodeId {
         self.root
+    }
+    /// Mark `id` as painted by the platform (a native view over its box):
+    /// its box counts as its ink, so damage culling and paint walks within
+    /// regions reach it though zgui draws nothing there.
+    pub fn set_platform_painted(&mut self, id: NodeId, painted: bool) {
+        if !self.contains(id) {
+            return;
+        }
+        let present = self.platform_nodes.contains(&id);
+        if present == painted {
+            return;
+        }
+        let slots = &self.slots;
+        self.platform_nodes.retain(|node| {
+            *node != id
+                && slots
+                    .get(node.index as usize)
+                    .is_some_and(|s| s.generation == node.generation && s.node.is_some())
+        });
+        if painted {
+            self.platform_nodes.push(id);
+        }
+        self.invalidate(id, COMPOSITE);
+    }
+    pub fn is_platform_painted(&self, id: NodeId) -> bool {
+        self.platform_nodes.contains(&id)
     }
     pub fn contains(&self, id: NodeId) -> bool {
         self.slots
@@ -1139,6 +1272,47 @@ impl Scene {
             self.promoted_count += 1;
         }
         self.invalidate(id, COMPOSITE);
+    }
+    /// `id`'s shader fill uniforms (see `crate::decoration::FillShader`).
+    pub fn shader_uniforms(&self, id: NodeId) -> crate::decoration::ShaderUniforms {
+        self.node(id)
+            .shader_uniforms
+            .as_deref()
+            .copied()
+            .unwrap_or_default()
+    }
+    /// Set the uniforms `id`'s shader fill draws with: its time (quantized
+    /// to the shader's frame rate, so a capped shader repaints only when
+    /// it steps) and user parameters. Repaints that box alone; no layout,
+    /// nothing else. Nonfinite values are zeroed.
+    pub fn set_shader_uniforms(
+        &mut self,
+        id: NodeId,
+        mut uniforms: crate::decoration::ShaderUniforms,
+    ) {
+        fn finite(value: f32) -> f32 {
+            if value.is_finite() { value } else { 0. }
+        }
+        uniforms.time = finite(uniforms.time);
+        uniforms.params = uniforms.params.map(|row| row.map(finite));
+        let fps = match &self.node(id).kind {
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad
+                .decoration
+                .as_deref()
+                .and_then(|detail| match &detail.background {
+                    Some(crate::decoration::Background::Shader(shader)) => shader.fps(),
+                    _ => None,
+                }),
+            _ => None,
+        };
+        if let Some(fps) = fps {
+            uniforms.time = (uniforms.time * fps).floor() / fps;
+        }
+        if self.shader_uniforms(id) == uniforms {
+            return;
+        }
+        self.node_mut(id).shader_uniforms = Some(Box::new(uniforms));
+        self.invalidate(id, PAINT);
     }
     pub fn clip_inset(&self, id: NodeId) -> Option<ClipInset> {
         self.node(id).clip_inset.as_deref().copied()
@@ -1645,6 +1819,7 @@ impl Scene {
             local: None,
             image_mask: None,
             clip_inset: None,
+            shader_uniforms: None,
             promoted: false,
             scroll_copy: false,
             layer_revision: 0,
@@ -1845,6 +2020,11 @@ impl Scene {
         effects.blur_radius = radius(effects.blur_radius);
         effects.edge_fade = radius(effects.edge_fade);
         effects.filter_blur = radius(effects.filter_blur);
+        // Colour filters: nonfinite values change nothing; none is negative.
+        let factor = |value: f32| if value.is_finite() { value.max(0.) } else { 1. };
+        effects.brightness = factor(effects.brightness);
+        effects.contrast = factor(effects.contrast);
+        effects.saturate = factor(effects.saturate);
         if self.node(id).effects == effects {
             return;
         }
@@ -2082,7 +2262,11 @@ impl Scene {
         } else {
             parent_clip
         };
-        self.damage_painted(id, bounds, node.effects.blur_radius, clip);
+        let own = match self.paints_past_clip(id) {
+            true => parent_clip,
+            false => clip,
+        };
+        self.damage_painted(id, bounds, node.effects.blur_radius, own);
         for index in 0..self.node(id).children.len() {
             let child = self.node(id).children[index];
             self.damage_subtree_in(child, transform, clip);
@@ -2103,7 +2287,13 @@ impl Scene {
         }
         let (transform, bounds, clip, placement) =
             self.descend(node, parent, parent_clip, placement);
-        self.damage_painted_placed(id, bounds, node.effects.blur_radius, clip, placement);
+        // Inside a layer it starts, nothing cuts its own paint.
+        let own = match self.paints_past_clip(id) {
+            true if node.transformed() || node.filtered() => None,
+            true => parent_clip,
+            false => clip,
+        };
+        self.damage_painted_placed(id, bounds, node.effects.blur_radius, own, placement);
         for index in 0..self.node(id).children.len() {
             let child = self.node(id).children[index];
             self.damage_subtree_placed(child, transform, clip, placement);
@@ -2199,14 +2389,25 @@ impl Scene {
             node.ink_valid.set(true);
             return None;
         }
-        let mut ink = self.own_ink(id);
+        // Its overflow clip cuts what it holds; a box's own paint (its
+        // shadows) reaches past it, as the paint walks draw it.
+        let own = self.own_ink(id);
+        let mut held: Option<Rect> = None;
         for child in &node.children {
             if let Some(child) = self.ink(*child) {
-                ink = Some(ink.map_or(child, |ink| ink.union(child)));
+                held = Some(held.map_or(child, |ink| ink.union(child)));
             }
         }
+        let held = held.and_then(|ink| clipped_bounds(Some(ink), node.bounds, &node.style));
+        let own = match &node.kind {
+            NodeKind::Quad(_) | NodeKind::Panel { .. } => own,
+            _ => own.and_then(|ink| clipped_bounds(Some(ink), node.bounds, &node.style)),
+        };
+        let ink = match (own, held) {
+            (Some(own), Some(held)) => Some(own.union(held)),
+            (own, held) => own.or(held),
+        };
         let ink = ink
-            .and_then(|ink| clipped_bounds(Some(ink), node.bounds, &node.style))
             .map(|ink| match node.filtered() {
                 false => ink,
                 // Blurred in its layer's space, before the transform.
@@ -2226,7 +2427,10 @@ impl Scene {
     fn own_ink(&self, id: NodeId) -> Option<Rect> {
         let node = self.node(id);
         let blur = node.effects.blur_radius;
-        if matches!(node.kind, NodeKind::Container(_)) && blur <= 0.0 {
+        if matches!(node.kind, NodeKind::Container(_))
+            && blur <= 0.0
+            && !self.platform_nodes.contains(&id)
+        {
             return None;
         }
         let bounds = node.bounds;
@@ -2364,13 +2568,26 @@ impl Scene {
         if self.damage_is_full() || !self.shown(id) {
             return;
         }
+        let past_clip = self.paints_past_clip(id);
         if self.transformed + self.filtered > 0 {
             let (bounds, clip, placement) = self.placed(id);
-            let blur_radius = self.node(id).effects.blur_radius;
+            let node = self.node(id);
+            let blur_radius = node.effects.blur_radius;
+            let clip = match (past_clip, node.parent) {
+                (false, _) => clip,
+                _ if node.transformed() || node.filtered() => None,
+                (true, Some(parent)) => self.context(parent).1,
+                (true, None) => Some(self.viewport),
+            };
             self.damage_painted_placed(id, bounds, blur_radius, clip, placement);
             return;
         }
         let (bounds, effects, clip) = self.world(id);
+        let clip = match (past_clip, self.node(id).parent) {
+            (false, _) => clip,
+            (true, Some(parent)) => self.world(parent).2,
+            (true, None) => Some(self.viewport),
+        };
         self.damage_painted(id, bounds, effects.blur_radius, clip);
     }
     fn damage_painted(&mut self, id: NodeId, bounds: Rect, blur_radius: f32, clip: Option<Rect>) {
@@ -2402,6 +2619,14 @@ impl Scene {
         {
             self.add_damage(bounds);
         }
+    }
+    /// Whether `id` clips what it holds but not its own paint: a box, whose
+    /// shadows and outline reach past its overflow clip as the paint walks
+    /// draw them. Its own paint is damaged within its parent's clip then.
+    fn paints_past_clip(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        matches!(node.kind, NodeKind::Quad(_) | NodeKind::Panel { .. })
+            && clip_axes(&node.style) != (false, false)
     }
     /// What `id` itself paints when laid out at `bounds`, if anything.
     #[inline]
@@ -3538,11 +3763,20 @@ impl Scene {
             None::<FadeMask>,
             RoundedClip::default(),
             false,
+            None::<ColorMatrix>,
         ));
         let mut result = Vec::with_capacity(items_hint);
         let mut deepest = 0;
-        while let Some((id, parent_transform, parent_opacity, parent_clip, mask, rounded, border)) =
-            stack.pop()
+        while let Some((
+            id,
+            parent_transform,
+            parent_opacity,
+            parent_clip,
+            mask,
+            rounded,
+            border,
+            parent_color,
+        )) = stack.pop()
         {
             let node = self.node(id);
             let transform = Transform {
@@ -3560,6 +3794,14 @@ impl Scene {
                 node.effects
             };
             effects.opacity *= parent_opacity;
+            // Its colour filters after its ancestors' (a layer root's own
+            // apply at its composite).
+            let own_color = if is_root {
+                None
+            } else {
+                node.effects.color_matrix()
+            };
+            let color = compose_color(parent_color, own_color);
             // Fully transparent subtrees contribute no cached pixels or layer
             // bounds. An explicit layer root keeps opacity external above.
             if effects.opacity <= 0.0 || !own_visible(&node.style) {
@@ -3568,7 +3810,9 @@ impl Scene {
             // A transformed layer clips itself, inside, to its rotated box; a
             // blurred or masked one clips inside, before its effect.
             let matrix = (isolated && transformed).then(|| node.local().matrix(bounds));
-            let clip = match isolated && (transformed || effect) {
+            // A border pass (its border and outline over what it holds)
+            // isn't cut by its own clip, as CSS doesn't cut an outline.
+            let clip = match (isolated && (transformed || effect)) || border {
                 true => parent_clip,
                 false => clipped_bounds(parent_clip, bounds, &node.style),
             };
@@ -3603,7 +3847,7 @@ impl Scene {
             }
             // Its border over what it holds: a second item once they paint.
             let border_over = matches!(&node.kind,
-                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } if quad.border_over && quad.has_border());
+                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } if quad.paints_over());
             if !isolated && !border && border_over {
                 let opacity = parent_opacity;
                 stack.push((
@@ -3614,6 +3858,7 @@ impl Scene {
                     mask,
                     rounded,
                     true,
+                    parent_color,
                 ));
             }
             if !isolated && !border {
@@ -3632,11 +3877,25 @@ impl Scene {
                                 child_mask,
                                 child_rounded,
                                 false,
+                                color,
                             )
                         }),
                 );
                 deepest = deepest.max(stack.len());
             }
+            // A box's own paint (fill, border, shadows) isn't cut by its own
+            // overflow clip: CSS clips what an element holds, not its
+            // box-shadow. Its clip inset (clip-path) still cuts it.
+            let own_clip = match &node.kind {
+                NodeKind::Quad(_) | NodeKind::Panel { .. } => match inset {
+                    None => parent_clip,
+                    Some(inset) => Some(
+                        parent_clip
+                            .map_or(inset, |clip| clip.intersection(inset).unwrap_or_default()),
+                    ),
+                },
+                _ => clip,
+            };
             result.push(PaintItem {
                 isolated,
                 matrix,
@@ -3646,10 +3905,11 @@ impl Scene {
                 font: &node.font,
                 text_options: node.style.text_options,
                 effects,
-                clip,
+                clip: own_clip,
                 mask,
                 rounded: item_rounded,
                 border_pass: border,
+                color,
             });
         }
         self.walk_hints.set((deepest, result.len()));
@@ -3665,6 +3925,7 @@ impl Scene {
                 self.viewport,
                 None,
                 RoundedClip::default(),
+                None,
             )],
         }
     }
@@ -3754,12 +4015,23 @@ fn clipped_bounds(parent: Option<Rect>, bounds: Rect, style: &Style) -> Option<R
 }
 struct PaintIter<'a> {
     scene: &'a Scene,
-    stack: Vec<(NodeId, Transform, f32, Rect, Option<FadeMask>, RoundedClip)>,
+    stack: Vec<PaintFrame>,
 }
+/// A node `PaintIter` will visit, with what its parent passes on: its
+/// translation, opacity, clip, fade mask, rounded clips and colour filters.
+type PaintFrame = (
+    NodeId,
+    Transform,
+    f32,
+    Rect,
+    Option<FadeMask>,
+    RoundedClip,
+    Option<ColorMatrix>,
+);
 impl<'a> Iterator for PaintIter<'a> {
     type Item = PaintItem<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        let (id, parent_transform, parent_opacity, parent_clip, mask, rounded) =
+        let (id, parent_transform, parent_opacity, parent_clip, mask, rounded, parent_color) =
             self.stack.pop()?;
         let node = self.scene.node(id);
         let transform = Transform {
@@ -3774,14 +4046,32 @@ impl<'a> Iterator for PaintIter<'a> {
         effects.opacity *= parent_opacity;
         let clip = clipped_bounds(Some(parent_clip), bounds, &node.style).unwrap_or(parent_clip);
         let child_mask = fade_mask(mask, Some(clip), &node.style);
-        let clip = match node.clip_inset.as_deref() {
-            Some(inset) => clip.intersection(inset.apply(bounds)).unwrap_or_default(),
+        let inset = node.clip_inset.as_deref().map(|inset| inset.apply(bounds));
+        let clip = match inset {
+            Some(inset) => clip.intersection(inset).unwrap_or_default(),
             None => clip,
         };
+        // A box's own paint isn't cut by its own overflow clip (as above).
+        let own_clip = match &node.kind {
+            NodeKind::Quad(_) | NodeKind::Panel { .. } => match inset {
+                Some(inset) => parent_clip.intersection(inset).unwrap_or_default(),
+                None => parent_clip,
+            },
+            _ => clip,
+        };
         let child_rounded = rounded_clip(rounded, node, bounds);
+        let color = compose_color(parent_color, node.effects.color_matrix());
         self.stack.extend(node.children.iter().rev().map(|child| {
             let opacity = effects.opacity;
-            (*child, transform, opacity, clip, child_mask, child_rounded)
+            (
+                *child,
+                transform,
+                opacity,
+                clip,
+                child_mask,
+                child_rounded,
+                color,
+            )
         }));
         Some(PaintItem {
             isolated: false,
@@ -3792,10 +4082,11 @@ impl<'a> Iterator for PaintIter<'a> {
             font: &node.font,
             text_options: node.style.text_options,
             effects,
-            clip: Some(clip),
+            clip: Some(own_clip),
             mask,
             rounded,
             border_pass: false,
+            color,
         })
     }
 }
@@ -5197,6 +5488,9 @@ mod nonfinite_effect_tests {
             blur_radius: f32::INFINITY,
             edge_fade: f32::NEG_INFINITY,
             filter_blur: f32::NAN,
+            brightness: 1.,
+            contrast: 1.,
+            saturate: 1.,
         };
         scene.set_effects(node, invalid);
         assert_eq!(scene.effects(node), Effects::default());
@@ -5231,6 +5525,9 @@ mod nonfinite_effect_tests {
                 blur_radius: 4.,
                 edge_fade: 3.,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
         );
         scene.flush();
@@ -5242,6 +5539,9 @@ mod nonfinite_effect_tests {
                 blur_radius: f32::NAN,
                 edge_fade: f32::INFINITY,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
         );
         assert_eq!(
@@ -5261,6 +5561,9 @@ mod nonfinite_effect_tests {
                 blur_radius: -2.,
                 edge_fade: -0.,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
         );
         assert_eq!(scene.effects(node), Effects::default());
@@ -5273,6 +5576,9 @@ mod nonfinite_effect_tests {
                 blur_radius: f32::NEG_INFINITY,
                 edge_fade: f32::NAN,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
         );
         assert!(scene.flush().is_idle());
@@ -5848,6 +6154,53 @@ mod local_transform_tests {
         scene.set_clip_inset(id, None);
         assert!(!scene.flush().damage.is_empty());
         assert_eq!(scene.clip_inset(id), None);
+    }
+    #[test]
+    fn colour_filters_compose_down_the_tree_without_layers() {
+        let (mut scene, id) = placed(40., 20.);
+        assert_eq!(Effects::default().color_matrix(), None);
+        // Nonfinite factors change nothing; negative ones clamp to 0.
+        scene.set_effects(
+            id,
+            Effects {
+                brightness: f32::NAN,
+                contrast: -1.,
+                ..Effects::default()
+            },
+        );
+        assert_eq!(
+            (scene.effects(id).brightness, scene.effects(id).contrast),
+            (1., 0.)
+        );
+        let half = Effects {
+            brightness: 0.5,
+            ..Effects::default()
+        };
+        scene.set_effects(id, half);
+        let frame = scene.flush();
+        assert_eq!((frame.layout_nodes, frame.paint_nodes), (0, 0));
+        assert!(!scene.is_layer(id));
+        let matrix = half.color_matrix().unwrap();
+        assert_eq!(matrix[0][0], 0.5);
+        assert_eq!(matrix[1][1], 0.5);
+        assert_eq!(matrix[0][3], 0.);
+        // A filtered node inside a filtered one: both, composed.
+        let quarter = compose_color(Some(matrix), Some(matrix)).unwrap();
+        assert_eq!(quarter[2][2], 0.25);
+        let item = scene
+            .layer_items(None)
+            .into_iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        assert_eq!(item.color, Some(matrix));
+        // Contrast 0 maps everything to mid grey.
+        let grey = Effects {
+            contrast: 0.,
+            ..Effects::default()
+        }
+        .color_matrix()
+        .unwrap();
+        assert_eq!(grey[0], [0., 0., 0., 0.5]);
     }
     #[test]
     fn masks_promote_and_move_by_compositing_alone() {

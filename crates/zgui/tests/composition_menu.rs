@@ -195,7 +195,7 @@ fn disabled_menu_items_reject_pointer_and_invalid_leaf_cleanup() {
     let before = ui.scene.borrow().len();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || ui.mount(menu_item("Invalid"))
+            || ui.mount(button().read_only(true))
         ))
         .is_err()
     );
@@ -220,4 +220,34 @@ fn repeated_typeahead_cycles_even_when_a_label_matches_doubled_letters() {
         });
         assert_eq!(ui.input.focused(), view.find(expected));
     }
+}
+
+#[test]
+fn items_outside_a_menu_are_plain_actions() {
+    let mut ui = Ui::new(500., 400.);
+    let open = ui.signal(true);
+    let child_open = ui.signal(false);
+    let calls = ui.signal(0);
+    let action = calls.clone();
+    let view = ui.mount(
+        popover("Tools", open.clone(), button().id("anchor").child("Tools")).children([
+            menu_item("Zoom").id("zoom").on_click(move || {
+                action.set(action.get() + 1);
+            }),
+            submenu("More", child_open.clone())
+                .trigger_id("more")
+                .child(menu_item("Inner").id("inner")),
+        ]),
+    );
+    ui.prepare_frame();
+    let zoom = view.find("zoom").unwrap();
+    ui.input.dispatch_to(&ui.scene, zoom, InputEvent::Activate);
+    // Nothing to close: the popover stays open and the action runs.
+    assert_eq!(calls.get(), 1);
+    assert!(open.get());
+    let more = view.find("more").unwrap();
+    ui.input.dispatch_to(&ui.scene, more, InputEvent::Activate);
+    ui.prepare_frame();
+    assert!(child_open.get());
+    assert!(view.find("inner").is_some());
 }

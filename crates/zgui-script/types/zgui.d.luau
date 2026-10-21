@@ -2,7 +2,9 @@
 -- Type definitions for zgui-script's globals, `ui` and `anime`, for
 -- luau-lsp (editor completion and checking) and `luau-lsp analyze`:
 --   luau-lsp analyze --definitions=crates/zgui-script/types/zgui.d.luau app.luau
--- In VS Code, add this file to `luau-lsp.types.definitionFiles`, and turn on
+-- In VS Code, set `luau-lsp.platform.type` to "standard" (requires resolve
+-- by path), put `"languageMode": "strict"` in the project's .luaurc, add
+-- this file to `luau-lsp.types.definitionFiles`, and turn on
 -- Luau's new type solver (`"luau-lsp.fflags.override": { "LuauSolverV2":
 -- "true" }`, or `--flag:LuauSolverV2=true`): it reports misspelled
 -- properties, which the old solver lets through.
@@ -58,7 +60,44 @@ declare extern type Path with
 	function arc(self, cx: number, cy: number, r: number, start: number, sweep: number): Path
 	function close(self): Path
 end
+-- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a
+-- text or computed reading `web.title` follows the page.
+declare extern type Web with
+	url: string
+	title: string
+	loading: boolean
+	progress: number
+	can_go_back: boolean
+	can_go_forward: boolean
+	focused: boolean
+	error: string?
+	function load(self, url: string): ()
+	function html(self, html: string, base_url: string?): ()
+	function back(self): ()
+	function forward(self): ()
+	function reload(self): ()
+	function stop(self): ()
+	function focus(self): ()
+	function blur(self): ()
+	function devtools(self): ()
+	function zoom(self, zoom: number): ()
+	function run(self, js: string): ()
+	-- The script's value as Luau data, or nil and the error.
+	function eval(self, js: string, reply: ((value: any, err: string?) -> ())?): ()
+end
+type WebOptions = {
+	transparent: boolean?,
+	-- "default" (shared cookies and storage), "ephemeral", or a name.
+	profile: string?,
+	inspectable: boolean?,
+	user_agent: string?,
+	-- `window.zgui.postMessage(value)` from the page reaches on_message.
+	messages: boolean?,
+	new_windows: boolean?,
+}
+type WebEvent = { kind: "started" | "committed" | "finished" | "failed" | "changed", url: string }
 declare extern type Brush with end
+declare extern type Shader with end
 type Paint = Color | Brush
 declare extern type Canvas with
 	function rect(self, x: number, y: number, w: number, h: number, paint: Paint, radius: number?): ()
@@ -73,7 +112,8 @@ end
 -- A property's value: a literal, a state, a function of state (rerun when
 -- what it reads changes) or an animation binding.
 type P<T> = T | State | (() -> T) | Binding
-type Handler = (...any) -> ...any
+-- Called with nothing; what it returns is ignored.
+type Handler = () -> ...unknown
 type Child = Node | string | (() -> string) | { Child } | false | nil
 
 -- Plain styles, for `hover`, `active`, `focus` and `disabled`.
@@ -153,6 +193,9 @@ type Styles = {
 	border_dash: Pair?,
 	shadow: Shadow?,
 	opacity: number?,
+	brightness: number?,
+	contrast: number?,
+	saturate: number?,
 	blur: number?,
 	backdrop_blur: number?,
 	fade: Pair?,
@@ -262,6 +305,9 @@ type Props = {
 	border_dash: P<Pair>?,
 	shadow: P<Shadow>?,
 	opacity: P<number>?,
+	brightness: P<number>?,
+	contrast: P<number>?,
+	saturate: P<number>?,
 	blur: P<number>?,
 	backdrop_blur: P<number>?,
 	fade: P<Pair>?,
@@ -309,6 +355,8 @@ type Props = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	mask: (Bitmap | { any })?,
+	bg_shader: Shader?,
+	shader_params: { Color | { number } }?,
 	-- Events.
 	on_click: (Handler | Action)?,
 	on_press: (Handler | Action)?,
@@ -338,12 +386,31 @@ type Props = {
 	overscan: number?,
 	row: ((index: number) -> Node)?,
 	open: State?,
-	anchor: Ref?,
+	-- popover and menu: the trigger, shown where the popover is written.
+	anchor: Node?,
+	-- Web views: a ui.web() controller (so the page outlives the node), or
+	-- the options to make one; `src` is the page, or `html` with `base_url`.
+	web: Web?,
+	html: string?,
+	base_url: string?,
+	transparent: boolean?,
+	profile: string?,
+	inspectable: boolean?,
+	user_agent: string?,
+	messages: boolean?,
+	new_windows: boolean?,
+	on_navigate: ((e: WebEvent) -> ())?,
+	on_load: ((url: string) -> ())?,
+	on_title: ((title: string) -> ())?,
+	on_message: ((value: any) -> ())?,
+	on_error: ((url: string, err: string) -> ())?,
+	on_new_window: ((url: string) -> ())?,
 	-- Children.
 	[number]: Child,
 }
 
 type Container = (props: Props) -> Node
+
 
 -- Animation values: numbers, strings with units ("10px", "1turn", "+=10"),
 -- colors, keyframe lists, tween tables, staggers and functions of
@@ -402,6 +469,27 @@ type ElementParams = {
 	border_radius: AnimValue?,
 	border_width: AnimValue?,
 	bottom: AnimValue?,
+	brightness: AnimValue?,
+	contrast: AnimValue?,
+	saturate: AnimValue?,
+	shaderTime: AnimValue?,
+	shader_time: AnimValue?,
+	shaderParam0: AnimValue?,
+	shaderParam1: AnimValue?,
+	shaderParam2: AnimValue?,
+	shaderParam3: AnimValue?,
+	shaderParam4: AnimValue?,
+	shaderParam5: AnimValue?,
+	shaderParam6: AnimValue?,
+	shaderParam7: AnimValue?,
+	shaderParam8: AnimValue?,
+	shaderParam9: AnimValue?,
+	shaderParam10: AnimValue?,
+	shaderParam11: AnimValue?,
+	shaderParam12: AnimValue?,
+	shaderParam13: AnimValue?,
+	shaderParam14: AnimValue?,
+	shaderParam15: AnimValue?,
 	clipBottom: AnimValue?,
 	clipLeft: AnimValue?,
 	clipRight: AnimValue?,
@@ -599,6 +687,8 @@ declare ui: {
 	image: Container,
 	svg: Container,
 	canvas: Container,
+	webview: Container,
+	web: (opts: WebOptions?) -> Web,
 	checkbox: Container,
 	input: Container,
 	textarea: Container,
@@ -641,6 +731,9 @@ declare ui: {
 	spring: (state: State, opts: { stiffness: number?, damping: number?, from: any?, to: any? }?) -> Binding,
 	loop: (opts: { duration: number?, ease: Ease?, yoyo: boolean?, fps: number?, from: any?, to: any? }?) -> Binding,
 	bitmap: (w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap,
+	-- A WGSL fill: `fn fill(input: FillInput) -> vec4<f32>`, with input.p,
+	-- input.size, input.time, input.scale and input.params (four vec4s).
+	shader: (source: string, opts: { fps: number? }?) -> Shader,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { Color }) -> Brush,
 }
@@ -704,4 +797,3 @@ declare anime: {
 	},
 }
 
-declare function require(name: string): any

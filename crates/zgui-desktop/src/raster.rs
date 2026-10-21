@@ -150,10 +150,40 @@ impl Raster {
                         self.blur(visible, item.effects.blur_radius.ceil().min(64.) as usize);
                     }
                     match item.kind {
-                        NodeKind::Rect(color) => self.rect(item.bounds, clip, *color, item.effects),
-                        NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } => {
-                            let style = border_part(style, item.border_pass);
-                            self.quad(item.id, item.bounds, clip, style, item.effects)
+                        NodeKind::Rect(color) => {
+                            self.rect(item.bounds, clip, tint(*color, item.color), item.effects)
+                        }
+                        NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
+                            // A border pass: the border over what it holds
+                            // (if it paints there), then the outline.
+                            if !item.border_pass || (quad.border_over && quad.has_border()) {
+                                let mut style = border_part(quad, item.border_pass);
+                                style.fill = tint(style.fill, item.color);
+                                style.border_color = tint(style.border_color, item.color);
+                                self.quad(item.id, item.bounds, clip, style, item.effects)
+                            }
+                            if let Some(outline) = quad.outline.filter(|o| o.visible())
+                                && item.border_pass
+                            {
+                                let grown = outline.offset + outline.width;
+                                let ring = zgui::scene::QuadStyle {
+                                    radius: if quad.radius > 0. {
+                                        quad.radius + grown
+                                    } else {
+                                        0.
+                                    },
+                                    border_width: outline.width,
+                                    border_color: tint(outline.color, item.color),
+                                    ..Default::default()
+                                };
+                                self.quad(
+                                    item.id,
+                                    outline.outer(item.bounds),
+                                    clip,
+                                    ring,
+                                    item.effects,
+                                )
+                            }
                         }
                         NodeKind::Svg(svg) => {
                             if item.bounds.width > 0.
@@ -198,6 +228,7 @@ impl Raster {
                             color,
                             font_size,
                         } => {
+                            let color = &tint(*color, item.color);
                             if item.text_options != Default::default() {
                                 let runs = if text.is_empty() {
                                     Vec::new()
@@ -1077,6 +1108,22 @@ mod tests {
         (raster.pixels.clone(), fresh.pixels)
     }
     #[test]
+    fn colour_filters_tint_what_the_subtree_paints() {
+        let mut s = scene();
+        let red = rectangle(&mut s, 30., Color(255, 0, 0, 255));
+        s.set_effects(
+            red,
+            Effects {
+                brightness: 0.5,
+                ..Effects::default()
+            },
+        );
+        let mut raster = Raster::new(100, 80);
+        let (pixels, full) = incremental_and_full(&mut raster, &mut s);
+        assert_eq!(pixels, full);
+        assert_eq!(pixels[25 * 100 + 45], 0x800000);
+    }
+    #[test]
     fn background_images_paint_between_fill_and_border() {
         let stripes = std::sync::Arc::new(
             zgui::image::ImageData::new(
@@ -1322,6 +1369,9 @@ mod tests {
                 blur_radius: 4.,
                 edge_fade: 8.,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
         );
         let mut r = Raster::new(100, 80);
@@ -1337,6 +1387,19 @@ mod tests {
     }
 }
 
+/// `color` through colour filters (`PaintItem::color`), as the GPU applies
+/// them to straight RGB. Images and rich text keep their colours here.
+fn tint(color: Color, matrix: Option<zgui::scene::ColorMatrix>) -> Color {
+    let Some(m) = matrix else {
+        return color;
+    };
+    let rgb = [color.0, color.1, color.2].map(|c| c as f32 / 255.);
+    let row = |r: [f32; 4]| {
+        let value = r[0] * rgb[0] + r[1] * rgb[1] + r[2] * rgb[2] + r[3];
+        (value.clamp(0., 1.) * 255.).round() as u8
+    };
+    Color(row(m[0]), row(m[1]), row(m[2]), color.3)
+}
 /// The size an image of `source_w` × `source_h` shows at in `bounds` as
 /// `fit` places it.
 fn fitted(source_w: f32, source_h: f32, bounds: Rect, fit: zgui::style::ObjectFit) -> (f32, f32) {
@@ -1435,6 +1498,7 @@ mod extended_tests {
                 }),
                 decoration: None,
                 border_over: false,
+                outline: None,
             }),
             Style {
                 width: Some(24.),
@@ -1728,5 +1792,75 @@ mod hidden_effect_tests {
             raster.render(&scene, &damage);
             assert_eq!(raster.pixels, baseline);
         }
+    }
+}
+
+#[cfg(test)]
+mod outline_tests {
+    use super::*;
+    use zgui::scene::{Layout, Outline, QuadStyle, Style, Transform};
+    #[test]
+    fn outlines_ring_boxes_past_their_clip_and_repaint_where_they_were() {
+        let mut raster = Raster::new(80, 80);
+        let mut scene = Scene::new(80., 80.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let quad = |offset| QuadStyle {
+            fill: Color(20, 20, 20, 255),
+            outline: Some(Outline {
+                width: 4.,
+                color: Color(255, 255, 255, 255),
+                offset,
+            }),
+            ..Default::default()
+        };
+        let panel = scene.append(
+            scene.root(),
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: quad(2.),
+            },
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                clip: true,
+                ..Default::default()
+            },
+        );
+        scene.append(
+            panel,
+            NodeKind::Rect(Color(255, 0, 0, 255)),
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(panel, Transform { x: 20., y: 20. });
+        let at = |raster: &Raster, x: usize, y: usize| raster.pixels[y * 80 + x];
+        let clear = raster.background;
+        let d = scene.flush().damage;
+        raster.render(&scene, &d);
+        // 2 to 6 outside the box, square corners square, over nothing.
+        assert_eq!(at(&raster, 15, 40), 0xffffff);
+        assert_eq!(at(&raster, 19, 40), clear);
+        assert_eq!(at(&raster, 21, 40), 0xff0000);
+        assert_eq!(at(&raster, 15, 15), 0xffffff);
+        // Centred (offset -2): over the child, 2 each side of the edge.
+        scene.set_kind(
+            panel,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: quad(-2.),
+            },
+        );
+        let d = scene.flush().damage;
+        raster.render(&scene, &d);
+        let partial = raster.pixels.clone();
+        raster.render(&scene, &[Rect::new(0., 0., 80., 80.)]);
+        assert_eq!(partial, raster.pixels, "incremental differs from full");
+        assert_eq!(at(&raster, 15, 40), clear);
+        assert_eq!(at(&raster, 19, 40), 0xffffff);
+        assert_eq!(at(&raster, 21, 40), 0xffffff);
+        assert_eq!(at(&raster, 23, 40), 0xff0000);
     }
 }

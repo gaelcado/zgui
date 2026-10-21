@@ -1027,7 +1027,7 @@ impl Engine {
                 .cloned(),
         );
         let dt = dt * self.speed.get();
-        if self.frames.get() % 32 == 0 {
+        if self.frames.get().is_multiple_of(32) {
             // Animations whose elements have all left the interface end, so
             // a loop on a removed row does not keep frames coming.
             playing.retain(|clip| {

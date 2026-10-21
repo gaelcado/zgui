@@ -69,3 +69,6 @@ mod compose_drag;
 
 #[cfg(target_os = "macos")]
 pub mod native_surface;
+
+pub mod native_view;
+pub mod web_view;

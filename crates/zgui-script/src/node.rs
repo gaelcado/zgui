@@ -45,6 +45,10 @@ pub(crate) struct Node {
     /// `mask = { bitmap, w, h, x, y }`: the content shows through the
     /// bitmap's alpha, drawn at `w`×`h` from (`x`, `y`).
     pub mask: Option<Mask>,
+    /// `bg_shader = ui.shader(...)`: the box is filled by a WGSL function.
+    pub shader: Option<Arc<zgui::decoration::FillShader>>,
+    /// `shader_params`: the shader's sixteen values, as four vec4s.
+    pub shader_params: Option<[[f32; 4]; 4]>,
 }
 /// An alpha mask over a node's content; the offset animates (`maskX`).
 #[derive(Clone)]
@@ -53,6 +57,155 @@ pub(crate) struct Mask {
     pub size: (f32, f32),
     pub offset: (f32, f32),
 }
+/// A web view's page, controller and handlers.
+pub(crate) struct WebSpec {
+    /// Shared with `ui.web()` when given, so the page outlives this node.
+    pub web: zgui::web_view::WebView,
+    pub src: Option<Source>,
+    pub html: Option<(String, Option<String>)>,
+    pub on_navigate: Option<Function>,
+    pub on_load: Option<Function>,
+    pub on_title: Option<Function>,
+    pub on_message: Option<Function>,
+    pub on_error: Option<Function>,
+    pub on_new_window: Option<Function>,
+}
+
+/// `ui.web(opts)`: a web view's controller, usable before and after its
+/// view mounts.
+#[derive(Clone)]
+pub(crate) struct WebUd(pub zgui::web_view::WebView);
+impl UserData for WebUd {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        // Reads are tracked: a text or computed that reads them follows them.
+        fields.add_field_method_get("url", |_, w| Ok(w.0.url()));
+        fields.add_field_method_get("title", |_, w| Ok(w.0.title()));
+        fields.add_field_method_get("loading", |_, w| Ok(w.0.loading()));
+        fields.add_field_method_get("progress", |_, w| Ok(w.0.progress()));
+        fields.add_field_method_get("can_go_back", |_, w| Ok(w.0.can_go_back()));
+        fields.add_field_method_get("can_go_forward", |_, w| Ok(w.0.can_go_forward()));
+        fields.add_field_method_get("focused", |_, w| Ok(w.0.focused()));
+        fields.add_field_method_get("error", |_, w| Ok(w.0.state().get().error));
+    }
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("load", |_, w, url: String| {
+            w.0.load_url(url);
+            Ok(())
+        });
+        methods.add_method("html", |_, w, (html, base): (String, Option<String>)| {
+            w.0.load_html(html, base.as_deref());
+            Ok(())
+        });
+        methods.add_method("back", |_, w, ()| {
+            w.0.go_back();
+            Ok(())
+        });
+        methods.add_method("forward", |_, w, ()| {
+            w.0.go_forward();
+            Ok(())
+        });
+        methods.add_method("reload", |_, w, ()| {
+            w.0.reload();
+            Ok(())
+        });
+        methods.add_method("stop", |_, w, ()| {
+            w.0.stop();
+            Ok(())
+        });
+        methods.add_method("focus", |_, w, ()| {
+            w.0.focus();
+            Ok(())
+        });
+        methods.add_method("blur", |_, w, ()| {
+            w.0.blur();
+            Ok(())
+        });
+        methods.add_method("devtools", |_, w, ()| {
+            w.0.open_devtools();
+            Ok(())
+        });
+        methods.add_method("zoom", |_, w, zoom: f64| {
+            w.0.set_zoom(zoom);
+            Ok(())
+        });
+        methods.add_method("run", |_, w, js: String| {
+            w.0.run_js(js);
+            Ok(())
+        });
+        // `web:eval(js, function(value, err) … end)`: the result as Luau data.
+        methods.add_method("eval", |lua, w, (js, reply): (String, Option<Function>)| {
+            let vm = env(lua)?.vm.clone();
+            w.0.evaluate_js(js, move |result| {
+                let (Some(reply), Some(vm)) = (reply, vm.upgrade()) else {
+                    return;
+                };
+                let outcome = match result {
+                    Ok(json) => vm.call::<()>(&reply, (json_value(&json), mlua::Value::Nil)),
+                    Err(error) => vm.call::<()>(&reply, (Value::Nil, error)),
+                };
+                if let Err(e) = outcome {
+                    vm.report(e);
+                }
+            });
+            Ok(())
+        });
+    }
+}
+/// JSON as script data (objects as maps, arrays as lists).
+pub(crate) fn json_value(json: &str) -> Value {
+    fn convert(v: serde_json::Value) -> Value {
+        match v {
+            serde_json::Value::Null => Value::Nil,
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::Number(n) => Value::Num(n.as_f64().unwrap_or(0.)),
+            serde_json::Value::String(s) => Value::Str(s.into()),
+            serde_json::Value::Array(a) => {
+                Value::List(a.into_iter().map(convert).collect::<Vec<_>>().into())
+            }
+            serde_json::Value::Object(o) => Value::Map(
+                o.into_iter()
+                    .map(|(k, v)| (k.into(), convert(v)))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        }
+    }
+    serde_json::from_str(json)
+        .map(convert)
+        .unwrap_or_else(|_| Value::Str(json.into()))
+}
+/// A controller's options from a script table.
+fn web_options(table: &Table) -> mlua::Result<zgui::web_view::WebViewOptions> {
+    use zgui::web_view::{WebProfile, WebViewOptions};
+    let defaults = WebViewOptions::default();
+    let profile = match table.get::<Option<String>>("profile")?.as_deref() {
+        None | Some("default") => WebProfile::Default,
+        Some("ephemeral") => WebProfile::Ephemeral,
+        Some(name) => WebProfile::Named(name.to_owned()),
+    };
+    Ok(WebViewOptions {
+        transparent: table
+            .get::<Option<bool>>("transparent")?
+            .unwrap_or(defaults.transparent),
+        profile,
+        inspectable: table
+            .get::<Option<bool>>("inspectable")?
+            .unwrap_or(defaults.inspectable),
+        user_agent: table.get::<Option<String>>("user_agent")?,
+        messages: table
+            .get::<Option<bool>>("messages")?
+            .unwrap_or(defaults.messages),
+        new_windows: table
+            .get::<Option<bool>>("new_windows")?
+            .unwrap_or(defaults.new_windows),
+    })
+}
+
+/// `ui.shader(source, { fps })`: a WGSL fill, compiled once per source.
+#[derive(Clone)]
+pub(crate) struct ShaderUd(pub Arc<zgui::decoration::FillShader>);
+impl UserData for ShaderUd {}
+
 /// `ui.bitmap(w, h, fn)`: pixels made by a script, for masks.
 #[derive(Clone)]
 pub(crate) struct BitmapUd(pub Arc<zgui::image::ImageData>);
@@ -92,6 +245,8 @@ impl Node {
             disabled: None,
             layout: None,
             mask: None,
+            shader: None,
+            shader_params: None,
         }
     }
     /// Whether scripts can reach this node (selectors, refs, `on_mount`):
@@ -135,6 +290,7 @@ impl Node {
             Kind::Image { .. } => "image",
             Kind::Svg { .. } => "svg",
             Kind::Canvas(_) => "canvas",
+            Kind::WebView(_) => "webview",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -234,6 +390,8 @@ pub(crate) enum Kind {
     /// `fn(canvas, width, height)`, run again when its size or the state it
     /// reads changes.
     Canvas(Function),
+    /// `ui.webview { ... }`: a native web view laid out like a div.
+    WebView(Box<WebSpec>),
     Checkbox {
         label: String,
         value: Signal<Value>,
@@ -491,7 +649,8 @@ props! {
     "rounded_br" => RoundedBr: Num, "rounded_bl" => RoundedBl: Num,
     "border" => Border: Num, "border_sides" => BorderSides: Corners, "border_color" => BorderColor: Color,
     "border_over" => BorderOver: Bool, "border_dash" => BorderDash: Pair,
-    "shadow" => Shadow: Shadow, "opacity" => Opacity: Num, "blur" => Blur: Num, "backdrop_blur" => BackdropBlur: Num,
+    "shadow" => Shadow: Shadow, "opacity" => Opacity: Num,
+    "brightness" => Brightness: Num, "contrast" => Contrast: Num, "saturate" => Saturate: Num, "blur" => Blur: Num, "backdrop_blur" => BackdropBlur: Num,
     "fade" => Fade: Pair, "fade_x" => FadeX: Pair, "fade_sides" => FadeSides: Corners,
     "clip_inset" => ClipInset: Corners, "layer" => Layer: Bool, "fit" => Fit: Str, "tint" => Tint: Color,
     "cursor" => Cursor: Str,
@@ -922,6 +1081,47 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                 }
             },
             "focusable" => node.focusable = Some(lua.unpack(value)?),
+            "bg_shader" => {
+                let mlua::Value::UserData(ud) = &value else {
+                    return Err(mlua::Error::runtime("`bg_shader` takes a ui.shader"));
+                };
+                node.shader = Some(ud.borrow::<ShaderUd>()?.0.clone());
+            }
+            "shader_params" => {
+                // Up to four vec4s: lists of numbers, or colors (0 to 1).
+                let mlua::Value::Table(list) = &value else {
+                    return Err(mlua::Error::runtime(
+                        "`shader_params` takes a list of up to four vec4s",
+                    ));
+                };
+                let mut params = [[0.; 4]; 4];
+                for (i, entry) in list.sequence_values::<mlua::Value>().enumerate().take(4) {
+                    params[i] = match entry? {
+                        mlua::Value::Table(v) => {
+                            let mut out = [0.; 4];
+                            for (j, n) in v.sequence_values::<f32>().enumerate().take(4) {
+                                out[j] = n?;
+                            }
+                            out
+                        }
+                        other => {
+                            let value: Value = lua.unpack(other)?;
+                            let c = color_of(&value).ok_or_else(|| {
+                                mlua::Error::runtime(
+                                    "a shader parameter is a list of numbers or a color",
+                                )
+                            })?;
+                            [
+                                c.0 as f32 / 255.,
+                                c.1 as f32 / 255.,
+                                c.2 as f32 / 255.,
+                                c.3 as f32 / 255.,
+                            ]
+                        }
+                    };
+                }
+                node.shader_params = Some(params);
+            }
             "mask" => {
                 let (bitmap, t) = match &value {
                     mlua::Value::UserData(ud) => (ud.borrow::<BitmapUd>()?.0.clone(), None),
@@ -1654,6 +1854,114 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, ()| Ok(RefUd(Rc::default())))?,
     )?;
     ui.set(
+        "web",
+        lua.create_function(|lua, opts: Option<Table>| {
+            let options = match &opts {
+                Some(t) => web_options(t)?,
+                None => Default::default(),
+            };
+            Ok(WebUd(zgui::web_view::WebView::new(
+                &env(lua)?.runtime,
+                options,
+            )))
+        })?,
+    )?;
+    ui.set(
+        "webview",
+        lua.create_function(|lua, table: Table| {
+            let web = match table.get::<mlua::Value>("web")? {
+                mlua::Value::Nil => {
+                    zgui::web_view::WebView::new(&env(lua)?.runtime, web_options(&table)?)
+                }
+                mlua::Value::UserData(ud) => ud.borrow::<WebUd>()?.0.clone(),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`web` takes a ui.web(), not {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let src = match table.get::<mlua::Value>("src")? {
+                mlua::Value::Nil => None,
+                value => Some(source(lua, Ty::Str, "src", value)?),
+            };
+            let html = table
+                .get::<Option<String>>("html")?
+                .map(|html| -> mlua::Result<_> {
+                    Ok((html, table.get::<Option<String>>("base_url")?))
+                })
+                .transpose()?;
+            let handler = |key: &str| table.get::<Option<Function>>(key);
+            let spec = WebSpec {
+                web,
+                src,
+                html,
+                on_navigate: handler("on_navigate")?,
+                on_load: handler("on_load")?,
+                on_title: handler("on_title")?,
+                on_message: handler("on_message")?,
+                on_error: handler("on_error")?,
+                on_new_window: handler("on_new_window")?,
+            };
+            // What the constructor read is not a style.
+            for key in [
+                "web",
+                "src",
+                "html",
+                "base_url",
+                "transparent",
+                "profile",
+                "inspectable",
+                "user_agent",
+                "messages",
+                "new_windows",
+                "on_navigate",
+                "on_load",
+                "on_title",
+                "on_message",
+                "on_error",
+                "on_new_window",
+            ] {
+                table.raw_set(key, mlua::Value::Nil)?;
+            }
+            let node = fill(
+                lua,
+                Node::new(owner(lua)?, Kind::WebView(Box::new(spec))),
+                Some(&table),
+            )?;
+            node_ud(lua, node)
+        })?,
+    )?;
+    ui.set(
+        "shader",
+        lua.create_function(|_, (source, opts): (String, Option<Table>)| {
+            let fps = match &opts {
+                Some(t) => t.get::<Option<f32>>("fps")?,
+                None => None,
+            };
+            // One shader per source and rate: rebuilding a view does not
+            // compile it again.
+            type Shaders =
+                std::collections::HashMap<(String, Option<u32>), Arc<zgui::decoration::FillShader>>;
+            thread_local! {
+                static SHADERS: RefCell<Shaders> = RefCell::default();
+            }
+            // A shader that does not compile is the script's error, shown
+            // with its line, not a plain fill.
+            zgui_gpu::check_fill_shader(&source)
+                .map_err(|e| mlua::Error::runtime(format!("ui.shader: {e}")))?;
+            let key = (source, fps.map(f32::to_bits));
+            let shader = SHADERS.with(|shaders| {
+                shaders
+                    .borrow_mut()
+                    .entry(key.clone())
+                    .or_insert_with(|| zgui::decoration::FillShader::new(key.0.clone(), fps))
+                    .clone()
+            });
+            Ok(ShaderUd(shader))
+        })?,
+    )?;
+    ui.set(
         "bitmap",
         lua.create_function(|_, (w, h, f): (u32, u32, Function)| {
             if w == 0 || h == 0 || w > 4096 || h > 4096 {
@@ -1700,7 +2008,20 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "state",
         lua.create_function(|lua, (key, initial): (String, Value)| {
-            Ok(State(env(lua)?.store.state(&key, initial)))
+            let env = env(lua)?;
+            // A required module's keys are its own: two modules' "open" are
+            // two states. The script's own keys stay as they are.
+            let chunk = lua
+                .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
+                .flatten();
+            let script = env.vm.upgrade().map(|vm| format!("@{}", vm.name));
+            let key = match chunk {
+                Some(chunk) if Some(&chunk) != script.as_ref() && chunk.starts_with('@') => {
+                    format!("{}::{key}", &chunk[1..])
+                }
+                _ => key,
+            };
+            Ok(State(env.store.state(&key, initial)))
         })?,
     )?;
     ui.set(

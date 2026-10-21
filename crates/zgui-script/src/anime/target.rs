@@ -19,6 +19,10 @@ pub(crate) enum Key {
     Y,
     Opacity,
     Blur,
+    /// CSS filter color functions, on the compositor.
+    Brightness,
+    Contrast,
+    Saturate,
     Scale,
     ScaleX,
     ScaleY,
@@ -34,6 +38,8 @@ pub(crate) enum Key {
     ClipRight,
     ClipBottom,
     ClipLeft,
+    /// A shader fill's time (0) or parameter (1 to 16).
+    Shader(u8),
     Style(Prop),
     /// A state's value or a table field.
     Field(Rc<str>),
@@ -65,12 +71,23 @@ impl Key {
             "x" | "translateX" | "translate_x" => Key::X,
             "y" | "translateY" | "translate_y" => Key::Y,
             "opacity" => Key::Opacity,
+            "brightness" => Key::Brightness,
+            "contrast" => Key::Contrast,
+            "saturate" => Key::Saturate,
             "blur" | "filter" => Key::Blur,
             "maskX" | "mask_x" => Key::MaskX,
             "clipTop" | "clip_top" => Key::ClipTop,
             "clipRight" | "clip_right" => Key::ClipRight,
             "clipBottom" | "clip_bottom" => Key::ClipBottom,
             "clipLeft" | "clip_left" => Key::ClipLeft,
+            "shaderTime" | "shader_time" => Key::Shader(0),
+            name if name.starts_with("shaderParam") => {
+                let n: u8 = name["shaderParam".len()..].parse().ok()?;
+                if n > 15 {
+                    return None;
+                }
+                Key::Shader(n + 1)
+            }
             "maskY" | "mask_y" => Key::MaskY,
             "scale" => Key::Scale,
             "scaleX" | "scale_x" => Key::ScaleX,
@@ -125,7 +142,8 @@ impl Key {
             Key::ClipTop | Key::ClipBottom => Unit::Length(Basis::OwnHeight),
             Key::ClipLeft | Key::ClipRight => Unit::Length(Basis::OwnWidth),
             Key::Y => Unit::Length(Basis::OwnHeight),
-            Key::Opacity | Key::Scale | Key::ScaleX | Key::ScaleY => Unit::Factor,
+            Key::Opacity | Key::Scale | Key::ScaleX | Key::ScaleY | Key::Shader(_) => Unit::Factor,
+            Key::Brightness | Key::Contrast | Key::Saturate => Unit::Factor,
             Key::Rotate | Key::Skew | Key::SkewX | Key::SkewY => Unit::Angle,
             Key::Style(prop) => match prop.ty() {
                 crate::node::Ty::Color => Unit::Color,
@@ -250,12 +268,22 @@ fn read_element(e: &Element, key: &Key) -> V {
         Key::Y => V::Num(e.translate().1 as f64),
         Key::Opacity => V::Num(e.opacity() as f64),
         Key::Blur => V::Num(e.blur() as f64),
+        Key::Brightness => V::Num(e.color()[0] as f64),
+        Key::Contrast => V::Num(e.color()[1] as f64),
+        Key::Saturate => V::Num(e.color()[2] as f64),
         Key::MaskX => V::Num(e.mask_offset().0 as f64),
         Key::MaskY => V::Num(e.mask_offset().1 as f64),
         Key::ClipTop => V::Num(e.clip_inset()[0] as f64),
         Key::ClipRight => V::Num(e.clip_inset()[1] as f64),
         Key::ClipBottom => V::Num(e.clip_inset()[2] as f64),
         Key::ClipLeft => V::Num(e.clip_inset()[3] as f64),
+        Key::Shader(slot) => {
+            let u = e.shader_uniforms();
+            V::Num(match *slot {
+                0 => u.time,
+                n => u.params[(n as usize - 1) / 4][(n as usize - 1) % 4],
+            } as f64)
+        }
         Key::Scale | Key::ScaleX => V::Num(local().scale.0 as f64),
         Key::ScaleY => V::Num(local().scale.1 as f64),
         Key::Rotate => V::Num(local().rotate as f64),
@@ -360,12 +388,16 @@ fn write_element(e: &Element, key: &Key, v: &V) {
         Key::Y => e.set_translate((e.translate().0, n())),
         Key::Opacity => e.set_opacity(n().clamp(0., 1.)),
         Key::Blur => e.set_blur(n().max(0.)),
+        Key::Brightness => e.set_color_part(0, n().max(0.)),
+        Key::Contrast => e.set_color_part(1, n().max(0.)),
+        Key::Saturate => e.set_color_part(2, n().max(0.)),
         Key::MaskX => e.set_mask_offset((n(), e.mask_offset().1)),
         Key::MaskY => e.set_mask_offset((e.mask_offset().0, n())),
         Key::ClipTop => e.set_clip_side(0, n()),
         Key::ClipRight => e.set_clip_side(1, n()),
         Key::ClipBottom => e.set_clip_side(2, n()),
         Key::ClipLeft => e.set_clip_side(3, n()),
+        Key::Shader(slot) => e.set_shader_slot(*slot as usize, n()),
         Key::Scale => e.set_local(crate::transform::LocalTransform {
             scale: (n(), n()),
             ..local()

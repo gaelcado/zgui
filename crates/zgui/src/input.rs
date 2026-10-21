@@ -575,6 +575,22 @@ impl InputDispatcher {
     pub fn has_listeners(&self, node: NodeId) -> bool {
         self.state.borrow().entries.contains_key(&node)
     }
+    /// `has_listeners`, or `None` while dispatch holds the input state (a
+    /// native hit test can ask re-entrantly, from inside a callback).
+    pub fn try_has_listeners(&self, node: NodeId) -> Option<bool> {
+        let state = self.state.try_borrow().ok()?;
+        Some(state.entries.contains_key(&node))
+    }
+    /// `options`, or `None` while dispatch holds the input state.
+    pub fn try_options(&self, node: NodeId) -> Option<Option<NodeInput>> {
+        let state = self.state.try_borrow().ok()?;
+        Some(state.options.get(&node).copied())
+    }
+    /// `is_enabled`, or `None` while dispatch holds the input state.
+    pub fn try_is_enabled(&self, scene: &Scene, node: NodeId) -> Option<bool> {
+        drop(self.state.try_borrow().ok()?);
+        Some(self.enabled(scene, node))
+    }
     /// Metadata may be attached to containers without registering an event callback.
     pub fn set_options(&self, node: NodeId, options: NodeInput) {
         if options.disabled {

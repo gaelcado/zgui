@@ -24,6 +24,13 @@ jobs:
       - name: Benchmark sampler failure evidence
         run: python3 scripts/test_compare.py -v
       - run: cargo fmt --all -- --check
+      # Luau scripts, as stylua.toml and .styluaignore have them.
+      - uses: JohnnyMorganz/stylua-action@v4
+        if: runner.os == 'Linux'
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: 2.6.0
+          args: --check crates/zgui-script
       - run: cargo check --workspace --all-targets --locked
       - run: cargo test -p zgui -p zgui-desktop -p zgui-workload --all-targets --locked
       - run: cargo test --workspace --doc --locked

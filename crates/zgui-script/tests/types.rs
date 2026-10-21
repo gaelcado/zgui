@@ -104,7 +104,14 @@ fn ui_functions_are_typed() {
 
 #[test]
 fn animatable_keys_are_typed() {
-    let keys = quoted(TARGET, "pub fn for_element", "pub fn unit");
+    let mut keys = quoted(TARGET, "pub fn for_element", "pub fn unit");
+    // `shaderParam0` to `shaderParam15` share a prefix in the engine.
+    assert!(
+        keys.iter().any(|k| k == "shaderParam"),
+        "the shader parameter keys moved"
+    );
+    keys.retain(|k| k != "shaderParam");
+    keys.extend((0..16).map(|i| format!("shaderParam{i}")));
     let gaps = missing(&keys, body("type ElementParams = {"));
     assert!(gaps.is_empty(), "animatable keys without types: {gaps:?}");
 }

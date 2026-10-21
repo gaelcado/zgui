@@ -25,6 +25,9 @@ pub struct Harness {
     pub clock: FrameClock,
     pub frame: Cell<u64>,
     pub start: Instant,
+    /// Native views (web pages) the script placed; unsupported, so they
+    /// show placeholders.
+    pub natives: zgui::native_view::NativeViews,
 }
 #[allow(dead_code)]
 impl Harness {
@@ -34,9 +37,13 @@ impl Harness {
         host.reload().unwrap();
         let executor = Rc::new(RefCell::new(LocalExecutor::new()));
         let clock = FrameClock::new();
+        let natives = zgui::native_view::NativeViews::new();
         let handle = ui.mount(provide(
-            TaskRunner::from_executor(executor.clone()),
-            provide(clock.clone(), host.view()),
+            natives.clone(),
+            provide(
+                TaskRunner::from_executor(executor.clone()),
+                provide(clock.clone(), host.view()),
+            ),
         ));
         let harness = Self {
             ui,
@@ -46,6 +53,7 @@ impl Harness {
             clock,
             frame: Cell::new(0),
             start: Instant::now(),
+            natives,
         };
         harness.settle();
         // A window lays out before its first frame.

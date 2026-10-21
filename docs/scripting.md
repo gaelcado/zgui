@@ -29,12 +29,13 @@ Examples: `hot_reload` (an app and two plugins), `stream_luau` / `stream_rust` (
 
 ```json
 {
+    "luau-lsp.platform.type": "standard",
     "luau-lsp.types.definitionFiles": ["crates/zgui-script/types/zgui.d.luau"],
     "luau-lsp.fflags.override": { "LuauSolverV2": "true" }
 }
 ```
 
-From a terminal: `luau-lsp analyze --flag:LuauSolverV2=true --definitions=crates/zgui-script/types/zgui.d.luau app.luau`. The style properties and animatable keys in the file follow the engine's tables; `tests/types.rs` fails when they drift. At run time an unknown animation property is an error too, shown over the window.
+Put `"languageMode": "strict"` in the project's `.luaurc` (non-strict mode reports little), and the `standard` platform resolves `require` by path, so types flow between modules. From a terminal: `luau-lsp analyze --platform standard --flag:LuauSolverV2=true --definitions=crates/zgui-script/types/zgui.d.luau app.luau`. The style properties and animatable keys in the file follow the engine's tables; `tests/types.rs` fails when they drift. At run time an unknown animation property is an error too, shown over the window.
 
 ## Elements
 
@@ -49,6 +50,7 @@ Elements take one table: string keys are properties, events and options; array e
 | `image { src = "a.png", fit = "cover" }` | PNG or JPEG, relative to the script; `src` may be state |
 | `svg { src = "icon.svg" }`, `svg { code = "<svg…>" }` | `tint = color` (a state or function re-tints it) |
 | `canvas { draw = function(c, w, h) … end }` | runs again when its size or the state it reads changes |
+| `webview { src = "https://…", … }` | a native web page (WKWebView on macOS) laid out, rounded, clipped and faded like any node, with zgui content (frosted popovers too) drawn over it; see [Web views](#web-views) |
 | `checkbox`, `input`, `textarea`, `progress`, `slider` | `{ label, value = state }`; `slider` takes `min`, `max` |
 | `show(cond, node, else)` | `cond`: state, function or boolean |
 | `switch(state, { key = node, … }, default)` | |
@@ -60,6 +62,25 @@ Elements take one table: string keys are properties, events and options; array e
 
 Canvas drawing: `c:rect(x, y, w, h, paint, radius)`, `c:circle(x, y, r, paint)`, `c:line(x1, y1, x2, y2, paint, width, opts)`, `c:fill(path, paint, "evenodd"?)`, `c:stroke(path, paint, width, { cap, join, dash, dash_offset, draw })`, `c:clip(path)`, `c:restore()`. Paths: `ui.path():move(x, y):line(…):quad(…):cubic(…):arc(cx, cy, r, start°, sweep°):close()`. Paint is a color or `ui.linear(x1, y1, x2, y2, { colors })`. `draw = t` (or `{ start, end }`) strokes a fraction of the path, as anime.js draws lines.
 
+### Web views
+
+`ui.webview` shows `src` (a URL, state or function: the page navigates when it changes) or `html` with `base_url`. Its options make the page: `transparent`, `profile` (`"default"` shares cookies and storage, `"ephemeral"` keeps nothing, any other string is a named, persistent store), `inspectable`, `user_agent`, `messages` and `new_windows`. To keep a page across the node (a tab switched away and back) or drive it from elsewhere, make its controller with `ui.web(options)` and pass `web = controller`.
+
+```lua
+local web = ui.web { profile = "ephemeral" }
+local url = ui.state("url", "https://example.com")
+return ui.column {
+    ui.row { ui.button { "Back", on_click = function() web:back() end }, ui.text { function() return web.title end } },
+    ui.webview {
+        web = web, src = url, grow = 1, rounded = 12,
+        on_navigate = function(e) print(e.kind, e.url) end,   -- started, committed, finished, failed, changed
+        on_message = function(value) print(value.kind) end,   -- window.zgui.postMessage({ kind = … }) from the page
+    },
+}
+```
+
+The controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused` and `error` are tracked like state. Its methods: `load(url)`, `html(html, base_url)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `zoom(z)`, `run(js)` and `eval(js, function(value, err) … end)`, which gets the script's value as Luau data. Events: `on_navigate({ kind, url })`, `on_load(url)`, `on_title(title)`, `on_message(value)`, `on_error(url, err)` and `on_new_window(url)`. Without a native host (headless, other platforms) the node shows a labelled box.
+
 ### Properties
 
 Any property can be a value, a state, a function (rerun when what it reads changes) or an animation binding.
@@ -67,9 +88,10 @@ Any property can be a value, a state, a function (rerun when what it reads chang
 - Size and position: `w h min_w max_w min_h max_h` (points, `"50%"`), `size w_full h_full aspect absolute relative top left right bottom`.
 - Spacing: `p px py pt pr pb pl`, margins `m mx my mt mr mb ml` (also `"auto"`), `gap gap_x gap_y`.
 - Flex and grid: `direction grow shrink basis flex_wrap wrap_reverse items justify self content`, `grid cols rows col_start row_start col_span row_span col_span_full row_span_full`.
-- Paint: `bg gradient color rounded corners border border_color border_dash shadow opacity blur backdrop_blur fade layer fit tint cursor`, `overflow overflow_x overflow_y hidden invisible`. `blur` blurs the node's own content (CSS `filter: blur()`); `backdrop_blur` blurs what is behind it (frosted glass). `fade = { top, bottom }`, `fade_x = { left, right }` or `fade_sides = { top, right, bottom, left }` fade a clipping view's edges over those widths (a horizontal row fading its right 28 points: `fade_x = { 0, 28 }`).
+- Paint: `bg gradient color rounded corners border border_color border_dash shadow opacity blur backdrop_blur fade layer fit tint cursor`, `overflow overflow_x overflow_y hidden invisible`. `blur` blurs the node's own content (CSS `filter: blur()`); `brightness`, `contrast` and `saturate` (CSS filter functions, 1 is unchanged) recolor the node and its subtree without a layer, and animate on the compositor (`hover` brightening: `anime.animate(el, { brightness = 1.12, duration = 150 })`); `backdrop_blur` blurs what is behind it (frosted glass). `fade = { top, bottom }`, `fade_x = { left, right }` or `fade_sides = { top, right, bottom, left }` fade a clipping view's edges over those widths (a horizontal row fading its right 28 points: `fade_x = { 0, 28 }`).
 - Background images: `bg_image = "photo.jpg"` (a path, state or function) with `bg_fit = "cover"` (default), `"contain"`, `"fill"`, `"none"` or `"scale_down"`: drawn over `bg`, under the border and children, cut by `rounded`/`corners`.
 - Masks: `mask = { ui.bitmap(w, h, function(x, y) return alpha end), w = …, h = …, x = …, y = … }` shows the content through the bitmap's alpha, drawn at `w`×`h` from (`x`, `y`), sampled without smoothing. Animating `maskX` / `maskY` slides it on the compositor (a shimmer band, a dithered fill, a sprite strip stepped with `ease = "steps(n)"`).
+- Shader fills: `bg_shader = ui.shader(wgsl, { fps = 30 })` fills the box with a WGSL function run per pixel on the GPU, over `bg`, under the border and children, cut by the corners. The source defines `fn fill(input: FillInput) -> vec4<f32>` (straight alpha) and reads `input.p` (points from the box's top left), `input.size`, `input.time` (seconds), `input.scale` (pixels per point) and `input.params` (four `vec4`s). `shader_params = { "#e2c98f", { 1, 0.5, 0, 0 } }` sets the parameters (colors become 0 to 1); animate `shaderTime` and `shaderParam0` to `shaderParam15` like any property, on the compositor (`anime.animate(el, { shaderTime = { 0, 60 }, duration = 60000, ease = "linear", loop = true, frameRate = 12 })` turns a dither at 12 fps). `fps` caps how often time repaints it. A shader that does not compile fills with `bg`.
 - Clip insets: `clip_inset = { top, right, bottom, left }` (CSS `clip-path: inset(...)`) paints the node and its children only inside its box shrunk by those amounts (negative reaches past it, rounded with the node's corners when it clips). Animate the sides as `clipTop`, `clipRight`, `clipBottom`, `clipLeft`, in points or as a percentage of the node's size: `{ clipBottom = { 0, "100%" } }` closes a node upward while its space closes, on the compositor.
 - Size animation: `layout = "height" | "width" | "size"` lets the node's content size change freely while the space it takes eases to it (a spring of 0.4 s, bounce 0.1, or `layout_ease` / `layout_duration`). The content keeps its size and is not clipped (`layout_clip = true` clips); `layout_enter = true` grows it from nothing when it mounts. Combine with `presence` for content that swaps, folds or docks.
 - Text: `text_size weight bold italic align font wrap truncate lines line_height letter_spacing`.
@@ -77,7 +99,7 @@ Any property can be a value, a state, a function (rerun when what it reads chang
 - `hover`, `active`, `focus`, `disabled` take tables of plain values; `disabled = state` disables.
 - `id`, `class = "a b"`, `ref = ui.ref()` make a node reachable by selectors and animations.
 
-Colors are `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `rgb()`, `rgba()`, `hsl()`, a few names, or `0xrrggbb`. `gradient = { angle = 135, stops = { "#f80", "#08f" } }` (CSS `linear-gradient` angles: 0 runs bottom to top, 90 left to right, the default 180 top to bottom; stops may be `{ offset, color }`); `shadow = { x, y, blur, spread, color }` or a list (CSS `box-shadow` values: `blur` is the CSS blur radius); `corners = { tl, tr, br, bl }`, or single corners `rounded_tl rounded_tr rounded_br rounded_bl` (animatable as `borderTopLeftRadius` and so on); `border_sides = { top, right, bottom, left }` sets each side's width (a dock open at the bottom: `{ 1, 1, 0, 1 }`); `border_over = true` paints the border over the node's children (an image's frame) instead of under them.
+Colors are `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `rgb()`, `rgba()`, `hsl()`, a few names, or `0xrrggbb`. `gradient = { angle = 135, stops = { "#f80", "#08f" } }` (CSS `linear-gradient` angles: 0 runs bottom to top, 90 left to right, the default 180 top to bottom; stops may be `{ offset, color }`); `shadow = { x = 0, y = 8, blur = 24, spread = 0, color = "#0006" }` (keyed) or a list of them (CSS `box-shadow` values: `blur` is the CSS blur radius); `corners = { tl, tr, br, bl }`, or single corners `rounded_tl rounded_tr rounded_br rounded_bl` (animatable as `borderTopLeftRadius` and so on); `border_sides = { top, right, bottom, left }` sets each side's width (a dock open at the bottom: `{ 1, 1, 0, 1 }`); `border_over = true` paints the border over the node's children (an image's frame) instead of under them.
 
 ### Events
 
@@ -85,7 +107,19 @@ Colors are `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `rgb()`, `rgba()`, `hsl()`, a f
 
 ### State and components
 
-- `require("name")` runs `name.luau` from the script's directory (or a path below it, such as `"lib/theme"`) once and returns what it returns; a change to a required file reloads the scripts like a change to the script itself.
+- `require` loads modules as Luau resolves them: `require("./card")` and `require("../theme")` from the requiring file, `require("@components/card")` through the `aliases` in a `.luaurc` beside the script, `require("@self/x")` from the requiring file's own directory, and a directory as its `init.luau` (a bare `require("lib/theme")` resolves from the script's directory). Modules stay inside the script's directory, run once and return what they return; a change to any of them reloads the scripts, keeping state. A module's `ui.state` keys are its own (two modules' `ui.state("open")` are two states); `ui.shared` stays global, and `ui.use_state` is per component instance.
+
+```lua
+-- ui/components/card.luau
+type CardProps = { title: string, tone: ("info" | "error")? }
+return function(props: CardProps)
+    return ui.column { p = 12, rounded = 10, ui.text { props.title } }
+end
+
+-- app.luau, with .luaurc: { "languageMode": "strict", "aliases": { "components": "./ui/components" } }
+local Card = require("@components/card")
+return Card { title = "Saved" }   -- `Card { titel = … }` is a type error in the editor
+```
 - `ui.state(key, initial)`: private to the script, kept across reloads. `ui.shared(key, initial)`: shared with Rust and every script.
 - State values: `nil`, booleans, numbers, strings, lists and string-keyed tables. Handles: `get` (tracked), `peek`, `set`, `update(fn)`, `toggle`, `add(n)`, `push`, `remove(i)`, `len`.
 - `ui.computed(fn)`: derived state. `ui.effect(fn)`: runs again when what it reads changes. `ui.batch(fn)`: one update for many writes.

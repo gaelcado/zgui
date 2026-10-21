@@ -183,22 +183,29 @@ impl UserData for State {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("get", |_, s, ()| Ok(s.0.get()));
         methods.add_method("peek", |_, s, ()| Ok(s.0.with_untracked(Clone::clone)));
-        methods.add_method("set", |lua, s, value: Value| Ok(s.write(lua, value)));
+        methods.add_method("set", |lua, s, value: Value| {
+            s.write(lua, value);
+            Ok(())
+        });
         methods.add_method("update", |lua, s, f: mlua::Function| {
             let next: Value = f.call(s.0.with_untracked(Clone::clone))?;
-            Ok(s.write(lua, next))
+            s.write(lua, next);
+            Ok(())
         });
         methods.add_method("toggle", |lua, s, ()| {
-            Ok(s.write(lua, Value::Bool(!s.0.with_untracked(Value::truthy))))
+            s.write(lua, Value::Bool(!s.0.with_untracked(Value::truthy)));
+            Ok(())
         });
         methods.add_method("add", |lua, s, by: Option<f64>| {
             let n = s.0.with_untracked(|v| v.as_f64().unwrap_or(0.));
-            Ok(s.write(lua, Value::Num(n + by.unwrap_or(1.))))
+            s.write(lua, Value::Num(n + by.unwrap_or(1.)));
+            Ok(())
         });
         methods.add_method("push", |lua, s, item: Value| {
             let mut items = s.0.with_untracked(|v| v.list().to_vec());
             items.push(item);
-            Ok(s.write(lua, Value::List(items.into())))
+            s.write(lua, Value::List(items.into()));
+            Ok(())
         });
         methods.add_method("remove", |lua, s, index: usize| {
             let mut items = s.0.with_untracked(|v| v.list().to_vec());

@@ -708,14 +708,18 @@ fn chat_view(
         let reach = stack.clone();
         // Its fade spans the whole band; the other edges overhang the chat
         // pane by as much, clipped, so only the top's shows.
-        let band = div().absolute().top(0.).blur(EDGE_BLUR).reactive_style(move || {
-            let ramp = reach.get() - 24. + EDGE_LEAD;
-            Styles::new()
-                .left(-ramp)
-                .right(-ramp)
-                .bottom(-ramp)
-                .edge_fade(ramp)
-        });
+        let band = div()
+            .absolute()
+            .top(0.)
+            .blur(EDGE_BLUR)
+            .reactive_style(move || {
+                let ramp = reach.get() - 24. + EDGE_LEAD;
+                Styles::new()
+                    .left(-ramp)
+                    .right(-ramp)
+                    .bottom(-ramp)
+                    .edge_fade(ramp)
+            });
         let stack = stack.clone();
         div()
             .absolute()

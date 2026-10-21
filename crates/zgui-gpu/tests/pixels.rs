@@ -214,6 +214,7 @@ fn rounded_border_shadow_images_and_background_damage() {
                 spread: 1.,
             }),
             border_over: false,
+            outline: None,
         }),
         fixed(24., 24.),
     );
@@ -1675,7 +1676,10 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
             // A rounded thumb 6 px across the 8 px track, its ends 2 px in
             // from the 24 px its position spans.
             Some(y) => {
-                assert!(visible.contains(&(116, y + 12)), "thumb at {y}: {visible:?}");
+                assert!(
+                    visible.contains(&(116, y + 12)),
+                    "thumb at {y}: {visible:?}"
+                );
                 assert!(
                     visible
                         .iter()
@@ -3009,24 +3013,36 @@ fn nonfinite_effects_normalize_to_stable_pixels_and_repeated_writes_stay_idle() 
                 blur_radius: -3.,
                 edge_fade: -4.,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
             Effects {
                 opacity: f32::NAN,
                 blur_radius: f32::INFINITY,
                 edge_fade: f32::NEG_INFINITY,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
             Effects {
                 opacity: f32::NAN,
                 blur_radius: f32::NAN,
                 edge_fade: f32::INFINITY,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
             Effects {
                 opacity: 1.,
                 blur_radius: f32::NEG_INFINITY,
                 edge_fade: f32::NAN,
                 filter_blur: 0.,
+                brightness: 1.,
+                contrast: 1.,
+                saturate: 1.,
             },
         ] {
             scene.set_effects(
@@ -3036,6 +3052,9 @@ fn nonfinite_effects_normalize_to_stable_pixels_and_repeated_writes_stay_idle() 
                     blur_radius: 2.,
                     edge_fade: 2.,
                     filter_blur: 0.,
+                    brightness: 1.,
+                    contrast: 1.,
+                    saturate: 1.,
                 },
             );
             let damage = scene.flush().damage;
@@ -5258,9 +5277,21 @@ fn wide_backdrop_blur_matches_a_full_size_gaussian() {
     gpu.set_scale_factor(2.);
     let mut s = Scene::new(256., 64.);
     s.set_kind(s.root(), NodeKind::Container(Layout::Overlay));
-    s.append(s.root(), NodeKind::Rect(Color(0, 0, 0, 255)), fixed(256., 64.));
-    s.append(s.root(), NodeKind::Rect(Color(255, 255, 255, 255)), fixed(128., 64.));
-    let glass = s.append(s.root(), NodeKind::Rect(Color(0, 0, 0, 0)), fixed(256., 64.));
+    s.append(
+        s.root(),
+        NodeKind::Rect(Color(0, 0, 0, 255)),
+        fixed(256., 64.),
+    );
+    s.append(
+        s.root(),
+        NodeKind::Rect(Color(255, 255, 255, 255)),
+        fixed(128., 64.),
+    );
+    let glass = s.append(
+        s.root(),
+        NodeKind::Rect(Color(0, 0, 0, 0)),
+        fixed(256., 64.),
+    );
     s.set_effects(
         glass,
         Effects {
@@ -5285,5 +5316,8 @@ fn wide_backdrop_blur_matches_a_full_size_gaussian() {
             (got - sum / weight).abs()
         })
         .fold(0_f64, f64::max);
-    assert!(worst <= 2., "within 2/255 of the exact blur, was {worst:.2}");
+    assert!(
+        worst <= 2.,
+        "within 2/255 of the exact blur, was {worst:.2}"
+    );
 }

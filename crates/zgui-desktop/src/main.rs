@@ -161,6 +161,9 @@ impl Demo {
                     blur_radius: 8.,
                     edge_fade: 16.,
                     filter_blur: 0.,
+                    brightness: 1.,
+                    contrast: 1.,
+                    saturate: 1.,
                 },
             );
             label(

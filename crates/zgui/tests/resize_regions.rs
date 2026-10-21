@@ -35,7 +35,11 @@ fn switched_full_size_panes_follow_window_resizes() {
                                                 .w_full()
                                                 .items_center()
                                                 .child(
-                                                    div().id("composer").w_full().max_w(768.).h(60.),
+                                                    div()
+                                                        .id("composer")
+                                                        .w_full()
+                                                        .max_w(768.)
+                                                        .h(60.),
                                                 ),
                                         ),
                                 )
@@ -54,9 +58,21 @@ fn switched_full_size_panes_follow_window_resizes() {
         let pane = scene.bounds(mounted.find("pane").unwrap());
         let list = scene.bounds(mounted.find("list").unwrap());
         let composer = scene.bounds(mounted.find("composer").unwrap());
-        assert_eq!((pane.x, pane.width, pane.height), (256., width - 256., height), "pane at {width}x{height}");
-        assert_eq!((list.width, list.height), (width - 256., height - 38.), "list at {width}x{height}");
-        assert_eq!(composer.y + composer.height, height, "composer bottom at {width}x{height}");
+        assert_eq!(
+            (pane.x, pane.width, pane.height),
+            (256., width - 256., height),
+            "pane at {width}x{height}"
+        );
+        assert_eq!(
+            (list.width, list.height),
+            (width - 256., height - 38.),
+            "list at {width}x{height}"
+        );
+        assert_eq!(
+            composer.y + composer.height,
+            height,
+            "composer bottom at {width}x{height}"
+        );
     }
 }
 
@@ -76,7 +92,13 @@ fn nested_switched_panes_follow_window_resizes() {
                         column().grow().min_w(0.).child(
                             switch(
                                 || (),
-                                |_, _| column().id("pane").w_full().h_full().child(div().id("list").w_full().grow()),
+                                |_, _| {
+                                    column()
+                                        .id("pane")
+                                        .w_full()
+                                        .h_full()
+                                        .child(div().id("list").w_full().grow())
+                                },
                             )
                             .w_full()
                             .h_full(),
@@ -93,7 +115,11 @@ fn nested_switched_panes_follow_window_resizes() {
         ui.prepare_frame();
         let scene = ui.scene.borrow();
         let pane = scene.bounds(mounted.find("pane").unwrap());
-        assert_eq!((pane.width, pane.height), (width - 256., height), "pane at {width}x{height}");
+        assert_eq!(
+            (pane.width, pane.height),
+            (width - 256., height),
+            "pane at {width}x{height}"
+        );
     }
 }
 
@@ -154,7 +180,15 @@ fn measured_rows_beside_a_bottom_bar_follow_window_resizes() {
         let scene = ui.scene.borrow();
         let list = scene.bounds(mounted.find("list").unwrap());
         let composer = scene.bounds(mounted.find("composer").unwrap());
-        assert_eq!((list.width, list.height), (width - 256., height - 38.), "list at {width}x{height}");
-        assert_eq!(composer.y + composer.height, height, "composer bottom at {width}x{height}");
+        assert_eq!(
+            (list.width, list.height),
+            (width - 256., height - 38.),
+            "list at {width}x{height}"
+        );
+        assert_eq!(
+            composer.y + composer.height,
+            height,
+            "composer bottom at {width}x{height}"
+        );
     }
 }

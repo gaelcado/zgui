@@ -15,8 +15,13 @@ local muted = "#8b95a5"
 
 local function button(label, on_click, extra)
 	local props = {
-		px = 14, py = 8, rounded = 8, bg = raised, cursor = "pointer",
-		hover = { bg = "#2b3442" }, active = { bg = "#344052" },
+		px = 14,
+		py = 8,
+		rounded = 8,
+		bg = raised,
+		cursor = "pointer",
+		hover = { bg = "#2b3442" },
+		active = { bg = "#344052" },
 		on_click = on_click,
 		label,
 	}
@@ -28,7 +33,10 @@ end
 
 local function card(title, ...)
 	return ui.column {
-		p = 16, gap = 12, rounded = 12, bg = surface,
+		p = 16,
+		gap = 12,
+		rounded = 12,
+		bg = surface,
 		ui.text { title, text_size = 12, bold = true, color = muted },
 		{ ... },
 	}
@@ -43,28 +51,51 @@ local function add_todo()
 end
 
 return ui.row {
-	w_full = true, h_full = true, items = "stretch", bg = page, color = "#e6edf3",
+	w_full = true,
+	h_full = true,
+	items = "stretch",
+	bg = page,
+	color = "#e6edf3",
 
 	ui.column {
-		w = 230, p = 16, gap = 12, bg = surface,
+		w = 230,
+		p = 16,
+		gap = 12,
+		bg = surface,
 		ui.text { "PLUGINS", text_size = 11, bold = true, color = muted },
 		ui.slot("sidebar", { gap = 10 }),
 	},
 
 	ui.scroll {
-		grow = 1, shrink = 1, min_w = 0, min_h = 0, h_full = true,
+		grow = 1,
+		shrink = 1,
+		min_w = 0,
+		min_h = 0,
+		h_full = true,
 		ui.column {
-			w_full = true, p = 24, gap = 16, items = "stretch",
+			w_full = true,
+			p = 24,
+			gap = 16,
+			items = "stretch",
 			ui.row {
-				gap = 10, items = "center",
-				ui.div { w = 8, h = 8, rounded = 4, bg = "#3fb950", opacity = ui.loop { duration = 1.2, from = 0.3, to = 1, fps = 30 } },
+				gap = 10,
+				items = "center",
+				ui.div {
+					w = 8,
+					h = 8,
+					rounded = 4,
+					bg = "#3fb950",
+					opacity = ui.loop { duration = 1.2, from = 0.3, to = 1, fps = 30 },
+				},
 				ui.text { "Hello from Luau", text_size = 24, bold = true },
 			},
 			ui.text { "Window {window} · save app.luau to reload", color = muted, text_size = 13 },
 
-			card("COUNTER",
+			card(
+				"COUNTER",
 				ui.row {
-					gap = 10, items = "center",
+					gap = 10,
+					items = "center",
 					button("−", ui.add(count, -1)),
 					ui.text { "{count}", text_size = 20, w = 56, align = "center" },
 					button("+", ui.add(count)),
@@ -72,18 +103,25 @@ return ui.row {
 				}
 			),
 
-			card("ANIMATION",
-				button(function() return if open:get() then "Collapse" else "Expand" end, ui.toggle(open)),
+			card(
+				"ANIMATION",
+				button(function()
+					return if open:get() then "Collapse" else "Expand"
+				end, ui.toggle(open)),
 				ui.div {
-					h = 64, p = 16, rounded = 10,
+					h = 64,
+					p = 16,
+					rounded = 10,
 					bg = ui.tween(open, { from = raised, to = "#24406e", duration = 0.35 }),
 					opacity = ui.tween(open, { from = 0.4, to = 1, duration = 0.35 }),
-					x = ui.spring(open, { from = 0, to = 16, stiffness = 220, damping = 18 }), mr = 16,
-					ui.text "Colour and opacity tween, offset springs. Rust runs every frame.",
+					x = ui.spring(open, { from = 0, to = 16, stiffness = 220, damping = 18 }),
+					mr = 16,
+					ui.text("Colour and opacity tween, offset springs. Rust runs every frame."),
 				}
 			),
 
-			card("TODOS",
+			card(
+				"TODOS",
 				ui.row {
 					gap = 8,
 					ui.input { label = "New todo", value = draft, w = 300, px = 10, py = 8, rounded = 8, bg = raised },
@@ -91,9 +129,16 @@ return ui.row {
 				},
 				ui.each(todos, function(item, index)
 					return ui.row {
-						gap = 10, items = "center", px = 12, py = 8, rounded = 8, bg = raised,
+						gap = 10,
+						items = "center",
+						px = 12,
+						py = 8,
+						rounded = 8,
+						bg = raised,
 						ui.text { item, grow = 1 },
-						button("Done", function() todos:remove(index) end, { py = 4, bg = "#2b3442", hover = { bg = "#344052" } }),
+						button("Done", function()
+							todos:remove(index)
+						end, { py = 4, bg = "#2b3442", hover = { bg = "#344052" } }),
 					}
 				end, { gap = 6 })
 			),

@@ -122,6 +122,98 @@ fn build_scoped(
     })
 }
 
+/// A web view: its page from `src` (followed) or `html`, its handlers
+/// subscribed for as long as the view is mounted.
+fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    use zgui::web_view::{WebViewEvent, web_view, web_view_src};
+    let web = spec.web.clone();
+    let view = match (&spec.src, &spec.html) {
+        (Some(src), _) => {
+            let (src, vm) = (resolve_owned(src), vm.clone());
+            web_view_src(&web, move || match resolve(&src, Ty::Str, None, &vm) {
+                Some(Lit::Str(url)) => url.to_string(),
+                _ => String::new(),
+            })
+        }
+        (None, Some((html, base))) => {
+            web.load_html(html.clone(), base.as_deref());
+            web_view(&web)
+        }
+        (None, None) => web_view(&web),
+    };
+    let handlers = [
+        spec.on_navigate.clone(),
+        spec.on_load.clone(),
+        spec.on_title.clone(),
+        spec.on_message.clone(),
+        spec.on_error.clone(),
+        spec.on_new_window.clone(),
+    ];
+    if handlers.iter().all(Option::is_none) {
+        return view;
+    }
+    let (vm, _low) = (vm.clone(), low.clone());
+    view.on_mount(move |handle| {
+        let [navigate, load, title, message, error, new_window] = handlers;
+        let vm = Rc::downgrade(&vm);
+        let subscription = web.on_event(move |event| {
+            let Some(vm) = vm.upgrade() else { return };
+            let call = |f: &Option<mlua::Function>, args: mlua::MultiValue| {
+                if let Some(f) = f
+                    && let Err(e) = vm.call::<()>(f, args)
+                {
+                    vm.report(e);
+                }
+            };
+            let lua = &vm.lua;
+            let pack = |args: &[&str]| -> mlua::MultiValue {
+                args.iter()
+                    .filter_map(|a| lua.create_string(a).ok().map(mlua::Value::String))
+                    .collect()
+            };
+            if navigate.is_some() {
+                let (kind, url) = match event {
+                    WebViewEvent::NavigationStarted { url } => ("started", url.as_str()),
+                    WebViewEvent::NavigationCommitted { url } => ("committed", url.as_str()),
+                    WebViewEvent::NavigationFinished { url } => ("finished", url.as_str()),
+                    WebViewEvent::NavigationFailed { url, .. } => ("failed", url.as_str()),
+                    WebViewEvent::UrlChanged { url } => ("changed", url.as_str()),
+                    _ => ("", ""),
+                };
+                if !kind.is_empty()
+                    && let Ok(t) = lua.create_table()
+                {
+                    let _ = t.set("kind", kind);
+                    let _ = t.set("url", url);
+                    call(
+                        &navigate,
+                        mlua::MultiValue::from_vec(vec![mlua::Value::Table(t)]),
+                    );
+                }
+            }
+            match event {
+                WebViewEvent::NavigationFinished { url } => call(&load, pack(&[url])),
+                WebViewEvent::TitleChanged { title: t } => call(&title, pack(&[t])),
+                WebViewEvent::NavigationFailed { url, error: e } => call(&error, pack(&[url, e])),
+                WebViewEvent::NewWindowRequested { url } => call(&new_window, pack(&[url])),
+                WebViewEvent::ProcessTerminated => {
+                    call(&error, pack(&["", "the page's process ended"]))
+                }
+                WebViewEvent::Message { body } => {
+                    if let Some(f) = &message {
+                        let value = crate::node::json_value(body);
+                        if let Err(e) = vm.call::<()>(f, value) {
+                            vm.report(e);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
+        handle.retain(subscription);
+    })
+}
+
 /// Builds a node a script function returned.
 fn built(vm: &Rc<Vm>, result: mlua::Result<mlua::Value>, low: &Rc<Lowering>) -> View {
     match result.and_then(|v| match v {
@@ -212,6 +304,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 }
             })
         }
+        Kind::WebView(spec) => web_view_of(spec, vm, low),
         Kind::Canvas(draw) => {
             let (draw, vm) = (draw.clone(), vm.clone());
             canvas(move |(w, h)| {
@@ -543,6 +636,11 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             literal(Prop::Blur).unwrap_or(0.),
         );
         element.set_base(translate, local, effects);
+        element.set_base_color([
+            literal(Prop::Brightness).unwrap_or(1.),
+            literal(Prop::Contrast).unwrap_or(1.),
+            literal(Prop::Saturate).unwrap_or(1.),
+        ]);
         let mut corners = None;
         for (prop, lit) in &statics {
             match (prop, lit) {
@@ -552,6 +650,10 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             }
         }
         element.set_base_corners(corners);
+        element.set_base_shader(
+            node.shader_params
+                .map(|params| zgui::decoration::ShaderUniforms { time: 0., params }),
+        );
         element.set_base_clip(statics.iter().find_map(|(p, l)| match (p, l) {
             (Prop::ClipInset, Lit::Corners(c)) => {
                 Some([c.top_left, c.top_right, c.bottom_right, c.bottom_left])
@@ -584,7 +686,11 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 low.clone(),
             )
         });
-    if !dynamic.is_empty() || element.is_some() || bg_image.is_some() {
+    let shader = node
+        .shader
+        .clone()
+        .map(|shader| (shader, node.shader_params.unwrap_or_default()));
+    if !dynamic.is_empty() || element.is_some() || bg_image.is_some() || shader.is_some() {
         let vm = vm.clone();
         let element = element.clone();
         view = view.reactive_style(move || {
@@ -604,8 +710,20 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                     _ => None,
                 }
             });
-            match image {
+            let styles = match image {
                 Some((image, fit)) => styles.bg_image(image, fit),
+                None => styles,
+            };
+            // A shader fill, with its literal parameters unless animated.
+            match &shader {
+                Some((fill, params)) => {
+                    let animated = element.as_ref().and_then(|e| e.animated.borrow().shader);
+                    let uniforms = animated.unwrap_or(zgui::decoration::ShaderUniforms {
+                        time: 0.,
+                        params: *params,
+                    });
+                    styles.bg_shader(fill.clone()).shader_uniforms(uniforms)
+                }
                 None => styles,
             }
         });
@@ -801,11 +919,20 @@ fn with_animated(element: &Element, mut lits: Vec<(Prop, Lit)>) -> Styles {
     if let Some(blur) = animated.blur {
         styles = styles.filter_blur(blur);
     }
+    if let Some([brightness, contrast, saturate]) = animated.color {
+        styles = styles
+            .brightness(brightness)
+            .contrast(contrast)
+            .saturate(saturate);
+    }
     if let Some((x, y)) = animated.mask {
         styles = styles.mask_offset(x, y);
     }
     if let Some([t, r, b, l]) = animated.clip {
         styles = styles.clip_inset(t, r, b, l);
+    }
+    if let Some(uniforms) = animated.shader {
+        styles = styles.shader_uniforms(uniforms);
     }
     if let Some(local) = animated.local {
         styles = crate::transform::style(styles, local);
@@ -888,7 +1015,7 @@ fn layout_box(
                     .find(|(p, _)| *p == prop)
                     .and_then(|(_, lit)| match lit {
                         Lit::Len(zgui::layout::Length::Px(v)) => Some(*v),
-                        Lit::Num(v) => Some(*v as f32),
+                        Lit::Num(v) => Some(*v),
                         _ => None,
                     })
             };
@@ -1677,6 +1804,9 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Opacity, Lit::Num(v)) => s.opacity(v.clamp(0., 1.)),
         (Blur, Lit::Num(v)) => s.filter_blur(v.max(0.)),
         (BackdropBlur, Lit::Num(v)) => s.blur(v.max(0.)),
+        (Brightness, Lit::Num(v)) => s.brightness(*v),
+        (Contrast, Lit::Num(v)) => s.contrast(*v),
+        (Saturate, Lit::Num(v)) => s.saturate(*v),
         (Fade, Lit::Pair(top, bottom)) => s.fade_edges(*top, *bottom),
         (FadeX, Lit::Pair(left, right)) => s.fade_edges_x(*left, *right),
         // `{ top, right, bottom, left }` in points; negative reaches past the box.

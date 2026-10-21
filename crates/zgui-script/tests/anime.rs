@@ -741,3 +741,57 @@ fn clip_insets_animate_in_points_and_percent() {
     close(end[2], 40., "closed to its top edge");
     close(end[1], 0., "right side");
 }
+
+#[test]
+fn shader_fills_take_params_and_animate_their_uniforms() {
+    let mut h = Harness::inline(
+        r##"local fill = ui.shader("fn fill(input: FillInput) -> vec4<f32> { return input.params[0]; }", { fps = 30 })
+        return ui.div { id = "d", w = 40, h = 40, bg_shader = fill, shader_params = { "#ff000080", { 1, 2, 3, 4 } },
+            on_mount = function(el)
+                anime.animate(el, { shaderTime = { 0, 2 }, shaderParam4 = { 1, 3 }, duration = 100, ease = "linear" })
+            end }"##,
+    );
+    let node = h.find("d").unwrap();
+    let text = format!("{:?}", h.ui.scene.borrow().kind(node));
+    assert!(
+        text.contains("Shader("),
+        "the box is filled by the shader: {text}"
+    );
+    let start = h.ui.scene.borrow().shader_uniforms(node);
+    close(start.params[0][0], 1., "a color parameter is 0 to 1");
+    close(start.params[0][3], 128. / 255., "with its alpha");
+    h.frame();
+    h.run_ms(50.);
+    let mid = h.ui.scene.borrow().shader_uniforms(node);
+    close(mid.time, 1., "time half way");
+    close(
+        mid.params[1][0],
+        2.,
+        "shaderParam4 is the second vec4's first value",
+    );
+    close(mid.params[1][1], 2., "the rest keep their literal values");
+}
+
+#[test]
+fn color_filters_animate_on_the_compositor() {
+    let mut h = Harness::inline(
+        r##"return ui.div { id = "d", w = 20, h = 20, bg = "#336699", saturate = 0.5, on_mount = function(el)
+            anime.animate(el, { brightness = { 1, 1.2 }, duration = 100, ease = "linear", onComplete = function()
+                anime.utils.cleanInlineStyles(el, "saturate")
+            end })
+        end }"##,
+    );
+    h.frame();
+    h.run_ms(50.);
+    let node = h.find("d").unwrap();
+    let e = h.ui.scene.borrow().effects(node);
+    close(e.brightness, 1.1, "half way");
+    close(
+        e.saturate,
+        0.5,
+        "the literal saturate holds while brightness animates",
+    );
+    h.run_ms(80.);
+    let e = h.ui.scene.borrow().effects(node);
+    close(e.brightness, 1.2, "done");
+}

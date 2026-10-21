@@ -13,7 +13,10 @@ struct Out { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>, @
 // out over bands at its edges (top, right, bottom, left), quadratically, as
 // Zeron fades transcript edges. Logical units of the target, where the
 // pixel is on screen (a transformed quad's `point` is its own).
-struct Region { round0:vec4<f32>, radii0:vec4<f32>, round1:vec4<f32>, radii1:vec4<f32>, fade_box:vec4<f32>, fade:vec4<f32> }
+// `color0..2` (`tint.x` on): its colour filters as rows of an affine map
+// of straight RGB (brightness, contrast, saturate), applied as the colour
+// is written.
+struct Region { round0:vec4<f32>, radii0:vec4<f32>, round1:vec4<f32>, radii1:vec4<f32>, fade_box:vec4<f32>, fade:vec4<f32>, color0:vec4<f32>, color1:vec4<f32>, color2:vec4<f32>, tint:vec4<f32> }
 @group(1) @binding(1) var<storage, read> regions:array<Region>;
 fn rounded(b:vec4<f32>, r:vec4<f32>, p:vec2<f32>)->f32 {
  if b.z<0. {return 1.;}
@@ -21,6 +24,15 @@ fn rounded(b:vec4<f32>, r:vec4<f32>, p:vec2<f32>)->f32 {
  let radius=select(select(r.w,r.z,q.x>0.),select(r.x,r.y,q.x>0.),q.y<0.);
  let d=abs(q)-half+vec2(radius); let sdf=length(max(d,vec2(0.)))+min(max(d.x,d.y),0.)-radius;
  return clamp(.5-sdf*viewport.z,0.,1.);
+}
+// `premultiplied` through region `index`'s colour filters, if any.
+fn tinted(index:f32, premultiplied:vec4<f32>)->vec4<f32> {
+ if index<.5 {return premultiplied;}
+ let g=regions[u32(index)-1u];
+ if g.tint.x<.5 || premultiplied.a<=0. {return premultiplied;}
+ let c=vec4(premultiplied.rgb/premultiplied.a,1.);
+ let rgb=clamp(vec3(dot(g.color0,c),dot(g.color1,c),dot(g.color2,c)),vec3(0.),vec3(1.));
+ return vec4(rgb*premultiplied.a,premultiplied.a);
 }
 fn region(index:f32, position:vec2<f32>)->f32 {
  let g=regions[u32(index)-1u]; let p=position/viewport.z;
@@ -90,7 +102,7 @@ fn shade(input:Out)->vec4<f32> {
  if v.options.x>0. {let distance=min(v.point-v.fade.xy,v.fade.xy+v.fade.zw-v.point); let f=clamp(min(distance.x,distance.y)/v.options.x,0.,1.); color.a*=f; scale*=f;}
  // Rounded clips and `fade_edges` around it (see `Region`).
  if v.mask.x>.5 {let k=region(v.mask.x,v.position.xy); color.a*=k; scale*=k;}
- return select(vec4(color.rgb*color.a,color.a),vec4(rgb*scale,color.a),premultiplied);
+ return tinted(v.mask.x,select(vec4(color.rgb*color.a,color.a),vec4(rgb*scale,color.a),premultiplied));
 }
 @fragment fn fs(v:Out)->@location(0) vec4<f32> { return shade(v); }
 // Single-pass presentation: the same colour to the retained target and the drawable.

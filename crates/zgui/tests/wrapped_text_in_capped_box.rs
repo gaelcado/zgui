@@ -50,8 +50,22 @@ fn capped_box_in_a_measured_row_grows_to_its_wrapped_text() {
         let body = column()
             .w_full()
             .shrink_0()
-            .child(text_signal(move || long.to_owned()).id(format!("text-{n}")).w_full().text_wrap(true).text_size(14.).line_height(22.))
-            .child(canvas(|_| zgui::canvas::Canvas::new()).absolute().left(0.).top(0.).right(0.).bottom(0.));
+            .child(
+                text_signal(move || long.to_owned())
+                    .id(format!("text-{n}"))
+                    .w_full()
+                    .text_wrap(true)
+                    .text_size(14.)
+                    .line_height(22.),
+            )
+            .child(
+                canvas(|_| zgui::canvas::Canvas::new())
+                    .absolute()
+                    .left(0.)
+                    .top(0.)
+                    .right(0.)
+                    .bottom(0.),
+            );
         let clip = column().w_full().child(body).reactive_style(Styles::new);
         let hidden = || div().h(22.).reactive_style(|| Styles::new().hidden());
         column().w_full().items_center().child(
@@ -92,4 +106,3 @@ fn capped_box_in_a_measured_row_grows_to_its_wrapped_text() {
         );
     }
 }
-

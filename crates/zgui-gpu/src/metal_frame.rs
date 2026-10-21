@@ -48,6 +48,8 @@ pub(crate) struct MetalFrame {
     blur: std::cell::OnceCell<Option<Blur>>,
     /// Layer effects' pipelines (effects.wgsl), with the first effect.
     effects: std::cell::OnceCell<Option<Effects>>,
+    /// Shader fills' pipelines by shader id (`None`: it did not compile).
+    fills: std::cell::RefCell<std::collections::HashMap<u64, Option<Pipeline>>>,
 }
 
 /// effects.wgsl's passes: across into the scratch atlas, down into the
@@ -124,7 +126,34 @@ impl MetalFrame {
             queue,
             blur: std::cell::OnceCell::new(),
             effects: std::cell::OnceCell::new(),
+            fills: Default::default(),
         })
+    }
+
+    /// Whether `shader`'s fill can be drawn here: its pipeline, compiled
+    /// now from the same module as wgpu's (`crate::fill_source`) if new.
+    pub(crate) fn fills(&self, shader: &zgui::decoration::FillShader) -> bool {
+        if let Some(compiled) = self.fills.borrow().get(&shader.id()) {
+            return compiled.is_some();
+        }
+        let source = crate::fill_source(shader.source());
+        let pipeline = crate::fill_validates(&source)
+            .then(|| Library::new(&self.device, &source, Kind::Quads).ok())
+            .flatten()
+            .and_then(|library| {
+                library
+                    .pipeline(
+                        &self.device,
+                        "vs",
+                        "zgui_fill",
+                        MTLPixelFormat::BGRA8Unorm,
+                        Blend::Over,
+                    )
+                    .ok()
+            });
+        let ready = pipeline.is_some();
+        self.fills.borrow_mut().insert(shader.id(), pipeline);
+        ready
     }
 
     /// Whether layer effects can be drawn here: their pipelines, compiled
@@ -173,7 +202,9 @@ impl MetalFrame {
                 );
                 let library = Library::new(&self.device, &source, Kind::Blur).ok()?;
                 let pipeline = |fragment: &str, format, blend| {
-                    library.pipeline(&self.device, "vs", fragment, format, blend).ok()
+                    library
+                        .pipeline(&self.device, "vs", fragment, format, blend)
+                        .ok()
                 };
                 let half = MTLPixelFormat::RGBA16Float;
                 Some(Blur {
@@ -197,10 +228,7 @@ impl MetalFrame {
         regions: &[u8],
         effects: &[EffectPass],
     ) -> Frame {
-        let buffer = self
-            .queue
-            .commandBuffer()
-            .expect("a command buffer");
+        let buffer = self.queue.commandBuffer().expect("a command buffer");
         for effect in effects {
             let pipelines = self.effect_pipelines().expect("checked by `effects`");
             let load = match effect.down {
@@ -265,11 +293,18 @@ impl MetalFrame {
         frame
     }
 
-    fn pipeline(&self, shading: Shading) -> &Pipeline {
+    fn pipeline(&self, shading: Shading) -> Pipeline {
         match shading {
-            Shading::Full => &self.full,
-            Shading::Basic => &self.basic,
-            Shading::Opaque => &self.opaque,
+            Shading::Full => self.full.clone(),
+            Shading::Basic => self.basic.clone(),
+            Shading::Opaque => self.opaque.clone(),
+            Shading::Fill(id) => self
+                .fills
+                .borrow()
+                .get(&id)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| self.full.clone()),
         }
     }
 }
@@ -455,6 +490,9 @@ impl Frame {
             self.scissor(scissor);
             self.triangle(index);
         }
+        // The records took the regions' slots: quads drawn after the blur
+        // (shader fills' uniforms, rounded clips, fades) read their own again.
+        self.quad_state();
     }
     /// A full-target triangle as instance `index` (blur.wgsl's `vs`).
     fn triangle(&mut self, index: u32) {
@@ -477,10 +515,10 @@ impl Frame {
         self.current = Some(bound);
         let pipeline = match bound {
             Bound::Quads(shading) => frame.pipeline(shading),
-            Bound::FullClear => &frame.full_clear,
-            Bound::CopyOffset => &frame.copy_offset,
+            Bound::FullClear => frame.full_clear.clone(),
+            Bound::CopyOffset => frame.copy_offset.clone(),
         };
-        self.encoder.setRenderPipelineState(pipeline);
+        self.encoder.setRenderPipelineState(&pipeline);
     }
     /// The texture fragments sample: the atlas, or for catch-up copies the
     /// shown surface.
@@ -510,7 +548,7 @@ impl Frame {
         instances: std::ops::Range<u32>,
     ) {
         let bound = match (shading, clear) {
-            (Shading::Full, true) => Bound::FullClear,
+            (Shading::Full | Shading::Fill(_), true) => Bound::FullClear,
             (Shading::Basic | Shading::Opaque, true) => Bound::Quads(Shading::Opaque),
             (shading, false) => Bound::Quads(shading),
         };

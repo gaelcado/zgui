@@ -233,7 +233,9 @@ mod display_link {
         // The output time: exactly on the display's refresh grid (the
         // callback's `now`, when it runs, wanders by up to 2 ms).
         entry.refreshed.store(output.host_time, Ordering::Release);
-        entry.period.store(interval.as_nanos() as u64, Ordering::Release);
+        entry
+            .period
+            .store(interval.as_nanos() as u64, Ordering::Release);
         for subscriber in &entry.subscribers {
             if !subscriber.active.load(Ordering::Acquire) {
                 continue;
@@ -381,11 +383,18 @@ mod display_link {
         /// refresh period, on the display's refresh grid as the link last
         /// reported it (within `fresh`): refreshes start when the previous
         /// one shows.
-        pub(crate) fn refresh_phase(&self, at: Instant, fresh: Duration) -> Option<(Duration, Duration)> {
+        pub(crate) fn refresh_phase(
+            &self,
+            at: Instant,
+            fresh: Duration,
+        ) -> Option<(Duration, Duration)> {
             let (refreshed, period) = {
                 let guard = registry();
                 let entry = guard.as_ref()?.displays.get(&self.display)?;
-                (entry.refreshed.load(Ordering::Acquire), entry.period.load(Ordering::Acquire))
+                (
+                    entry.refreshed.load(Ordering::Acquire),
+                    entry.period.load(Ordering::Acquire),
+                )
             };
             if refreshed == 0 || period == 0 {
                 return None;

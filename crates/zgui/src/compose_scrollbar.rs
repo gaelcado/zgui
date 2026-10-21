@@ -36,10 +36,10 @@ pub(crate) fn mount(
         ui.scene
             .borrow_mut()
             .append(track, NodeKind::Rect(ui.theme.hover), Style::default());
-    let thumb = ui
-        .scene
-        .borrow_mut()
-        .append(track, thumb_kind(ui.theme.accent, THUMB), Style::default());
+    let thumb =
+        ui.scene
+            .borrow_mut()
+            .append(track, thumb_kind(ui.theme.accent, THUMB), Style::default());
     let main = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
     let event_size = size.clone();
     let event_extent = extent.clone();

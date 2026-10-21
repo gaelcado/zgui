@@ -92,7 +92,11 @@ fn transformed_images_fade_with_their_fade_edges_ancestor() {
     let mut gpu = GpuRenderer::new(120, 120).unwrap();
     let mut scene = Scene::new(120., 120.);
     scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
-    scene.append(scene.root(), NodeKind::Rect(Color(0, 0, 0, 255)), fixed(120., 120.));
+    scene.append(
+        scene.root(),
+        NodeKind::Rect(Color(0, 0, 0, 255)),
+        fixed(120., 120.),
+    );
     let view = scene.append(
         scene.root(),
         NodeKind::Container(Layout::Overlay),
@@ -104,7 +108,9 @@ fn transformed_images_fade_with_their_fade_edges_ancestor() {
     );
     let icon = scene.append(
         view,
-        NodeKind::Image(Arc::new(white.transformed(Affine::rotation(std::f32::consts::FRAC_PI_2)))),
+        NodeKind::Image(Arc::new(
+            white.transformed(Affine::rotation(std::f32::consts::FRAC_PI_2)),
+        )),
         fixed(20., 20.),
     );
     scene.set_transform(icon, Transform { x: 10., y: 90. });
@@ -116,5 +122,8 @@ fn transformed_images_fade_with_their_fade_edges_ancestor() {
     // 100 px down, 20 into the 40 px band: a quarter of full brightness.
     let (rotated, upright) = (pixel(&pixels, 20, 100)[0], pixel(&pixels, 70, 100)[0]);
     assert!(upright.abs_diff(64) <= 4, "upright {upright}");
-    assert!(rotated.abs_diff(upright) <= 2, "rotated {rotated} upright {upright}");
+    assert!(
+        rotated.abs_diff(upright) <= 2,
+        "rotated {rotated} upright {upright}"
+    );
 }

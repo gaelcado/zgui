@@ -6,6 +6,18 @@
 //! last-write precedence, including individual padding and margin sides.
 use crate::scene::{Align, BoxShadow, Color, Insets, Justify, Layout, LocalTransform, Transform};
 
+/// Where a stroke (`Styled::stroke`) lies against the box's edge, as a
+/// design tool aligns it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StrokeAlign {
+    /// Within the box, over its content.
+    #[default]
+    Inside,
+    /// Half within, half outside.
+    Center,
+    /// Wholly outside.
+    Outside,
+}
 /// How image pixels fit the allocated padded content box. Alignment is centered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ObjectFit {
@@ -57,6 +69,10 @@ pub struct Styles {
     pub(crate) blur: Option<f32>,
     pub(crate) edge_fade: Option<f32>,
     pub(crate) filter_blur: Option<f32>,
+    /// Colour filters (`Styled::brightness` and the rest).
+    pub(crate) brightness: Option<f32>,
+    pub(crate) contrast: Option<f32>,
+    pub(crate) saturate: Option<f32>,
     /// Where `RareStyles::mask` lies over the node: animated every frame.
     pub(crate) mask_offset: Option<(f32, f32)>,
     /// `Styled::clip_inset`: animated every frame.
@@ -130,6 +146,11 @@ pub(crate) struct RareStyles {
     pub(crate) border_style: Option<crate::decoration::BorderStyle>,
     /// `Styled::border_over`.
     pub(crate) border_over: Option<bool>,
+    /// `Styled::outline`, `outline_offset` (width and colour; offset).
+    pub(crate) outline: Option<Option<(f32, Color)>>,
+    pub(crate) outline_offset: Option<f32>,
+    /// `Styled::shader_uniforms`.
+    pub(crate) shader_uniforms: Option<crate::decoration::ShaderUniforms>,
     pub(crate) shadows: Option<Option<std::sync::Arc<[BoxShadow]>>>,
     pub(crate) shadow: Option<Option<BoxShadow>>,
     pub(crate) letter_spacing: Option<crate::text_layout::LetterSpacing>,
@@ -154,6 +175,9 @@ impl RareStyles {
         fade_insets_x: None,
         border_style: None,
         border_over: None,
+        outline: None,
+        outline_offset: None,
+        shader_uniforms: None,
         shadows: None,
         shadow: None,
         letter_spacing: None,
@@ -191,6 +215,15 @@ impl RareStyles {
         }
         if other.border_over.is_some() {
             self.border_over = other.border_over;
+        }
+        if other.outline.is_some() {
+            self.outline = other.outline;
+        }
+        if other.outline_offset.is_some() {
+            self.outline_offset = other.outline_offset;
+        }
+        if other.shader_uniforms.is_some() {
+            self.shader_uniforms = other.shader_uniforms;
         }
         if other.border_style.is_some() {
             self.border_style = other.border_style;
@@ -444,6 +477,15 @@ impl Styles {
         }
         if other.filter_blur.is_some() {
             self.filter_blur = other.filter_blur;
+        }
+        if other.brightness.is_some() {
+            self.brightness = other.brightness;
+        }
+        if other.contrast.is_some() {
+            self.contrast = other.contrast;
+        }
+        if other.saturate.is_some() {
+            self.saturate = other.saturate;
         }
         if other.mask_offset.is_some() {
             self.mask_offset = other.mask_offset;
@@ -926,6 +968,22 @@ pub trait Styled: Sized {
             Some(Some(crate::decoration::Background::Image { image, fit }));
         self
     }
+    /// Fill the view with a shader (see `crate::decoration::FillShader`):
+    /// a WGSL `fill` function run per pixel on the GPU, over its `bg`
+    /// colour, cut to its rounded corners, under its border and children.
+    /// Set after `bg`, which clears it.
+    fn bg_shader(mut self, shader: std::sync::Arc<crate::decoration::FillShader>) -> Self {
+        self.styles_mut().paint_background =
+            Some(Some(crate::decoration::Background::Shader(shader)));
+        self
+    }
+    /// The uniforms its `bg_shader` draws with: time and user parameters.
+    /// Animating them per frame repaints the view alone (or set them with
+    /// `Scene::set_shader_uniforms` directly, skipping style resolution).
+    fn shader_uniforms(mut self, uniforms: crate::decoration::ShaderUniforms) -> Self {
+        self.styles_mut().rare_mut().shader_uniforms = Some(uniforms);
+        self
+    }
     fn rounded_corners(mut self, corners: crate::decoration::Corners) -> Self {
         self.styles_mut().corners = Some(Some(corners));
         self
@@ -940,6 +998,35 @@ pub trait Styled: Sized {
     fn border_over(mut self, value: bool) -> Self {
         self.styles_mut().rare_mut().border_over = Some(value);
         self
+    }
+    /// An outline (CSS `outline`): a ring `width` wide outside the box at
+    /// `outline_offset` (0 by default), its corners the box's radii grown
+    /// alike, over the view's content, taking no room in layout and not cut
+    /// by its own `overflow_hidden`.
+    fn outline(mut self, width: f32, color: Color) -> Self {
+        self.styles_mut().rare_mut().outline = Some(Some((width, color)));
+        self
+    }
+    /// How far outside the box the outline starts (CSS `outline-offset`);
+    /// negative draws it over the box's edge.
+    fn outline_offset(mut self, offset: f32) -> Self {
+        self.styles_mut().rare_mut().outline_offset = Some(offset);
+        self
+    }
+    /// No outline.
+    fn outline_none(mut self) -> Self {
+        self.styles_mut().rare_mut().outline = Some(None);
+        self
+    }
+    /// A design tool's stroke: `width` of `color` aligned inside the box (a
+    /// border over its content), centred on its edge or outside it (an
+    /// outline at offset `-width / 2` or 0).
+    fn stroke(self, width: f32, color: Color, align: StrokeAlign) -> Self {
+        match align {
+            StrokeAlign::Inside => self.border(width).border_color(color).border_over(true),
+            StrokeAlign::Center => self.outline(width, color).outline_offset(-width / 2.),
+            StrokeAlign::Outside => self.outline(width, color).outline_offset(0.),
+        }
     }
     fn border_style(mut self, style: crate::decoration::BorderStyle) -> Self {
         self.styles_mut().rare_mut().border_style = Some(style);
@@ -1025,7 +1112,8 @@ pub trait Styled: Sized {
     /// Inherited extra glyph advance in logical pixels. Zero resets inherited tracking.
     /// Non-finite values normalize to zero; finite values clamp to ±1,000,000 pixels.
     fn letter_spacing(mut self, pixels: f32) -> Self {
-        self.styles_mut().rare_mut().letter_spacing = Some(crate::text_layout::LetterSpacing::px(pixels));
+        self.styles_mut().rare_mut().letter_spacing =
+            Some(crate::text_layout::LetterSpacing::px(pixels));
         self
     }
 
@@ -1062,6 +1150,25 @@ pub trait Styled: Sized {
     /// `blur`, what lies behind is untouched.
     fn filter_blur(mut self, value: f32) -> Self {
         self.styles_mut().filter_blur = Some(value);
+        self
+    }
+    /// CSS `filter: brightness()`: the view and its subtree, as a group,
+    /// with colours scaled (1 leaves them, 0 is black, past 1 brighter), as
+    /// a button brightens on hover. Applied as the GPU writes each colour:
+    /// no layer, and animating it repaints only the view's area.
+    fn brightness(mut self, value: f32) -> Self {
+        self.styles_mut().brightness = Some(value);
+        self
+    }
+    /// CSS `filter: contrast()`: colours pushed from (or, below 1, towards)
+    /// mid grey.
+    fn contrast(mut self, value: f32) -> Self {
+        self.styles_mut().contrast = Some(value);
+        self
+    }
+    /// CSS `filter: saturate()`: 0 is greyscale, past 1 more vivid.
+    fn saturate(mut self, value: f32) -> Self {
+        self.styles_mut().saturate = Some(value);
         self
     }
     /// Show the node's content through `image`'s alpha (CSS `mask-image`,

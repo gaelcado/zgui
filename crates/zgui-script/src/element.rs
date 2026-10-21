@@ -29,14 +29,21 @@ pub(crate) struct Animated {
     pub opacity: Option<f32>,
     /// Gaussian blur radius of the node's content, in points.
     pub blur: Option<f32>,
+    /// Color filters: `[brightness, contrast, saturate]`.
+    pub color: Option<[f32; 3]>,
     /// Scale, rotation and skew; the origin stays the node's own.
     pub local: Option<LocalTransform>,
     /// Where the node's mask sits, from its origin.
     pub mask: Option<(f32, f32)>,
     /// The clip inset, `[top, right, bottom, left]` in points.
     pub clip: Option<[f32; 4]>,
+    /// A shader fill's time and parameters.
+    pub shader: Option<zgui::decoration::ShaderUniforms>,
     pub styles: Vec<(Prop, Lit)>,
 }
+
+/// A node's literal translation and local transform.
+type BaseTransform = (Option<(f32, f32)>, Option<LocalTransform>);
 
 pub(crate) struct Element {
     handle: OnceCell<NodeHandle>,
@@ -64,13 +71,17 @@ pub(crate) struct Element {
     pub scroll: OnceCell<(Signal<f32>, bool)>,
     /// What the node's literals set: where an animation starts from before
     /// the scene has them.
-    base: Cell<(Option<(f32, f32)>, Option<LocalTransform>)>,
+    base: Cell<BaseTransform>,
     /// The literal opacity and content blur.
     base_effects: Cell<(f32, f32)>,
+    /// The literal color filters.
+    base_color: Cell<[f32; 3]>,
     /// The literal corner radii.
     base_corners: Cell<Option<zgui::decoration::Corners>>,
     /// The literal clip inset.
     base_clip: Cell<Option<[f32; 4]>>,
+    /// The literal shader parameters.
+    base_shader: Cell<Option<zgui::decoration::ShaderUniforms>>,
 }
 impl Element {
     pub fn new(
@@ -95,8 +106,10 @@ impl Element {
             scroll: OnceCell::new(),
             base: Cell::new((None, None)),
             base_effects: Cell::new((1., 0.)),
+            base_color: Cell::new([1.; 3]),
             base_corners: Cell::new(None),
             base_clip: Cell::new(None),
+            base_shader: Cell::new(None),
         })
     }
     pub fn node(&self) -> Option<NodeId> {
@@ -215,6 +228,54 @@ impl Element {
     pub fn base_corners(&self) -> Option<zgui::decoration::Corners> {
         self.base_corners.get()
     }
+    pub fn set_base_color(&self, color: [f32; 3]) {
+        self.base_color.set(color);
+    }
+    /// The color filters now, `[brightness, contrast, saturate]`.
+    pub fn color(&self) -> [f32; 3] {
+        self.animated
+            .borrow()
+            .color
+            .unwrap_or_else(|| self.base_color.get())
+    }
+    pub fn set_color_part(&self, part: usize, value: f32) {
+        let mut color = self.color();
+        if self.animated.borrow().color.is_some() && color[part] == value {
+            return;
+        }
+        color[part] = value;
+        self.animated.borrow_mut().color = Some(color);
+        self.compositor_changed.set(true);
+    }
+    pub fn set_base_shader(&self, uniforms: Option<zgui::decoration::ShaderUniforms>) {
+        self.base_shader.set(uniforms);
+    }
+    /// The shader fill's uniforms now.
+    pub fn shader_uniforms(&self) -> zgui::decoration::ShaderUniforms {
+        if let Some(u) = self.animated.borrow().shader {
+            return u;
+        }
+        if let Some(u) = self.base_shader.get() {
+            return u;
+        }
+        self.read(|scene, id| scene.shader_uniforms(id))
+            .unwrap_or_default()
+    }
+    /// Sets the time (`slot` 0) or one of the sixteen parameters (1 to 16).
+    pub fn set_shader_slot(&self, slot: usize, value: f32) {
+        let current = self.animated.borrow().shader;
+        let mut u = current.unwrap_or_else(|| self.shader_uniforms());
+        let target = match slot {
+            0 => &mut u.time,
+            n => &mut u.params[(n - 1) / 4][(n - 1) % 4],
+        };
+        if current.is_some() && *target == value {
+            return;
+        }
+        *target = value;
+        self.animated.borrow_mut().shader = Some(u);
+        self.compositor_changed.set(true);
+    }
     pub fn set_base_clip(&self, clip: Option<[f32; 4]>) {
         self.base_clip.set(clip);
     }
@@ -284,6 +345,9 @@ impl Element {
             if wants(&Key::Blur) {
                 cleared.blur = animated.blur.take();
             }
+            if any(&[Key::Brightness, Key::Contrast, Key::Saturate]) {
+                cleared.color = animated.color.take();
+            }
             if any(&[
                 Key::Scale,
                 Key::ScaleX,
@@ -301,6 +365,9 @@ impl Element {
             if any(&[Key::ClipTop, Key::ClipRight, Key::ClipBottom, Key::ClipLeft]) {
                 cleared.clip = animated.clip.take();
             }
+            if keys.is_none_or(|keys| keys.iter().any(|k| matches!(k, Key::Shader(_)))) {
+                cleared.shader = animated.shader.take();
+            }
             let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut animated.styles)
                 .into_iter()
                 .partition(|(p, _)| wants(&Key::Style(*p)));
@@ -315,6 +382,7 @@ impl Element {
                 Key::X | Key::Y => cleared.translate.is_some(),
                 Key::Opacity => cleared.opacity.is_some(),
                 Key::Blur => cleared.blur.is_some(),
+                Key::Brightness | Key::Contrast | Key::Saturate => cleared.color.is_some(),
                 Key::MaskX | Key::MaskY => cleared.mask.is_some(),
                 Key::ClipTop | Key::ClipRight | Key::ClipBottom | Key::ClipLeft => {
                     cleared.clip.is_some()
@@ -334,9 +402,15 @@ impl Element {
                 let (x, y) = base_translate.unwrap_or_default();
                 scene.set_transform(id, Transform { x, y });
             }
-            if cleared.opacity.is_some() || cleared.blur.is_some() {
+            if cleared.opacity.is_some() || cleared.blur.is_some() || cleared.color.is_some() {
                 let (opacity, blur) = self.base_effects.get();
                 let mut effects = scene.effects(id);
+                if cleared.color.is_some() {
+                    let [brightness, contrast, saturate] = self.base_color.get();
+                    effects.brightness = brightness;
+                    effects.contrast = contrast;
+                    effects.saturate = saturate;
+                }
                 if cleared.opacity.is_some() {
                     effects.opacity = opacity;
                 }
@@ -379,8 +453,13 @@ impl Element {
             if let Some((x, y)) = animated.translate {
                 scene.set_transform(id, Transform { x, y });
             }
-            if animated.opacity.is_some() || animated.blur.is_some() {
+            if animated.opacity.is_some() || animated.blur.is_some() || animated.color.is_some() {
                 let mut effects = scene.effects(id);
+                if let Some([brightness, contrast, saturate]) = animated.color {
+                    effects.brightness = brightness;
+                    effects.contrast = contrast;
+                    effects.saturate = saturate;
+                }
                 if let Some(opacity) = animated.opacity {
                     effects.opacity = opacity;
                 }
@@ -398,6 +477,9 @@ impl Element {
             }
             if let Some([t, r, b, l]) = animated.clip {
                 scene.set_clip_inset(id, Some(zgui::scene::ClipInset::px(t, r, b, l)));
+            }
+            if let Some(uniforms) = animated.shader {
+                scene.set_shader_uniforms(id, uniforms);
             }
         }
         self.styles_changed.replace(false)

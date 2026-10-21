@@ -30,9 +30,7 @@ struct Slot {
     contents: std::ptr::NonNull<u8>,
     /// macOS: the buffer itself, for frames encoded with Metal directly.
     #[cfg(target_os = "macos")]
-    metal: objc2::rc::Retained<
-        objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>,
-    >,
+    metal: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>,
 }
 
 pub(crate) struct MappedRing {
@@ -130,9 +128,7 @@ impl MappedRing {
     }
     /// The Metal buffer `write` filled last.
     #[cfg(target_os = "macos")]
-    pub(crate) fn last_metal(
-        &self,
-    ) -> &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer> {
+    pub(crate) fn last_metal(&self) -> &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer> {
         &self.slots[self.last].metal
     }
     /// The GPU has finished every frame written so far (one encoded with

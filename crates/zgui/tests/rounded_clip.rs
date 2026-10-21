@@ -196,3 +196,143 @@ fn clip_inset_styles_reach_the_scene_and_animate_alone() {
     // The px form is the base the reactive percent replaced.
     assert_ne!(inset(&ui).top, Px(-20.));
 }
+
+#[test]
+fn bg_shader_and_uniforms_reach_the_scene() {
+    use zgui::decoration::{Background, FillShader, ShaderUniforms};
+    let shader = FillShader::new(
+        "fn fill(input: FillInput) -> vec4<f32> { return vec4(1.0); }",
+        Some(30.),
+    );
+    let uniforms = ShaderUniforms {
+        time: 0.5,
+        params: [[1., 2., 3., 4.], [0.; 4], [0.; 4], [0.; 4]],
+    };
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        column().child(
+            div()
+                .id("orb")
+                .w(50.)
+                .h(50.)
+                .bg_shader(shader.clone())
+                .shader_uniforms(uniforms),
+        ),
+    );
+    ui.prepare_frame();
+    let node = view.find("orb").unwrap();
+    let scene = ui.scene.borrow();
+    assert!(matches!(scene.kind(node),
+        zgui::scene::NodeKind::Panel { quad, .. }
+            if matches!(quad.decoration.as_deref().and_then(|d| d.background.as_ref()),
+                Some(Background::Shader(s)) if s.id() == shader.id())));
+    assert_eq!(scene.shader_uniforms(node), uniforms);
+}
+
+#[test]
+fn colour_filter_styles_animate_without_layout() {
+    let mut ui = Ui::new(400., 300.);
+    let hover = ui.signal(1_f32);
+    let read = hover.clone();
+    let view = ui.mount(
+        column().child(
+            div()
+                .id("button")
+                .w(80.)
+                .h(30.)
+                .bg(zgui::scene::Color(40, 40, 40, 255))
+                .saturate(0.5)
+                .reactive_style(move || Styles::new().brightness(read.get())),
+        ),
+    );
+    ui.prepare_frame();
+    let node = view.find("button").unwrap();
+    ui.scene.borrow_mut().flush();
+    hover.set(1.2);
+    ui.prepare_frame();
+    let effects = ui.scene.borrow().effects(node);
+    assert_eq!((effects.brightness, effects.saturate), (1.2, 0.5));
+    let frame = ui.scene.borrow_mut().flush();
+    assert_eq!((frame.layout_nodes, frame.paint_nodes), (0, 0));
+    assert!(!frame.damage.is_empty());
+}
+
+#[test]
+fn outlines_and_stroke_alignment_reach_the_panel_and_animate_without_layout() {
+    use zgui::scene::{Color, NodeKind, Outline};
+    let white = Color(255, 255, 255, 255);
+    let mut ui = Ui::new(400., 300.);
+    let width = ui.signal(2_f32);
+    let read = width.clone();
+    let view = ui.mount(
+        column()
+            .child(div().id("ring").w(50.).h(50.).reactive_style(move || {
+                Styles::new().outline(read.get(), white).outline_offset(3.)
+            }))
+            .child(
+                div()
+                    .id("center")
+                    .w(50.)
+                    .h(50.)
+                    .stroke(4., white, StrokeAlign::Center),
+            )
+            .child(
+                div()
+                    .id("outside")
+                    .w(50.)
+                    .h(50.)
+                    .stroke(4., white, StrokeAlign::Outside),
+            )
+            .child(
+                div()
+                    .id("inside")
+                    .w(50.)
+                    .h(50.)
+                    .stroke(4., white, StrokeAlign::Inside),
+            )
+            .child(
+                div()
+                    .id("none")
+                    .w(50.)
+                    .h(50.)
+                    .outline(2., white)
+                    .outline_none(),
+            ),
+    );
+    ui.prepare_frame();
+    let outline = |id: &str| {
+        let scene = ui.scene.borrow();
+        let NodeKind::Panel { quad, .. } = scene.kind(view.find(id).unwrap()) else {
+            panic!("{id} is a panel")
+        };
+        (quad.outline, quad.border_width, quad.border_over)
+    };
+    let ring = |width, offset| {
+        Some(Outline {
+            width,
+            color: white,
+            offset,
+        })
+    };
+    assert_eq!(outline("ring"), (ring(2., 3.), 0., false));
+    assert_eq!(outline("center"), (ring(4., -2.), 0., false));
+    assert_eq!(outline("outside"), (ring(4., 0.), 0., false));
+    assert_eq!(outline("inside"), (None, 4., true));
+    // Nothing left to paint: a plain container.
+    let none = view.find("none").unwrap();
+    assert!(matches!(
+        ui.scene.borrow().kind(none),
+        NodeKind::Container(_)
+    ));
+    // Its width changes paint alone: an outline takes no layout.
+    let node = view.find("ring").unwrap();
+    let before = ui.scene.borrow().bounds(node);
+    ui.scene.borrow_mut().flush();
+    width.set(6.);
+    ui.prepare_frame();
+    assert_eq!(outline("ring").0, ring(6., 3.));
+    let frame = ui.scene.borrow_mut().flush();
+    assert_eq!(frame.layout_nodes, 0);
+    assert!(!frame.damage.is_empty());
+    assert_eq!(ui.scene.borrow().bounds(node), before);
+}

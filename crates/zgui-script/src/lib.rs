@@ -70,6 +70,43 @@ impl Default for Limits {
 pub(crate) type Actions = Rc<RefCell<HashMap<String, Rc<dyn Fn(Value)>>>>;
 
 /// One script's VM.
+/// `.luaurc`'s `aliases` in `dir`, resolved against it.
+fn read_aliases(dir: &std::path::Path) -> HashMap<String, PathBuf> {
+    let Ok(text) = std::fs::read_to_string(dir.join(".luaurc")) else {
+        return HashMap::new();
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&text) else {
+        eprintln!("{}: .luaurc is not JSON", dir.display());
+        return HashMap::new();
+    };
+    config
+        .get("aliases")
+        .and_then(|a| a.as_object())
+        .map(|aliases| {
+            aliases
+                .iter()
+                .filter_map(|(name, path)| {
+                    Some((name.to_lowercase(), normalize(&dir.join(path.as_str()?))))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+/// `path` with `.` and `..` resolved in place, without touching the disk.
+fn normalize(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// A script call's time budget. It counts the CPU time the thread spends,
 /// so a busy machine does not fail a script that is not looping; the cheap
 /// wall clock decides when the CPU time is worth reading.
@@ -251,6 +288,12 @@ struct Inner {
 /// Loads an application script and its plugins and mounts what they describe.
 #[derive(Clone)]
 pub struct ScriptHost(Rc<Inner>);
+/// A script run: its VM, the view it returned and its slot contributions.
+type Ran = (
+    Rc<Vm>,
+    Option<Rc<node::Node>>,
+    Vec<(String, Rc<node::Node>)>,
+);
 
 impl ScriptHost {
     /// A host for the application script at `path`.
@@ -506,56 +549,79 @@ impl ScriptHost {
     }
 
     #[allow(clippy::type_complexity)]
-    /// `require("name")`: runs `name.luau` (or the path given) from the
-    /// script's directory or below it once, and returns what it returns.
-    /// Required files reload the scripts when they change.
+    /// `require(path)`, as Luau resolves it: `"./card"` and `"../ui/card"`
+    /// from the requiring file, `"@alias/card"` from the `.luaurc` aliases
+    /// beside the script, `"@self/card"` from the requiring file's own
+    /// directory, a directory as its `init.luau`; a bare `"card"` from the
+    /// script's directory. Modules stay inside the script's directory, run
+    /// once and return what they return; a change to one reloads the scripts.
     fn install_require(&self, lua: &Lua, dir: Option<PathBuf>) -> mlua::Result<()> {
         let host = Rc::downgrade(&self.0);
         let modules: Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>> = Rc::default();
+        let root = dir.map(|d| d.canonicalize().unwrap_or(d));
+        let aliases = root.as_deref().map(read_aliases).unwrap_or_default();
         let require = lua.create_function(move |lua, name: String| {
-            let Some(dir) = &dir else {
+            let Some(root) = &root else {
                 return Err(mlua::Error::runtime(
                     "require needs a script loaded from a file",
                 ));
             };
-            let relative = std::path::Path::new(&name);
-            let inside = relative.components().all(|c| {
-                matches!(
-                    c,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
-            });
-            if !inside {
-                return Err(mlua::Error::runtime(format!(
-                    "require(\"{name}\"): modules come from the script's directory or below"
-                )));
+            let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
+            // The requiring file, from its chunk name (its path in the root).
+            let caller = lua
+                .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
+                .flatten()
+                .and_then(|s| s.strip_prefix('@').map(|rel| root.join(rel)));
+            let here = caller
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .unwrap_or(root)
+                .to_path_buf();
+            let joined = if let Some(rest) = name.strip_prefix("@self") {
+                here.join(rest.trim_start_matches('/'))
+            } else if let Some(rest) = name.strip_prefix('@') {
+                let (alias, rest) = rest.split_once('/').unwrap_or((rest, ""));
+                let base = aliases
+                    .get(alias)
+                    .ok_or_else(|| fail(format!("no alias `@{alias}` in .luaurc")))?;
+                base.join(rest)
+            } else if name.starts_with("./") || name.starts_with("../") {
+                here.join(&name)
+            } else {
+                root.join(&name)
+            };
+            let mut path = normalize(&joined);
+            if !path.starts_with(root) {
+                return Err(fail(
+                    "modules come from the script's directory or below".into(),
+                ));
             }
-            let mut path = dir.join(relative);
-            if path.extension().is_none() {
+            if path.is_dir() {
+                path = path.join("init.luau");
+            } else if path.extension().is_none() {
                 path.set_extension("luau");
             }
             match modules.borrow().get(&path) {
                 Some(Some(value)) => return Ok(value.clone()),
-                Some(None) => {
-                    return Err(mlua::Error::runtime(format!(
-                        "require(\"{name}\"): a require cycle"
-                    )));
-                }
+                Some(None) => return Err(fail("a require cycle".into())),
                 None => {}
             }
-            let code = std::fs::read_to_string(&path).map_err(|e| {
-                mlua::Error::runtime(format!("require(\"{name}\"): {}: {e}", path.display()))
-            })?;
+            let code = std::fs::read_to_string(&path)
+                .map_err(|e| fail(format!("{}: {e}", path.display())))?;
             if let Some(host) = host.upgrade() {
                 host.required.borrow_mut().push(path.clone());
             }
             modules.borrow_mut().insert(path.clone(), None);
-            let file = path
-                .file_name()
-                .map_or(name.clone(), |f| f.to_string_lossy().into_owned());
+            // Named by its path in the root: errors show it, and its own
+            // requires resolve from it.
+            let chunk = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
             let value = match lua
                 .load(code)
-                .set_name(format!("@{file}"))
+                .set_name(format!("@{chunk}"))
                 .eval::<mlua::Value>()
             {
                 Ok(mlua::Value::Nil) => mlua::Value::Boolean(true),
@@ -571,17 +637,7 @@ impl ScriptHost {
         lua.globals().set("require", require)
     }
 
-    fn run(
-        &self,
-        script: &Script,
-    ) -> Result<
-        (
-            Rc<Vm>,
-            Option<Rc<node::Node>>,
-            Vec<(String, Rc<node::Node>)>,
-        ),
-        String,
-    > {
+    fn run(&self, script: &Script) -> Result<Ran, String> {
         let name = script.name();
         let fail = |error: mlua::Error| describe(&name, &error);
         let code = script.code()?;

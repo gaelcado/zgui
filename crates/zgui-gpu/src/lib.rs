@@ -13,6 +13,7 @@ mod layer_present;
 mod metal_frame;
 #[cfg(target_os = "macos")]
 mod native_surface;
+mod planes;
 mod surface;
 mod upload;
 pub use surface::PresentationStatus;
@@ -140,11 +141,30 @@ struct Region {
     radii1: [f32; 4],
     fade_box: [f32; 4],
     fade: [f32; 4],
+    /// Colour filters: an affine map of straight RGB, rows R, G, B, on
+    /// where `tint[0]` is 1.
+    color: [[f32; 4]; 3],
+    tint: [f32; 4],
 }
 impl Region {
+    /// A shader fill's uniforms as a record of the region table (`time`
+    /// first, its `params` in the four lanes after; see `fill_source`).
+    fn uniforms(uniforms: zgui::decoration::ShaderUniforms) -> Self {
+        let [a, b, c, d] = uniforms.params;
+        Self {
+            round0: [uniforms.time, 0., 0., 0.],
+            radii0: a,
+            round1: b,
+            radii1: c,
+            fade_box: d,
+            fade: [0.; 4],
+            color: [[0.; 4]; 3],
+            tint: [0.; 4],
+        }
+    }
     /// `item`'s, if it lies in one.
     fn of(item: &zgui::scene::PaintItem<'_>) -> Option<Self> {
-        if item.mask.is_none() && item.rounded.iter().all(Option::is_none) {
+        if item.mask.is_none() && item.rounded.iter().all(Option::is_none) && item.color.is_none() {
             return None;
         }
         let round = |clip: Option<zgui::scene::RoundRect>| match clip {
@@ -168,6 +188,8 @@ impl Region {
             radii1,
             fade_box,
             fade,
+            color: item.color.unwrap_or_default(),
+            tint: [if item.color.is_some() { 1. } else { 0. }, 0., 0., 0.],
         })
     }
 }
@@ -193,6 +215,9 @@ enum Shading {
     /// An opaque flat colour: `basic` without blending, which reads every
     /// pixel it writes. Same pixels.
     Opaque,
+    /// A shader fill (`FillShader`, by id): its pipeline, `shade` for
+    /// whatever else the draw holds.
+    Fill(u64),
 }
 fn shading(quad: &Quad, scale: f32) -> Shading {
     // A panel with square corners and no border only antialiases its edges:
@@ -241,7 +266,7 @@ impl QuadPipelines {
     /// The pipeline drawing quads of `shading`.
     fn get(&self, shading: Shading) -> &wgpu::RenderPipeline {
         let (cell, basic, blend) = match shading {
-            Shading::Full => (&self.full, false, true),
+            Shading::Full | Shading::Fill(_) => (&self.full, false, true),
             Shading::Basic => (&self.basic, true, true),
             Shading::Opaque => (&self.basic_clear, true, false),
         };
@@ -272,7 +297,12 @@ const SPLIT_PIXELS: f32 = 32_768.;
 /// it shades, on a GPU as on a software rasterizer: plain quads (backgrounds,
 /// glyphs, bars) draw with the basic one.
 fn push_draw(draws: &mut Vec<Draw>, quads: &[Quad], draw: Draw, split: bool, scale: f32) {
-    if !split || draw.blur.is_some() || draw.layer.is_some() || draw.end <= draw.start {
+    if !split
+        || draw.blur.is_some()
+        || draw.layer.is_some()
+        || matches!(draw.shading, Shading::Fill(_))
+        || draw.end <= draw.start
+    {
         draws.push(draw);
         return;
     }
@@ -925,6 +955,12 @@ struct LayerPresent {
     /// When the window last changed size. Frames show on the plain layer
     /// until `RESIZE_SETTLE` after it (`Layer::show_plain`).
     resized_at: Option<std::time::Instant>,
+    /// The layer to present into instead of the window's (an overlay plane).
+    host: Option<objc2::rc::Retained<objc2_quartz_core::CALayer>>,
+    /// Frames show on the plain layer until then (`present_plain_for`), or
+    /// always (`plain_only`): they change in the caller's transaction.
+    plain_until: Option<std::time::Instant>,
+    plain_only: bool,
 }
 #[cfg(target_os = "macos")]
 impl LayerPresent {
@@ -989,7 +1025,7 @@ struct Picks<'p> {
 impl<'p> Picks<'p> {
     fn get(&self, shading: Shading) -> &'p wgpu::RenderPipeline {
         match shading {
-            Shading::Full => self.full,
+            Shading::Full | Shading::Fill(_) => self.full,
             Shading::Basic => self.basic,
             Shading::Opaque => self.opaque,
         }
@@ -1303,6 +1339,12 @@ pub struct GpuRenderer {
     effect_pipelines: Option<effects::EffectPipelines>,
     /// Slots the next `render_flat` draws before compositing them.
     effect_jobs: Vec<effects::Job>,
+    /// Shader fills' pipelines by shader id (`None`: it failed to compile),
+    /// and the shaders, for frames drawn with Metal directly.
+    fill_pipelines: FxHashMap<u64, Option<wgpu::RenderPipeline>>,
+    fill_shaders: FxHashMap<u64, Arc<zgui::decoration::FillShader>>,
+    /// The presentation plane drawn around native views (planes.rs).
+    plane: Option<planes::PlaneState>,
 }
 impl GpuRenderer {
     pub fn new(width: u32, height: u32) -> Result<Self, GpuError> {
@@ -1576,6 +1618,9 @@ impl GpuRenderer {
             effects: None,
             effect_pipelines: None,
             effect_jobs: Vec::new(),
+            fill_pipelines: FxHashMap::default(),
+            fill_shaders: FxHashMap::default(),
+            plane: None,
         })
     }
     /// Bytes the native device reports as allocated (Metal only), including
@@ -1715,9 +1760,10 @@ impl GpuRenderer {
         self.layers.clear();
         // Scratch grows on demand; release it when the window shrinks a lot.
         if self.blur_scratch.as_ref().is_some_and(|scratch| {
-            scratch.atlas.iter().any(|texture| {
-                texture.width() > width * 2 || texture.height() > height * 2
-            })
+            scratch
+                .atlas
+                .iter()
+                .any(|texture| texture.width() > width * 2 || texture.height() > height * 2)
         }) {
             self.blur_scratch = None;
         }
@@ -1856,7 +1902,11 @@ impl GpuRenderer {
             }
         }
         // Scroll moves this frame can copy; the rest repaint their clip.
-        let (copies, repaint) = self.scroll_copies(scene, damage);
+        let (copies, repaint) = match self.plane_offset() {
+            // An overlay plane's surface repaints what scrolls.
+            Some(_) => (Vec::new(), self.plane_scrolled(scene)),
+            None => self.scroll_copies(scene, damage),
+        };
         self.copies = copies;
         let extended;
         let damage = if repaint.is_empty() {
@@ -1864,6 +1914,15 @@ impl GpuRenderer {
         } else {
             extended = [damage, &repaint].concat();
             &extended[..]
+        };
+        // An overlay plane draws in its own box's space.
+        let local;
+        let damage = match self.plane_damage(damage) {
+            Some(within) => {
+                local = within;
+                &local[..]
+            }
+            None => damage,
         };
         if damage.is_empty() && !self.fresh && self.copies.is_empty() {
             return Ok(GpuStats::default());
@@ -1880,9 +1939,11 @@ impl GpuRenderer {
         let merged = (!self.fresh && !scene.has_backdrop_blur())
             .then(|| merge_damage(damage, viewport, self.scale));
         let items = match &merged {
-            Some(regions) => scene.layer_items_within(None, Some(regions)),
+            Some(regions) => scene.layer_items_within(None, Some(&self.plane_world(regions))),
             None => scene.layer_items(None),
         };
+        // Around native views, only this plane's paint (planes.rs).
+        let items = self.plane_items(items);
         let mut layer_stats = GpuStats::default();
         self.layer_frame += 1;
         for item in &items {
@@ -2022,7 +2083,8 @@ impl GpuRenderer {
         let width = (bounds.width * scale).ceil().max(1.) as u32;
         let height = (bounds.height * scale).ceil().max(1.) as u32;
         let bounds = Rect::new(x, y, width as f32 / scale, height as f32 / scale);
-        let items = scene.layer_items(Some(id));
+        let mut items = scene.layer_items(Some(id));
+        self.plane_filter(&mut items);
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
                 self.prepare_layer(scene, item.id, magnification, stats)?;
@@ -2199,6 +2261,32 @@ impl GpuRenderer {
         {
             self.viewport_values = [width, height, self.scale, 0.];
         }
+    }
+    /// The pipeline drawing `shading` if a shader fill's, once compiled.
+    fn fill_pipeline(&self, shading: Shading) -> Option<&wgpu::RenderPipeline> {
+        match shading {
+            Shading::Fill(id) => self.fill_pipelines.get(&id)?.as_ref(),
+            _ => None,
+        }
+    }
+    /// Compile `shader`'s pipeline if new; whether it can draw.
+    fn prepare_fill(&mut self, shader: &Arc<zgui::decoration::FillShader>) -> bool {
+        if let Some(compiled) = self.fill_pipelines.get(&shader.id()) {
+            return compiled.is_some();
+        }
+        let source = fill_source(shader.source());
+        let pipeline = fill_validates(&source).then(|| {
+            let module = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("shader fill"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+            fill_pipeline(&self.device, &module, &self.context.inner.quad_layout)
+        });
+        self.fill_shaders.insert(shader.id(), shader.clone());
+        self.fill_pipelines.insert(shader.id(), pipeline);
+        self.fill_pipelines[&shader.id()].is_some()
     }
     /// Group 1 of the quad pipelines: the viewport `uniform` and `regions`.
     fn viewport_group(
@@ -2402,6 +2490,8 @@ impl GpuRenderer {
                 continue;
             }
             let start = quads.len() as u32;
+            // A shader fill's draw uses its pipeline.
+            let mut fill_shading = None;
             if item.isolated {
                 let layer = self.layers.get(&item.id).expect("prepared layer");
                 let bounds = Rect::new(
@@ -2510,9 +2600,12 @@ impl GpuRenderer {
                         });
                     let (opacity, edge_fade) = (item.effects.opacity, item.effects.edge_fade);
                     if item.border_pass {
-                        // Its border alone, over what it holds.
-                        if ring {
+                        // Its border alone, over what it holds, and its outline.
+                        if ring && style.border_over {
                             quads.push(ring_quad(style, bounds, opacity, edge_fade));
+                        }
+                        if let Some(outline) = style.outline.filter(|o| o.visible()) {
+                            quads.push(outline_quad(&outline, style, bounds, opacity, edge_fade));
                         }
                     } else {
                         for shadow in style.shadows() {
@@ -2553,10 +2646,12 @@ impl GpuRenderer {
                         // dashes still rasterize.
                         let flat_fill = style.decoration.as_deref().and_then(|detail| {
                             let fill = match &detail.background {
-                                // An image paints over the fill colour.
-                                None | Some(zgui::decoration::Background::Image { .. }) => {
-                                    style.fill
-                                }
+                                // An image or shader paints over the fill colour.
+                                None
+                                | Some(
+                                    zgui::decoration::Background::Image { .. }
+                                    | zgui::decoration::Background::Shader(_),
+                                ) => style.fill,
                                 Some(zgui::decoration::Background::Brush(
                                     zgui::canvas::Brush::Solid(color),
                                 )) => *color,
@@ -2601,6 +2696,31 @@ impl GpuRenderer {
                                 }
                                 quads.push(quad);
                                 canvas_image = Some(image.id());
+                            }
+                            if let Some(zgui::decoration::Background::Shader(shader)) = style
+                                .decoration
+                                .as_deref()
+                                .and_then(|d| d.background.as_ref())
+                                && self.prepare_fill(shader)
+                            {
+                                let uniforms = Region::uniforms(scene.shader_uniforms(item.id));
+                                let record = region_index(&mut clips, Some(uniforms));
+                                quads.push(Quad {
+                                    rect: fade,
+                                    uv: [0.; 4],
+                                    color: [1., 1., 1., opacity],
+                                    fade,
+                                    options: [edge_fade, 0., 0., 1.],
+                                    shape: [0., 0., 0., 1.],
+                                    border: decoration::shadow_corners(
+                                        style,
+                                        bounds.width,
+                                        bounds.height,
+                                        0.,
+                                    ),
+                                    mask: [0., record, 0., 0.],
+                                });
+                                fill_shading = Some(Shading::Fill(shader.id()));
                             }
                             if ring && !later {
                                 quads.push(ring_quad(style, bounds, opacity, edge_fade));
@@ -3071,7 +3191,7 @@ impl GpuRenderer {
             let region = region_index(&mut clips, Region::of(&item));
             if region > 0. {
                 for quad in &mut quads[start as usize..] {
-                    quad.mask = [region, 0., 0., 0.];
+                    quad.mask[0] = region;
                 }
             }
             // When the clip only culls whole quads, apply it on the CPU and
@@ -3097,7 +3217,7 @@ impl GpuRenderer {
             }
             if quads.len() as u32 > start || item.effects.blur_radius > 0. {
                 let draw = Draw {
-                    shading: Shading::Full,
+                    shading: fill_shading.unwrap_or(Shading::Full),
                     layer: None,
                     blur: (item.effects.blur_radius > 0.).then_some((
                         bounds,
@@ -3208,7 +3328,9 @@ impl GpuRenderer {
             let margin = 1. / self.scale;
             // What a draw paints: its quads and, for a filter, its blur.
             let reaches = |draw: &Draw, area: Rect| {
-                let blur = draw.blur.and_then(|(bounds, _, _)| bounds.intersection(draw.clip));
+                let blur = draw
+                    .blur
+                    .and_then(|(bounds, _, _)| bounds.intersection(draw.clip));
                 [draw.bounds.intersection(draw.clip), blur]
                     .into_iter()
                     .flatten()
@@ -3216,26 +3338,31 @@ impl GpuRenderer {
             };
             for i in 0..draws.len() {
                 let draw = &draws[i];
-                if !regions.iter().any(|(region, _)| filtered(draw, region).is_some()) {
+                if !regions
+                    .iter()
+                    .any(|(region, _)| filtered(draw, region).is_some())
+                {
                     continue;
                 }
                 let Some((bounds, effects, _)) = draw.blur else {
                     continue;
                 };
                 let area = bounds.intersection(draw.clip);
-                let joins = area.zip(batches.last()).is_some_and(|(area, (start, filters))| {
-                    let area = area.expand(margin);
-                    (*start..i).all(|k| {
-                        let before = &draws[k];
-                        let quads = before.bounds.intersection(before.clip);
-                        !reaches(before, area)
-                            || filters.contains(&k)
-                                && quads.is_none_or(|quads| quads.intersection(area).is_none())
-                                && before.blur.is_some_and(|(under, beneath, _)| {
-                                    2. * peak_blur(under, &beneath, area) <= effects.blur_radius
-                                })
-                    })
-                });
+                let joins = area
+                    .zip(batches.last())
+                    .is_some_and(|(area, (start, filters))| {
+                        let area = area.expand(margin);
+                        (*start..i).all(|k| {
+                            let before = &draws[k];
+                            let quads = before.bounds.intersection(before.clip);
+                            !reaches(before, area)
+                                || filters.contains(&k)
+                                    && quads.is_none_or(|quads| quads.intersection(area).is_none())
+                                    && before.blur.is_some_and(|(under, beneath, _)| {
+                                        2. * peak_blur(under, &beneath, area) <= effects.blur_radius
+                                    })
+                        })
+                    });
                 match batches.last_mut() {
                     Some((_, filters)) if joins => filters.push(i),
                     _ => batches.push((i, vec![i])),
@@ -3266,6 +3393,16 @@ impl GpuRenderer {
                     .device
                     .features()
                     .contains(wgpu::Features::DUAL_SOURCE_BLENDING))
+            // Shader fills compiled for Metal too.
+            && draws.iter().all(|draw| match draw.shading {
+                Shading::Fill(id) => self.fill_shaders.get(&id).is_some_and(|shader| {
+                    self.metal_frame
+                        .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
+                        .as_ref()
+                        .is_some_and(|frame| frame.fills(shader))
+                }),
+                _ => true,
+            })
             && effect_jobs.iter().all(|job| {
                 job.mask
                     .is_none_or(|id| self.images.get(&id).is_some_and(|image| image.2.is_some()))
@@ -3355,8 +3492,8 @@ impl GpuRenderer {
                     label: Some("retained frame vertices"),
                     size: self.vertex_capacity as u64,
                     usage: wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::STORAGE,
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 });
                 stats.vertex_buffer_allocations += 1;
@@ -3411,7 +3548,11 @@ impl GpuRenderer {
         } else {
             vec![0; regions.len()]
         };
+        // Shader fills have no pipelines writing two targets at once.
         let defer = !self.in_layer
+            && !draws
+                .iter()
+                .any(|draw| matches!(draw.shading, Shading::Fill(_)))
             && (!self.present_unpremultiplies || self.background.3 == 255)
             && self.single_pass_format.is_some()
             && !self.copy_present
@@ -3472,7 +3613,11 @@ impl GpuRenderer {
                     stats.draw_calls += 1;
                 }
                 if let Some(blur) = vertical.take() {
-                    let pipeline = self.blur_pipelines.as_ref().expect("filtered").drawing(&blur);
+                    let pipeline = self
+                        .blur_pipelines
+                        .as_ref()
+                        .expect("filtered")
+                        .drawing(&blur);
                     Self::encode_vertical(&mut pass, pipeline, &blur, &mut stats);
                 }
                 pass.set_vertex_buffer(0, vertices.slice(..));
@@ -3490,7 +3635,10 @@ impl GpuRenderer {
                     }
                     self.encode_draws(
                         &mut pass,
-                        &|shading| quads.get(shading),
+                        &|shading| {
+                            self.fill_pipeline(shading)
+                                .unwrap_or_else(|| quads.get(shading))
+                        },
                         *region,
                         &draws[from..end],
                         first,
@@ -3504,7 +3652,9 @@ impl GpuRenderer {
             vertical = plans[segment]
                 .as_ref()
                 .zip(ranges[segment])
-                .and_then(|(plan, ranges)| self.blur(&mut encoder, plan, &vertices, ranges, &mut stats));
+                .and_then(|(plan, ranges)| {
+                    self.blur(&mut encoder, plan, &vertices, ranges, &mut stats)
+                });
             // The first filtered draw's own quads open the next pass.
             from = end;
         }
@@ -3533,7 +3683,11 @@ impl GpuRenderer {
     ) -> GpuStats {
         let vertices = {
             use objc2::Message;
-            let mapped = self.mapped.as_mut().expect("checked by the caller").get_mut();
+            let mapped = self
+                .mapped
+                .as_mut()
+                .expect("checked by the caller")
+                .get_mut();
             let (_, allocated) = mapped.write(bytemuck::cast_slice(&quads));
             stats.vertex_buffer_allocations += usize::from(allocated);
             self.vertex_capacity = mapped.bytes();
@@ -3555,7 +3709,9 @@ impl GpuRenderer {
                 let rects: Vec<Scissor> = plan
                     .slots
                     .iter()
-                    .map(|(record, (w, h), _)| (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h))
+                    .map(|(record, (w, h), _)| {
+                        (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h)
+                    })
                     .collect();
                 Some((plan, slots, rects))
             })
@@ -3814,7 +3970,11 @@ impl GpuRenderer {
             });
             let mut stats = GpuStats::default();
             if let Some(blur) = &deferred.blur {
-                let pipeline = self.blur_pipelines.as_ref().expect("filtered").drawing(blur);
+                let pipeline = self
+                    .blur_pipelines
+                    .as_ref()
+                    .expect("filtered")
+                    .drawing(blur);
                 Self::encode_vertical(&mut pass, pipeline, blur, &mut stats);
             }
             let quads = &self.context.inner.quads;
@@ -4243,7 +4403,12 @@ impl GpuRenderer {
                 filter.bounds.width * scale,
                 filter.bounds.height * scale,
             ];
-            let edges = [bounds[0], bounds[1], bounds[0] + bounds[2], bounds[1] + bounds[3]];
+            let edges = [
+                bounds[0],
+                bounds[1],
+                bounds[0] + bounds[2],
+                bounds[1] + bounds[3],
+            ];
             let first = slots.len() as u32;
             for (k, &level) in levels.iter().enumerate() {
                 // Blurred where sigma spans 1.5 to 3 texels: a 16 px blur on a
@@ -4257,8 +4422,16 @@ impl GpuRenderer {
                 } else {
                     // Sigma at distance d in: sigma * (d / fade)^2.
                     let at = |octaves: i32| fade * 2_f32.powi(-octaves).sqrt();
-                    let near = if k + 1 == levels.len() { 0. } else { at(k as i32 + 1) };
-                    let far = if k == 0 { f32::INFINITY } else { at(k as i32 - 1) };
+                    let near = if k + 1 == levels.len() {
+                        0.
+                    } else {
+                        at(k as i32 + 1)
+                    };
+                    let far = if k == 0 {
+                        f32::INFINITY
+                    } else {
+                        at(k as i32 - 1)
+                    };
                     band(area, edges, near, far)
                 };
                 let reach = ((3. * level / factor).ceil() + 1.) * factor;
@@ -4300,7 +4473,12 @@ impl GpuRenderer {
             };
             blurs.push(BlurRecord {
                 bounds,
-                effect: [filter.effects.opacity, fade, sigma, *levels.last().expect("one level")],
+                effect: [
+                    filter.effects.opacity,
+                    fade,
+                    sigma,
+                    *levels.last().expect("one level"),
+                ],
                 area,
                 shape: filter.corners.map(|radius| radius * scale),
                 slots: [first, levels.len() as u32, original, 0],
@@ -4311,8 +4489,8 @@ impl GpuRenderer {
         }
         // Shelves as wide as the target, tallest slots first.
         let mut order: Vec<usize> = (0..slots.len()).collect();
-        order.sort_by_key(|&k| std::cmp::Reverse(slots[k].1 .1));
-        let shelf_width = slots.iter().map(|slot| slot.1 .0).fold(self.width, u32::max);
+        order.sort_by_key(|&k| std::cmp::Reverse(slots[k].1.1));
+        let shelf_width = slots.iter().map(|slot| slot.1.0).fold(self.width, u32::max);
         let (mut x, mut y, mut shelf, mut width) = (0, 0, 0, 1);
         for k in order {
             let (w, h) = slots[k].1;
@@ -4334,12 +4512,19 @@ impl GpuRenderer {
         }
         let atlas = self.blur_scratch.take().map(|scratch| scratch.atlas);
         let atlas = [0, 1].map(|i| match &atlas {
-            Some(atlas) if atlas[i].width() >= width && atlas[i].height() >= height => atlas[i].clone(),
+            Some(atlas) if atlas[i].width() >= width && atlas[i].height() >= height => {
+                atlas[i].clone()
+            }
             current => {
-                let (current_w, current_h) =
-                    current.as_ref().map_or((0, 0), |a| (a[i].width(), a[i].height()));
+                let (current_w, current_h) = current
+                    .as_ref()
+                    .map_or((0, 0), |a| (a[i].width(), a[i].height()));
                 let grow = |want: u32, have: u32| want.max(have).next_multiple_of(64).min(limit);
-                atlas_texture(&self.device, grow(width, current_w), grow(height, current_h))
+                atlas_texture(
+                    &self.device,
+                    grow(width, current_w),
+                    grow(height, current_h),
+                )
             }
         });
         self.blur_scratch = Some(BlurScratch { atlas });
@@ -4373,7 +4558,9 @@ impl GpuRenderer {
             self.blur_pipelines = Some(BlurPipelines::new(&self.device));
         }
         let atlas = &self.blur_scratch.as_ref().expect("planned").atlas;
-        let views = atlas.each_ref().map(|texture| texture.create_view(&Default::default()));
+        let views = atlas
+            .each_ref()
+            .map(|texture| texture.create_view(&Default::default()));
         let records = |(offset, size): (u64, u64)| {
             wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                 buffer,
@@ -4417,9 +4604,30 @@ impl GpuRenderer {
         // the first atlas with the averages and stay there.
         let copies = slots.iter().any(|slot| !slot.2);
         let passes = [
-            ("blur reduce", &pipelines.reduce, bind(&self.view, &views[1]), &views[0], false, false),
-            ("blur across", &pipelines.across, bind(&views[0], &views[0]), &views[1], true, false),
-            ("blur down", &pipelines.down, bind(&views[1], &views[1]), &views[0], true, copies),
+            (
+                "blur reduce",
+                &pipelines.reduce,
+                bind(&self.view, &views[1]),
+                &views[0],
+                false,
+                false,
+            ),
+            (
+                "blur across",
+                &pipelines.across,
+                bind(&views[0], &views[0]),
+                &views[1],
+                true,
+                false,
+            ),
+            (
+                "blur down",
+                &pipelines.down,
+                bind(&views[1], &views[1]),
+                &views[0],
+                true,
+                copies,
+            ),
         ];
         for (label, pipeline, group, target, blurred_only, keep) in &passes {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4868,7 +5076,9 @@ impl GpuRenderer {
         // them holds the frame nearest this one.
         let idle = |present: &LayerPresent| -> Vec<usize> {
             let mut idle: Vec<usize> = (0..present.buffers.len())
-                .filter(|&i| Some(i) != present.shown && present.buffers[i].0.surface.use_count() <= 1)
+                .filter(|&i| {
+                    Some(i) != present.shown && present.buffers[i].0.surface.use_count() <= 1
+                })
                 .collect();
             idle.sort_by_key(|&i| std::cmp::Reverse(present.buffers[i].1));
             idle
@@ -4876,7 +5086,9 @@ impl GpuRenderer {
         let budget = if present.full_rate { LAYER_BUFFERS } else { 2 };
         let mut free = idle(present);
         // Slower again: the third surface goes once free.
-        if present.buffers.len() > budget && let Some(&spare) = free.last() {
+        if present.buffers.len() > budget
+            && let Some(&spare) = free.last()
+        {
             present.buffers.remove(spare);
             if let Some(shown) = &mut present.shown
                 && *shown > spare
@@ -4948,6 +5160,11 @@ impl GpuRenderer {
         before_present: impl FnOnce(),
     ) -> Result<PresentationStatus, GpuError> {
         let mut present = self.layer_present.take().expect("layer presenting");
+        if present.layer.is_none()
+            && let Some(host) = &present.host
+        {
+            present.layer = Some(layer_present::Layer::attach(host));
+        }
         if present.layer.is_none() {
             let surface = self.surface.as_ref().expect("a window surface");
             // SAFETY: The HAL guard only borrows this live surface for the call.
@@ -4990,6 +5207,10 @@ impl GpuRenderer {
         if present
             .resized_at
             .is_some_and(|at| at.elapsed() < RESIZE_SETTLE)
+            || present.plain_only
+            || present
+                .plain_until
+                .is_some_and(|until| std::time::Instant::now() < until)
         {
             layer.show_plain(buffer, opaque);
         } else {
@@ -5047,12 +5268,12 @@ impl GpuRenderer {
         &mut self,
         before_present: impl FnOnce(),
     ) -> Result<PresentationStatus, GpuError> {
-        if self.surface.is_none() {
-            return Ok(PresentationStatus::Offscreen);
-        }
         #[cfg(target_os = "macos")]
         if self.layer_present.is_some() {
             return self.present_layer(before_present);
+        }
+        if self.surface.is_none() {
+            return Ok(PresentationStatus::Offscreen);
         }
         let frame = match surface::acquire(self)? {
             surface::Acquired::Frame(frame) => frame,
@@ -5375,9 +5596,18 @@ fn peak_blur(bounds: Rect, effects: &zgui::scene::Effects, area: Rect) -> f32 {
         let at = ((lo + hi) / 2.).clamp(from, to);
         (at - lo).min(hi - at)
     };
-    let depth = deepest(bounds.x, bounds.x + bounds.width, area.x, area.x + area.width).min(
-        deepest(bounds.y, bounds.y + bounds.height, area.y, area.y + area.height),
-    );
+    let depth = deepest(
+        bounds.x,
+        bounds.x + bounds.width,
+        area.x,
+        area.x + area.width,
+    )
+    .min(deepest(
+        bounds.y,
+        bounds.y + bounds.height,
+        area.y,
+        area.y + area.height,
+    ));
     let t = (depth / effects.edge_fade).clamp(0., 1.);
     effects.blur_radius * t * t
 }
@@ -5407,7 +5637,12 @@ fn batch_filters(draws: &[Draw], regions: &[(Rect, Scissor)], members: &[usize])
 fn band(area: [f32; 4], edges: [f32; 4], near: f32, far: f32) -> Option<[f32; 4]> {
     let inset = |by: f32| [edges[0] + by, edges[1] + by, edges[2] - by, edges[3] - by];
     let meet = |a: [f32; 4], b: [f32; 4]| {
-        let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+        let r = [
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+            a[2].min(b[2]),
+            a[3].min(b[3]),
+        ];
         (r[0] < r[2] && r[1] < r[3]).then_some(r)
     };
     let within = meet(area, inset(near))?;
@@ -5423,7 +5658,14 @@ fn band(area: [f32; 4], edges: [f32; 4], near: f32, far: f32) -> Option<[f32; 4]
     ]
     .into_iter()
     .filter(|s| s[0] < s[2] && s[1] < s[3])
-    .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
+    .reduce(|a, b| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    })
 }
 fn scissor_minus(rect: Scissor, cut: Scissor, out: &mut Vec<Scissor>) {
     let (x, y, right, bottom) = (rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3);
@@ -5540,6 +5782,63 @@ fn rich_decoration_quad(d: &text::RichDecoration) -> Quad {
         mask: NO_MASK,
     }
 }
+/// A shader fill's module: the quad shader (draw.wgsl), the `FillInput` its
+/// `fill` takes, the user's source and the fragment entry `zgui_fill`, which
+/// shades a quad carrying uniforms (`mask.y`: their record in the region
+/// table, plus one) with `fill`'s colour and the rest as `shade` does.
+pub(crate) fn fill_source(user: &str) -> String {
+    format!(
+        "{}\nstruct FillInput {{ p:vec2<f32>, size:vec2<f32>, time:f32, scale:f32, params:array<vec4<f32>,4> }}\n{user}\n{}",
+        include_str!("draw.wgsl"),
+        "@fragment fn zgui_fill(input:Out)->@location(0) vec4<f32> {
+ if input.mask.y<.5 {return shade(input);}
+ let u=regions[u32(input.mask.y)-1u]; var v=input;
+ let point=select(v.position.xy/viewport.z,v.point,v.options.z>0.5);
+ let c=fill(FillInput(point-v.fade.xy,v.fade.zw,u.round0.x,viewport.z,array<vec4<f32>,4>(u.radii0,u.round1,u.radii1,u.fade_box)));
+ v.color=vec4(c.rgb,c.a*v.color.a);
+ return shade(v);
+}"
+    )
+}
+/// Checks a shader fill's source (the user's part, as `FillShader` holds
+/// it) as the renderer will compile it: `Err` reads like a compiler
+/// message, with lines counted in `user`, for an app or script to show.
+pub fn check_fill_shader(user: &str) -> Result<(), String> {
+    let source = fill_source(user);
+    // Lines before the user's code in the module `fill_source` builds.
+    let template = fill_source("\u{1}");
+    let before = template[..template.find('\u{1}').unwrap_or(0)]
+        .matches('\n')
+        .count();
+    let place = |location: Option<wgpu::naga::SourceLocation>| match location {
+        Some(at) if at.line_number as usize > before => {
+            format!("line {}: ", at.line_number as usize - before)
+        }
+        Some(_) => "in zgui's part of the module (a reserved name?): ".to_owned(),
+        None => String::new(),
+    };
+    let module = wgpu::naga::front::wgsl::parse_str(&source)
+        .map_err(|e| format!("{}{}", place(e.location(&source)), e.message()))?;
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map(|_| ())
+    .map_err(|e| format!("{}{}", place(e.location(&source)), e.as_inner()))
+}
+/// Whether `source` (a shader fill's whole module) is valid WGSL.
+pub(crate) fn fill_validates(source: &str) -> bool {
+    let Ok(module) = wgpu::naga::front::wgsl::parse_str(source) else {
+        return false;
+    };
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .is_ok()
+}
 /// A background `image` placed in `bounds` as `fit` has it (centred), the
 /// part inside them, cut to `style`'s rounded corners (the quad shader's
 /// per-corner shape over the box, whatever part of it the image covers).
@@ -5592,6 +5891,39 @@ fn background_quad(
         border: decoration::shadow_corners(style, bounds.width, bounds.height, 0.),
         mask: NO_MASK,
     })
+}
+/// `outline` around a box of `style` at `bounds`: a ring of its width
+/// between the box grown by its offset and by its offset and width, each
+/// rounded corner grown alike (square ones stay square).
+fn outline_quad(
+    outline: &zgui::scene::Outline,
+    style: &zgui::scene::QuadStyle,
+    bounds: Rect,
+    opacity: f32,
+    edge_fade: f32,
+) -> Quad {
+    let outer = outline.outer(bounds);
+    let grown = outline.offset + outline.width;
+    let corners =
+        decoration::shadow_corners(style, bounds.width, bounds.height, 0.).map(|radius| {
+            if radius > 0. {
+                (radius + grown).max(0.)
+            } else {
+                0.
+            }
+        });
+    let width = (outline.width.max(0.) * 16.).round().min(4095.);
+    let fade = [outer.x, outer.y, outer.width, outer.height];
+    Quad {
+        rect: fade,
+        uv: [0.; 4],
+        color: rgba(outline.color, opacity),
+        fade,
+        options: [edge_fade, 0., 0., 1.],
+        shape: [width + 4096. * width, -1., width + 4096. * width, 1.],
+        border: corners,
+        mask: NO_MASK,
+    }
 }
 /// `style`'s border alone at `bounds`: a ring of its side widths (top,
 /// right, bottom, left) inside its rounded box (`draw.wgsl`'s ring mode,
@@ -5722,6 +6054,44 @@ fn quad_pipeline(
             } else {
                 &targets[..1]
             },
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+/// A shader fill's pipeline: quads blended over the target, `module`'s
+/// `zgui_fill` shading them (see `fill_source`).
+fn fill_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    let all = wgpu::vertex_attr_array![0=>Float32x4,1=>Float32x4,2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4,6=>Float32x4,7=>Float32x4];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("shader fill"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 128,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &all,
+            }],
+        },
+        primitive: QUAD_STRIP,
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("zgui_fill"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         multiview_mask: None,
         cache: None,

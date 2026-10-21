@@ -394,6 +394,9 @@ pub struct WindowContext {
     /// Display-paced animation frames for this window. Components reach it
     /// through `Context::frames`.
     pub frames: FrameClock,
+    natives: zgui::native_view::NativeViews,
+    #[allow(dead_code)]
+    native_diagnostics: crate::native_host::NativeDiagnosticsHandle,
     close_requested: Option<Box<dyn FnMut() -> bool>>,
     closed: Option<Box<dyn FnOnce()>>,
     menu_action: Option<Box<dyn FnMut(crate::MenuAction)>>,
@@ -454,8 +457,19 @@ impl WindowContext {
         });
         self.ui.render(zgui::compose::provide(
             self.frames.clone(),
-            zgui::compose::provide(runner, view),
+            zgui::compose::provide(runner, zgui::compose::provide(self.natives.clone(), view)),
         ))
+    }
+    /// This window's mounted native views (web pages): provided to the
+    /// components `render` mounts, as `web_view` uses it.
+    pub fn native_views(&self) -> zgui::native_view::NativeViews {
+        self.natives.clone()
+    }
+    /// The live AppKit state of this window's native views (for fixtures
+    /// and diagnostics); empty until a native view first shows.
+    #[cfg(target_os = "macos")]
+    pub fn native_diagnostics(&self) -> crate::NativeDiagnostics {
+        self.native_diagnostics.clone()
     }
 
     /// Return false to keep the window open, for example while asking about unsaved data.
@@ -676,22 +690,35 @@ impl Latch {
     const REST: u8 = 120;
     /// When a frame complete at `now` presents, on the refresh grid through
     /// `origin` with `period`.
-    fn decide(&mut self, now: std::time::Instant, origin: std::time::Instant, period: std::time::Duration) -> std::time::Instant {
+    fn decide(
+        &mut self,
+        now: std::time::Instant,
+        origin: std::time::Instant,
+        period: std::time::Duration,
+    ) -> std::time::Instant {
         if let Some(started) = self.started.take() {
-            self.work = now.saturating_duration_since(started).max(self.work.mul_f64(0.99));
+            self.work = now
+                .saturating_duration_since(started)
+                .max(self.work.mul_f64(0.99));
         }
         // Decided as if rendered when it could have been: held frames would
         // otherwise come ready milliseconds apart from one to the next, and
         // count whole refreshes between them wrongly. Past that point by
         // now (slower than any frame lately), the next on the grid.
-        let ready = now.checked_sub(std::mem::take(&mut self.held)).unwrap_or(now);
+        let ready = now
+            .checked_sub(std::mem::take(&mut self.held))
+            .unwrap_or(now);
         let (mut at, early) = self.choose(ready, origin, period);
         while at < now {
             at += period;
         }
         self.early = early;
         // Held into a later refresh than planned: hold none for a while.
-        if self.planned.take().is_some_and(|planned| at > planned + period / 2) {
+        if self
+            .planned
+            .take()
+            .is_some_and(|planned| at > planned + period / 2)
+        {
             self.offset = std::time::Duration::ZERO;
             self.resting = Self::REST;
         }
@@ -700,7 +727,12 @@ impl Latch {
     }
     /// The point a frame ready at `ready` presents at, and the count of
     /// frames comfortably early on a later cadence that it leaves.
-    fn choose(&self, ready: std::time::Instant, origin: std::time::Instant, period: std::time::Duration) -> (std::time::Instant, u8) {
+    fn choose(
+        &self,
+        ready: std::time::Instant,
+        origin: std::time::Instant,
+        period: std::time::Duration,
+    ) -> (std::time::Instant, u8) {
         // The phase of `ready` on the grid, either side of `origin`.
         let period_ns = period.as_nanos().max(1);
         let since = match ready.checked_duration_since(origin) {
@@ -709,15 +741,25 @@ impl Latch {
         };
         let phase = std::time::Duration::from_nanos(since as u64);
         let point = ready - phase + period.saturating_sub(Self::LEAD);
-        let first = if point >= ready { point } else { point + period };
+        let first = if point >= ready {
+            point
+        } else {
+            point + period
+        };
         // A later cadence (the last frame's, whole refreshes after it) holds
         // until frames come comfortably early, several in a row.
         let late = self.last.is_some_and(|(last, at)| {
-            let refreshes = (ready.saturating_duration_since(last).as_secs_f64() / period.as_secs_f64()).round();
+            let refreshes = (ready.saturating_duration_since(last).as_secs_f64()
+                / period.as_secs_f64())
+            .round();
             let cadence = at + period.mul_f64(refreshes);
             cadence > first + period / 2 && cadence < first + period * 3 / 2
         });
-        let early = if late && first - ready >= Self::KEEP { self.early + 1 } else { 0 };
+        let early = if late && first - ready >= Self::KEEP {
+            self.early + 1
+        } else {
+            0
+        };
         if late && early < Self::RETURN {
             (first + period, early)
         } else {
@@ -738,10 +780,17 @@ impl Latch {
     /// of 0.3. Frames the GPU holds up (`ran`) move the time their successors
     /// render within the wait until they are not: a dashboard's stream in
     /// Metal System Trace went from a median 39 to 21 ms of GPU per second.
-    fn hold(&mut self, now: std::time::Instant, origin: std::time::Instant, period: std::time::Duration) -> std::time::Instant {
+    fn hold(
+        &mut self,
+        now: std::time::Instant,
+        origin: std::time::Instant,
+        period: std::time::Duration,
+    ) -> std::time::Instant {
         let ready = now + self.work;
         let (point, _) = self.choose(ready, origin, period);
-        self.room = point.saturating_duration_since(ready).saturating_sub(Self::KEEP);
+        self.room = point
+            .saturating_duration_since(ready)
+            .saturating_sub(Self::KEEP);
         if self.offset > self.room || self.resting > 0 {
             self.offset = std::time::Duration::ZERO;
         }
@@ -862,6 +911,8 @@ struct Host {
     damage_check: Option<u64>,
     /// Wheel and trackpad motion waiting for display refreshes.
     scroll: crate::scroll_resample::ScrollResampler,
+    /// Native views (web pages) over and under this window's zgui content.
+    native: crate::native_host::NativeHost,
 }
 impl Host {
     fn new(options: WindowOptions, handle: WindowHandle, windows: WindowFactory) -> Self {
@@ -898,7 +949,15 @@ impl Host {
                 event.prevent_default();
             }
         });
+        let native = crate::native_host::NativeHost::new(&ui, {
+            let wake = proxy.clone();
+            move || {
+                let _ = wake.send_event(Event::Wake(token));
+            }
+        });
         let context = WindowContext {
+            natives: native.natives.clone(),
+            native_diagnostics: native.diagnostics.clone(),
             window_info,
             menu_model,
             dialogs: crate::FileDialogs::new(handle.clone()),
@@ -989,6 +1048,7 @@ impl Host {
             pointer_inside: false,
             ime_geometry: None,
             ime_target: None,
+            native,
         }
     }
     fn dispatch(&mut self, event: InputEvent) -> Result<(), zgui::widgets::LayoutFeedbackError> {
@@ -1110,6 +1170,22 @@ impl Host {
         } else {
             &report.damage
         };
+        // Native views: split this frame's paint into the planes under and
+        // over them; paint moving between planes repaints on both.
+        let planned = match &mut self.renderer {
+            Some(renderer) if self.native.active() => {
+                self.native
+                    .plan(&scene, &window, renderer, self.scale_factor as f32)?
+            }
+            _ => Vec::new(),
+        };
+        let extended;
+        let damage = if planned.is_empty() || self.force {
+            damage
+        } else {
+            extended = [damage, &planned[..]].concat();
+            &extended[..]
+        };
         if !damage.is_empty() {
             if self.frame_paced && !self.present_ready {
                 // Layout/model work proceeds, but defer GPU work until a frame
@@ -1127,6 +1203,7 @@ impl Host {
                 }
                 if let Some(renderer) = &mut self.renderer {
                     let stats = renderer.render(&scene, damage)?;
+                    self.native.render(&scene, damage)?;
                     if let Some(frame) = &mut self.damage_check {
                         *frame += 1;
                         check_damage(renderer, &scene, damage, &full, size.width as usize, *frame)?;
@@ -1153,6 +1230,10 @@ impl Host {
                 let grid = self.refresh_grid();
                 #[cfg(target_os = "macos")]
                 let latch = &mut self.latch;
+                // With native views, both planes and the views' geometry
+                // change in one transaction (committed when it drops).
+                let transaction = self.native.begin();
+                self.native.present_overlay()?;
                 let renderer = self.renderer.as_mut().expect("checked above");
                 let status = renderer.present_with_notify(|| {
                     window.pre_present_notify();
@@ -1161,6 +1242,8 @@ impl Host {
                         sleep_until(latch.decide(std::time::Instant::now(), origin, period));
                     }
                 })?;
+                self.native.apply();
+                drop(transaction);
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
@@ -1185,6 +1268,8 @@ impl Host {
             }
         }
         drop(scene);
+        // Native geometry that changed without zgui pixels to show with it.
+        self.native.flush();
         let ui = &self.context.ui;
         let pointer = ui
             .input
@@ -1215,7 +1300,14 @@ impl Host {
         let cursor = explicit
             .map(native_cursor)
             .unwrap_or_else(|| cursor_for_role(role));
-        if Some(cursor) != self.native_cursor {
+        // Over a native view, the view sets the cursor.
+        let over_native = ui
+            .input
+            .hovered()
+            .is_some_and(|node| self.native.is_native(node));
+        if over_native {
+            self.native_cursor = None;
+        } else if Some(cursor) != self.native_cursor {
             window.set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }
@@ -1596,6 +1688,7 @@ impl Host {
         self.frame_deadline = None;
         self.frame_heartbeat = None;
         self.frame_redraw_requested = false;
+        self.native.suspend();
         self.window = None;
         self.force = true;
     }
@@ -1849,6 +1942,10 @@ impl Host {
         }
     }
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        // Native views' reports (navigation, script replies), and keyboard
+        // focus they took or gave back, at this safe point.
+        zgui::native_view::deliver_posted();
+        self.native.sync_focus(&self.context.ui);
         self.poll_frame_deadline(std::time::Instant::now());
         if self.scroll.pending() {
             // Each refresh applies the motion due by then; with no refreshes
@@ -1884,6 +1981,7 @@ impl Host {
             if let Some(renderer) = &mut self.renderer {
                 renderer.trim();
             }
+            self.native.trim();
             release_freed_heap();
         }
         loop {
@@ -2768,7 +2866,8 @@ mod tests {
         let period = Duration::from_nanos(8_333_333);
         let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
         let origin = Instant::now();
-        let phase = |at: Instant| (at.duration_since(origin).as_nanos() % period.as_nanos()) as f64 / 1e6;
+        let phase =
+            |at: Instant| (at.duration_since(origin).as_nanos() % period.as_nanos()) as f64 / 1e6;
         let point = (period - Latch::LEAD).as_secs_f64() * 1e3;
         let mut latch = Latch::default();
         // Ready before the point: it presents on this refresh's point.
@@ -2784,7 +2883,10 @@ mod tests {
             let at = latch.decide(ready, origin, period);
             assert!((phase(at) - point).abs() < 0.01);
             if i > 0 {
-                assert_eq!((at.duration_since(last).as_secs_f64() / period.as_secs_f64()).round(), 2.);
+                assert_eq!(
+                    (at.duration_since(last).as_secs_f64() / period.as_secs_f64()).round(),
+                    2.
+                );
             }
             last = at;
         }
@@ -2809,7 +2911,8 @@ mod tests {
         let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
         let origin = Instant::now();
         let point = (period - Latch::LEAD).as_secs_f64() * 1e3;
-        let phase = |at: Instant| (at.duration_since(origin).as_nanos() % period.as_nanos()) as f64 / 1e6;
+        let phase =
+            |at: Instant| (at.duration_since(origin).as_nanos() % period.as_nanos()) as f64 / 1e6;
         let mut latch = Latch::default();
         // A 60 Hz stream that can render 1 ms into a refresh, ready 0.5 ms
         // later: about 3 ms to spare before its point, less `KEEP`.
