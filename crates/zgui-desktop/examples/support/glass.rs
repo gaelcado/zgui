@@ -38,6 +38,13 @@ pub fn inset_titlebar_with(title: &str, material: isize) -> bool {
     true
 }
 
+/// The window's corner radius in points, so content inset from its edge can
+/// keep its corners concentric.
+#[allow(dead_code)]
+pub fn corner_radius(title: &str) -> Option<f64> {
+    find(title).map(|window| radius(&window))
+}
+
 fn find(title: &str) -> Option<Retained<NSWindow>> {
     let mtm = MainThreadMarker::new().expect("window setup runs on the UI thread");
     NSApplication::sharedApplication(mtm)
@@ -148,6 +155,15 @@ fn style(window: &NSWindow, material: isize) {
     }
 }
 
+/// The corner radius varies by macOS version and toolbar style.
+fn radius(window: &NSWindow) -> f64 {
+    if window.class().responds_to(sel!(_cornerRadius)) {
+        unsafe { msg_send![window, _cornerRadius] }
+    } else {
+        10.
+    }
+}
+
 /// Put a behind-window `NSVisualEffectView` under the (transparent) zgui
 /// view. Unlike the private CGS window blur, it can be clipped to the
 /// window's rounded shape, so neither blur nor shadow is left square.
@@ -161,12 +177,7 @@ unsafe fn frost(window: &NSWindow, material: isize) {
     let Some(class) = AnyClass::get(c"NSVisualEffectView") else {
         return;
     };
-    // The corner radius varies by macOS version and toolbar style.
-    let radius: f64 = if window.class().responds_to(sel!(_cornerRadius)) {
-        unsafe { msg_send![window, _cornerRadius] }
-    } else {
-        10.
-    };
+    let radius = radius(window);
     unsafe {
         let effect: Retained<objc2_app_kit::NSView> =
             msg_send![msg_send![class, alloc], initWithFrame: frame.bounds()];
