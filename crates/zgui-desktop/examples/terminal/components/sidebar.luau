@@ -1,7 +1,7 @@
 -- The agents sidebar: every coding agent running in a pane, with what it
 -- is doing, most urgent first. A row opens its agent's tab and focuses it.
 -- It slides open and closed; its toggle (Zeron's sidebar icon) stays beside
--- the traffic lights, in its header while open and the titlebar while closed.
+-- the traffic lights, over the sidebar's header and the titlebar alike.
 local theme = require("../theme")
 local state = require("../state")
 local agents = require("../agents")
@@ -11,8 +11,14 @@ local controls = require("./controls")
 local M = {}
 
 local WIDTH = 240
--- Zeron's motion for the icon and the sidebar (icons.zeron.sh).
-local EASE = "cubicBezier(.22, 1, .36, 1)"
+-- Where the toggle sits: past the traffic lights, centred in the titlebar.
+-- The titlebar keeps this much room before its tabs while the sidebar is
+-- closed (tabs.luau).
+M.TOGGLE_LEFT = 83
+M.TOGGLE_SIZE = 28
+-- The sidebar's motion, for what moves with it.
+M.EASE = "cubicBezier(.22, 1, .36, 1)"
+M.DURATION = 280
 
 local sidebar = state.sidebar
 
@@ -72,8 +78,8 @@ local function sidebar_icon(size: number): Node
 					local open = sidebar:get()
 					anime.animate(el, {
 						width = (if open then 5.5 else 1.75) * k,
-						duration = 280,
-						ease = EASE,
+						duration = M.DURATION,
+						ease = M.EASE,
 					})
 				end)
 			end,
@@ -81,13 +87,15 @@ local function sidebar_icon(size: number): Node
 	}
 end
 
--- The toggle. It is in the sidebar's header while open and in the titlebar
--- while closed, at the same place in both (`layout_id` keeps it one button).
+-- The toggle: one button, placed over the sidebar's header and the titlebar
+-- (app.luau), so it never moves while the sidebar opens or closes.
 function M.Toggle(): Node
 	return ui.button {
-		layout_id = "sidebar-toggle",
-		w = 28,
-		h = 28,
+		absolute = true,
+		left = M.TOGGLE_LEFT,
+		top = (theme.titlebar - M.TOGGLE_SIZE) / 2,
+		w = M.TOGGLE_SIZE,
+		h = M.TOGGLE_SIZE,
 		rounded = 8,
 		items = "center",
 		justify = "center",
@@ -261,8 +269,8 @@ function M.Sidebar(): Node
 		-- Opening slides it in: the space eases, the list lays out at once.
 		layout = "width",
 		layout_clip = true,
-		layout_ease = EASE,
-		layout_duration = 280,
+		layout_ease = M.EASE,
+		layout_duration = M.DURATION,
 		w = function()
 			return if sidebar:get() then WIDTH else 0
 		end,
@@ -277,17 +285,11 @@ function M.Sidebar(): Node
 				w = WIDTH,
 				h_full = true,
 				items = "stretch",
-				-- The header: the traffic lights, then the toggle where the
-				-- titlebar shows it while closed (tabs.luau), so it stays put.
+				-- The header: room for the traffic lights and the toggle
+				-- (drawn over it, app.luau); it drags the window.
 				ui.row {
 					h = theme.titlebar,
-					items = "center",
-					gap = 3,
 					shrink = 0,
-					controls.drag_space { w = 80, shrink = 0 },
-					ui.show(function()
-						return sidebar:get()
-					end, M.Toggle()),
 					controls.drag_space { grow = 1 },
 				},
 				ui.row {
@@ -353,7 +355,7 @@ function M.Sidebar(): Node
 					},
 				},
 			}
-		end, { w = WIDTH, h_full = true, exit = { opacity = 0, duration = 280, ease = EASE } }),
+		end, { w = WIDTH, h_full = true, exit = { opacity = 0, duration = M.DURATION, ease = M.EASE } }),
 	}
 end
 

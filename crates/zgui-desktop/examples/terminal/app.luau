@@ -53,5 +53,7 @@ return ui.row {
 		tabs.Titlebar(),
 		content(),
 	},
+	-- Over the sidebar's header and the titlebar, past the traffic lights.
+	sidebar.Toggle(),
 	confirm.Sheet(),
 }

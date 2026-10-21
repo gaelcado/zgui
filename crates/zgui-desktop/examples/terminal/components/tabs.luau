@@ -392,17 +392,19 @@ function M.Titlebar(): Node
 		end,
 		gap = 3,
 		pr = 6,
-		-- Room for the traffic lights, and some air after them; the open
-		-- sidebar holds them instead, and its toggle comes here when closed.
+		-- Room for the traffic lights and the sidebar toggle (drawn over this,
+		-- app.luau) while the sidebar is closed; a little air after an open
+		-- one. It eases as the sidebar does, so the tabs slide clear of the
+		-- toggle rather than under it.
 		controls.drag_space {
 			w = function()
-				return if state.sidebar:get() then 6 else 80
+				return if state.sidebar:get() then 6 else sidebar.TOGGLE_LEFT + sidebar.TOGGLE_SIZE
 			end,
+			layout = "width",
+			layout_ease = sidebar.EASE,
+			layout_duration = sidebar.DURATION,
 			shrink = 0,
 		},
-		ui.show(function()
-			return not state.sidebar:get()
-		end, sidebar.Toggle()),
 		ui.row {
 			gap = 3,
 			items = "center",
