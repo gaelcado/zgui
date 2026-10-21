@@ -119,6 +119,19 @@ function M.describe(term: any, home: string): Description
 	return { name = name, icon = known.icon, tint = known.tint, busy = true }
 end
 
+-- A browser pane: the page's title, else its host; "New Tab" before it
+-- has a page.
+function M.describe_page(web: any): Description
+	local url: string = web.url
+	if url == "" or url == "about:blank" then
+		return { name = "New Tab", icon = "browser", busy = false }
+	end
+	local title = trim(web.title)
+	local host = url:match("^%a[%w+.-]*://([^/?#]+)") or url
+	host = host:gsub("^www%.", "")
+	return { name = if title ~= "" then title else host, icon = "browser", busy = false }
+end
+
 M.path_of = path_of
 M.short = short
 

@@ -52,6 +52,8 @@ mod frame_source;
 mod native_ime;
 pub mod presentation;
 pub mod raster;
+pub mod terminal_process;
+pub use terminal_process::{ForegroundProcess, resolve_terminal_processes};
 
 pub mod accessibility;
 

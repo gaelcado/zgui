@@ -65,7 +65,7 @@ Canvas drawing: `c:rect(x, y, w, h, paint, radius)`, `c:circle(x, y, r, paint)`,
 
 ### Web views
 
-`ui.webview` shows `src` (a URL, state or function: the page navigates when it changes) or `html` with `base_url`. Its options make the page: `transparent`, `profile` (`"default"` shares cookies and storage, `"ephemeral"` keeps nothing, any other string is a named, persistent store), `inspectable`, `user_agent`, `messages` and `new_windows`. To keep a page across the node (a tab switched away and back) or drive it from elsewhere, make its controller with `ui.web(options)` and pass `web = controller`.
+`ui.webview` shows `src` (a URL, state or function: the page navigates when it changes) or `html` with `base_url`. Its options make the page: `transparent`, `profile` (`"default"` shares cookies and storage, `"ephemeral"` keeps nothing, any other string is a named, persistent store), `inspectable`, `user_agent`, `messages` and `new_windows`. To keep a page across the node (a tab switched away and back) or drive it from elsewhere, make its controller with `ui.web(options)` and pass `web = controller`. `ui.web(id, options)` keeps the page in the host by `id`, as `ui.term` keeps sessions: a reload asking for `id` again gets the same page, history and all, until `web:close()`.
 
 ```lua
 local web = ui.web { profile = "ephemeral" }

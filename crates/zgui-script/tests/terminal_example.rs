@@ -15,29 +15,46 @@ const APP: &str = concat!(
 struct App {
     h: Harness,
     actions: Rc<RefCell<Vec<String>>>,
+    /// The last layout the script asked to save.
+    saved: Rc<RefCell<Value>>,
 }
 impl App {
     fn new() -> Self {
+        Self::with_saved(Value::Nil)
+    }
+    /// The app as a launch finds it, with the layout a run saved.
+    fn with_saved(layout: Value) -> Self {
         let actions: Rc<RefCell<Vec<String>>> = Rc::default();
-        let log = actions.clone();
+        let saved: Rc<RefCell<Value>> = Rc::default();
+        let (log, keep) = (actions.clone(), saved.clone());
         let h = Harness::new(move |runtime| {
             let host = ScriptHost::new(runtime, APP);
-            for name in ["drag_window", "zoom_window", "close_window", "set_title"] {
+            for name in [
+                "drag_window",
+                "zoom_window",
+                "close_window",
+                "set_title",
+                "end_session",
+                "keep_sessions",
+            ] {
                 let log = log.clone();
                 host.action(name, move |value| {
                     let arg = match value {
                         Value::Str(s) => format!(" {s}"),
+                        Value::List(ids) => format!(" {ids:?}"),
                         _ => String::new(),
                     };
                     log.borrow_mut().push(format!("{name}{arg}"));
                 });
             }
+            host.action("save_layout", move |layout| *keep.borrow_mut() = layout);
             host.shared("launch_dir", "/tmp");
             host.shared("home", "/Users/someone");
+            host.shared("saved_layout", layout);
             host
         });
         assert_eq!(h.host.error().get(), None);
-        Self { h, actions }
+        Self { h, actions, saved }
     }
     fn run(&mut self, id: &str) {
         assert!(self.h.host.run_command(id), "no command `{id}`");
@@ -299,4 +316,116 @@ fn dropping_a_pane_on_the_tab_bar_opens_it_as_a_tab_where_previewed() {
     app.run("tab_1");
     assert_eq!(app.panes().len(), 1, "the first tab, without it");
     assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
+fn a_browser_pane_opens_beside_with_its_address_bar_focused_and_closes() {
+    use zgui::native_view::NativeContent;
+    let mut app = App::new();
+    app.run("new_browser");
+    app.h.ui.prepare_frame();
+    let contents: Vec<_> = app
+        .h
+        .natives
+        .nodes()
+        .into_iter()
+        .filter_map(|n| app.h.natives.content(n))
+        .collect();
+    assert_eq!(contents.len(), 2, "a terminal and a page");
+    assert!(contents.iter().any(|c| matches!(c, NativeContent::Web(_))));
+    let texts = app.texts();
+    assert!(
+        texts.iter().any(|t| t == "New Tab"),
+        "the tab is named for the page: {texts:?}"
+    );
+    assert!(texts.iter().any(|t| t == "Search or enter address"));
+    // The address bar has the keyboard.
+    let focused = app.h.ui.input.focused().expect("something focused");
+    assert!(
+        !app.h.natives.contains(focused),
+        "zgui's address input, not the terminal or the page, has focus"
+    );
+    // Commands that would ask a terminal act on the page instead.
+    for id in [
+        "copy",
+        "paste",
+        "bigger",
+        "smaller",
+        "actual_size",
+        "reload_page",
+        "open_location",
+    ] {
+        app.run(id);
+        assert_eq!(app.h.host.error().get(), None, "{id}");
+    }
+    app.run("close_pane");
+    app.h.ui.prepare_frame();
+    let left: Vec<_> = app
+        .h
+        .natives
+        .nodes()
+        .into_iter()
+        .filter_map(|n| app.h.natives.content(n))
+        .collect();
+    assert_eq!(left.len(), 1);
+    assert!(matches!(left[0], NativeContent::Terminal(_)));
+}
+
+#[test]
+fn a_long_address_stays_inside_its_browser_pane() {
+    use zgui::input::InputEvent;
+    let mut app = App::new();
+    app.run("new_browser");
+    // Type a very long address into the focused address bar.
+    let long = format!("example.com/?{}", "solution=3893d11c553cebd6&".repeat(12));
+    app.h.ui.dispatch(InputEvent::Text(long));
+    app.settle();
+    // The browser is the right half; its card ends 6 points in from the
+    // window's 400-point edge.
+    let right = 400. - 6.;
+    let field = app.h.ui.input.focused().unwrap();
+    let scene = app.h.ui.scene.borrow();
+    // The address input and the bar row holding it end inside the pane.
+    let mut node = Some(field);
+    for _ in 0..3 {
+        let n = node.unwrap();
+        let b = scene.bounds(n);
+        assert!(b.x + b.width <= right + 0.5, "{b:?} overflows the pane");
+        node = scene.parent(n);
+    }
+    drop(scene);
+    assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
+fn the_layout_is_saved_and_a_launch_opens_it_again() {
+    let mut app = App::new();
+    app.run("split_right");
+    app.run("split_down");
+    app.run("new_tab");
+    app.run("tab_1");
+    let before = app.panes();
+    let saved = app.saved.borrow().clone();
+    assert!(matches!(saved, Value::Map(_)), "saved: {saved:?}");
+    // The JSON on disk, read back by the next launch.
+    let saved = Value::from_json(&saved.to_json()).unwrap();
+    let mut again = App::with_saved(saved);
+    again.settle();
+    assert_eq!(again.panes(), before, "the same panes, in the same places");
+    // It keeps the restored panes' sessions (and only those).
+    let log = again.actions.borrow().join("\n");
+    assert!(log.contains("keep_sessions"), "{log}");
+    again.run("tab_2");
+    assert_eq!(again.panes().len(), 1, "and the second tab");
+    // Closing a pane ends its session.
+    again.run("close_pane");
+    assert!(
+        again
+            .actions
+            .borrow()
+            .iter()
+            .any(|a| a.starts_with("end_session")),
+        "{:?}",
+        again.actions.borrow()
+    );
 }

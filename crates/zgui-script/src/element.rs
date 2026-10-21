@@ -733,6 +733,10 @@ impl UserData for ElementUd {
         fields.add_field_method_get("y", |_, e| Ok(e.0.read(|s, id| s.bounds(id).y)));
     }
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // Keyboard focus to the node (an input, a button); whether it took.
+        methods.add_method("focus", |_, e, ()| {
+            Ok(e.0.handle.get().is_some_and(NodeHandle::focus))
+        });
         methods.add_method("has_class", |_, e, class: String| {
             Ok(e.0.classes.iter().any(|c| **c == *class))
         });

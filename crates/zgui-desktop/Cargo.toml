@@ -64,6 +64,9 @@ required-features = ["ghostty"]
 accesskit_consumer = "0.38.0"
 # The terminal example's interface is a Luau script.
 zgui-script = { path = "../zgui-script" }
+# The terminal example's session server keeps each shell's screen to redraw
+# it for a new window.
+vt100 = "0.16"
 # The zeron example: a client of Zeron's local engine WebSocket.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 serde_json = "1"

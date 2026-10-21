@@ -2852,6 +2852,13 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_bounds(self.node))
     }
+    /// Give the node keyboard focus (an input, a button); whether it took it.
+    pub fn focus(&self) -> bool {
+        let Some(ui) = self.ui.upgrade() else {
+            return false;
+        };
+        ui.input.focus(&ui.scene, Some(self.node)) || ui.input.focused() == Some(self.node)
+    }
     /// Keep `resource` until the node is removed, then drop it.
     pub fn retain(&self, resource: impl Any) {
         if let Some(mut ui) = self.ui.upgrade()

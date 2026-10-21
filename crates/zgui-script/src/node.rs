@@ -72,9 +72,66 @@ pub(crate) struct WebSpec {
 }
 
 /// `ui.web(opts)`: a web view's controller, usable before and after its
-/// view mounts.
+/// view mounts. `ui.web(id, opts)` keeps it in the host's registry by `id`,
+/// across reloads, until `web:close()`.
 #[derive(Clone)]
-pub(crate) struct WebUd(pub zgui::web_view::WebView);
+pub(crate) struct WebUd(pub zgui::web_view::WebView, pub Option<WebKey>);
+#[derive(Clone)]
+pub(crate) struct WebKey {
+    id: String,
+    webs: std::rc::Weak<Webs>,
+}
+/// The host's web pages by id (`ui.web(id, opts)`): they outlive reloads.
+#[derive(Default)]
+pub(crate) struct Webs(RefCell<std::collections::HashMap<String, zgui::web_view::WebView>>);
+
+/// Installs `ui.web`: `ui.web(opts)` makes a page for this run;
+/// `ui.web(id, opts)` returns the host's page for `id`, making it (with
+/// `opts`) the first time.
+pub(crate) fn install_web(lua: &Lua, ui: &Table, webs: Rc<Webs>) -> mlua::Result<()> {
+    ui.set(
+        "web",
+        lua.create_function(move |lua, (first, opts): (mlua::Value, Option<Table>)| {
+            let (id, opts) = match first {
+                mlua::Value::String(id) => (Some(id.to_str()?.to_owned()), opts),
+                mlua::Value::Table(opts) => (None, Some(opts)),
+                mlua::Value::Nil => (None, None),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.web takes an id or options, not {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let make = |lua: &Lua| -> mlua::Result<zgui::web_view::WebView> {
+                let options = match &opts {
+                    Some(t) => web_options(t)?,
+                    None => Default::default(),
+                };
+                Ok(zgui::web_view::WebView::new(&env(lua)?.runtime, options))
+            };
+            let Some(id) = id else {
+                return Ok(WebUd(make(lua)?, None));
+            };
+            let existing = webs.0.borrow().get(&id).cloned();
+            let web = match existing {
+                Some(web) => web,
+                None => {
+                    let web = make(lua)?;
+                    webs.0.borrow_mut().insert(id.clone(), web.clone());
+                    web
+                }
+            };
+            Ok(WebUd(
+                web,
+                Some(WebKey {
+                    id,
+                    webs: Rc::downgrade(&webs),
+                }),
+            ))
+        })?,
+    )
+}
 impl UserData for WebUd {
     fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
         // Reads are tracked: a text or computed that reads them follows them.
@@ -98,6 +155,16 @@ impl UserData for WebUd {
         });
         methods.add_method("back", |_, w, ()| {
             w.0.go_back();
+            Ok(())
+        });
+        // A page from `ui.web(id)` leaves the registry (and goes once no
+        // view shows it).
+        methods.add_method("close", |_, w, ()| {
+            if let Some(key) = &w.1
+                && let Some(webs) = key.webs.upgrade()
+            {
+                webs.0.borrow_mut().remove(&key.id);
+            }
             Ok(())
         });
         methods.add_method("forward", |_, w, ()| {
@@ -1941,19 +2008,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "ref",
         lua.create_function(|_, ()| Ok(RefUd(Rc::default())))?,
-    )?;
-    ui.set(
-        "web",
-        lua.create_function(|lua, opts: Option<Table>| {
-            let options = match &opts {
-                Some(t) => web_options(t)?,
-                None => Default::default(),
-            };
-            Ok(WebUd(zgui::web_view::WebView::new(
-                &env(lua)?.runtime,
-                options,
-            )))
-        })?,
     )?;
     ui.set(
         "webview",

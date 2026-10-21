@@ -3,9 +3,16 @@
 //! Run: cargo run --release -p zgui-desktop --features ghostty --example terminal
 //! The interface is `examples/terminal/*.luau`; edit and save to reload it
 //! (shells keep running).
+//!
+//! Shells outlive the window: they run in a session server (this binary,
+//! `--session-daemon`) and each pane attaches to its own (`--attach`), so
+//! closing the app detaches them and opening it again, with the tabs and
+//! panes it had, attaches them again (see `terminal/session.rs`).
 #[cfg(target_os = "macos")]
 #[path = "support/glass.rs"]
 mod glass;
+#[path = "terminal/session.rs"]
+mod session;
 
 use std::{path::Path, time::Duration};
 use zgui::input::{Key, Modifiers};
@@ -17,7 +24,29 @@ const WIDTH: f64 = 1180.;
 const HEIGHT: f64 = 760.;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/terminal/app.luau");
+    // The session server, or a pane's client to it.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--session-daemon") {
+        session::daemon();
+    }
+    if let Some(at) = args.iter().position(|a| a == "--attach") {
+        let id = args.get(at + 1).cloned().unwrap_or_default();
+        let cwd = args
+            .iter()
+            .position(|a| a == "--cwd")
+            .and_then(|at| args.get(at + 1).cloned())
+            .unwrap_or_default();
+        session::attach(&id, &cwd);
+    }
+    session::ensure_daemon();
+    zgui_desktop::resolve_terminal_processes(session::resolve);
+    // In an app bundle (scripts/zterm-app.sh), the interface it carries;
+    // else the source tree's, live.
+    let script = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/terminal/app.luau")))
+        .filter(|bundled| bundled.exists())
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/terminal/app.luau"));
     let mut application = Application::new();
     // Geist, the interface's typeface (`theme.font`).
     for bytes in [
@@ -50,6 +79,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             host.shared("launch_dir", launch.as_str());
             let home = std::env::var("HOME").unwrap_or_default();
             host.shared("home", home.as_str());
+            // Panes attach to the session server by this command; it keeps
+            // their shells. The layout they were in comes back from disk.
+            let attach = session::attach_command("", "");
+            let attach = attach.split(" --attach").next().unwrap_or_default();
+            host.shared("attach", attach);
+            let layout_file = session::dir().join("layout.json");
+            let saved = std::fs::read_to_string(&layout_file)
+                .ok()
+                .and_then(|json| Value::from_json(&json))
+                .unwrap_or(Value::Nil);
+            host.shared("saved_layout", saved);
+            host.action("end_session", |id| {
+                if let Value::Str(id) = id {
+                    session::kill(&id);
+                }
+            });
+            host.action("keep_sessions", |ids| {
+                let ids: Vec<String> = match ids {
+                    Value::List(ids) => ids
+                        .iter()
+                        .filter_map(|id| match id {
+                            Value::Str(id) => Some(id.to_string()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                session::keep(&ids);
+            });
+            // Saved a moment after it changes (a divider drag changes it
+            // on every move), and when the window closes.
+            let pending = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+            let save = {
+                let (pending, layout_file) = (pending.clone(), layout_file.clone());
+                move || {
+                    if let Some(json) = pending.borrow_mut().take() {
+                        let _ = std::fs::create_dir_all(session::dir());
+                        let temp = layout_file.with_extension("json.tmp");
+                        if std::fs::write(&temp, json).is_ok() {
+                            let _ = std::fs::rename(&temp, &layout_file);
+                        }
+                    }
+                }
+            };
+            {
+                let pending = pending.clone();
+                host.action("save_layout", move |layout| {
+                    *pending.borrow_mut() = Some(layout.to_json());
+                });
+            }
+            {
+                let save = save.clone();
+                cx.tasks.spawn(async move {
+                    loop {
+                        zgui::timer::sleep(Duration::from_millis(500)).await;
+                        save();
+                    }
+                });
+            }
             // The window keeps its title until the glass finds it by it;
             // the script's titles wait until then.
             let titles = std::rc::Rc::new(std::cell::RefCell::new((false, None::<String>)));
@@ -120,7 +208,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 commands.run_command(&action.0);
             });
             let keep = std::cell::RefCell::new(Some(menus));
-            cx.on_closed(move || drop(keep.borrow_mut().take()));
+            cx.on_closed(move || {
+                save();
+                drop(keep.borrow_mut().take());
+            });
             cx.render(host.view());
         })
 }

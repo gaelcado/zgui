@@ -50,6 +50,8 @@ declare extern type Element with
 	height: number?
 	x: number?
 	y: number?
+	-- Keyboard focus to the element (an input, a button); whether it took.
+	function focus(self): boolean
 	function has_class(self, class: string): boolean
 end
 declare extern type Path with
@@ -84,6 +86,9 @@ declare extern type Web with
 	function run(self, js: string): ()
 	-- The script's value as Luau data, or nil and the error.
 	function eval(self, js: string, reply: ((value: any, err: string?) -> ())?): ()
+	-- A page from `ui.web(id, opts)` leaves the host's registry: the next
+	-- `ui.web(id)` makes a new one.
+	function close(self): ()
 end
 type WebOptions = {
 	transparent: boolean?,
@@ -780,7 +785,9 @@ declare ui: {
 	svg: Container,
 	canvas: Container,
 	webview: Container,
-	web: (opts: WebOptions?) -> Web,
+	-- `ui.web(opts)`: a page for this run. `ui.web(id, opts)`: the host's
+	-- page for `id`, made with `opts` the first time, kept across reloads.
+	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: Container,
 	term: (id: string, opts: TermOptions?) -> Term,
 	command: (opts: CommandOptions) -> (),

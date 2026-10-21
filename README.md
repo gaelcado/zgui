@@ -29,12 +29,19 @@ cargo run --release -p zgui-desktop --example dynamic_menus
 cargo run --release -p zgui-desktop --example platform_services
 ```
 
-A terminal multiplexer written in Luau, its terminals Ghostty's (macOS; needs
-Zig 0.16, `brew install zig@0.16`: see `crates/zgui-ghostty-sys`):
+A terminal multiplexer written in Luau, its terminals Ghostty's and its
+browser panes WebKit's (macOS; needs Zig 0.16, `brew install zig@0.16`: see
+`crates/zgui-ghostty-sys`):
 
 ```sh
 cargo run --release -p zgui-desktop --features ghostty --example terminal
 ```
+
+Its shells outlive the window, as tmux's do: they run in a session server
+(the same binary, started on demand), and closing the app only detaches them.
+Opening it again restores the tabs, splits and pages it had and reattaches
+each pane to its shell. State lives in
+`~/Library/Application Support/zgui-terminal`.
 
 Linux builds need the native development libraries for fontconfig, xkbcommon and
 D-Bus, plus `pkg-config` (for example `libfontconfig1-dev libxkbcommon-dev

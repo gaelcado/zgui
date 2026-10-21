@@ -321,3 +321,76 @@ fn context_menus_show_what_scripts_return_at_the_pointer() {
     assert_eq!(h.text("log"), "copy at 25");
     assert_eq!(h.host.error().get(), None);
 }
+
+fn page(h: &mut Harness) -> zgui::web_view::WebView {
+    h.ui.prepare_frame();
+    let node = h.natives.nodes()[0];
+    match h.natives.content(node) {
+        Some(NativeContent::Web(web)) => web,
+        _ => panic!("no page mounted"),
+    }
+}
+
+#[test]
+fn keyed_web_pages_outlive_reloads_until_closed() {
+    let mut h = Harness::inline(
+        r##"local web = ui.web("b1", { profile = "ephemeral" })
+        return ui.column {
+            ui.webview { web = web, w = 200, h = 100 },
+            ui.button { id = "close", w = 20, h = 20, on_click = function() web:close() end },
+        }"##,
+    );
+    let first = page(&mut h);
+    h.host.reload().unwrap();
+    h.settle();
+    assert!(first == page(&mut h), "a reload keeps the page");
+    // Closed, the next run asking for "b1" gets a new one.
+    h.click("close");
+    h.host.reload().unwrap();
+    h.settle();
+    assert!(first != page(&mut h), "closing ends it");
+}
+
+#[test]
+fn an_element_takes_focus_when_asked() {
+    let mut h = Harness::inline(
+        r##"local field = nil
+        local took = ui.state("took", false)
+        return ui.column {
+            ui.input { id = "field", value = ui.state("v", ""), w = 100, h = 24,
+                on_mount = function(el) field = el end },
+            ui.button { id = "go", w = 20, h = 20, on_click = function() took:set(field:focus()) end },
+            ui.text { id = "took", function() return tostring(took:get()) end },
+        }"##,
+    );
+    h.click("go");
+    h.settle();
+    assert_eq!(h.text("took"), "true");
+    let field = h.find("field").unwrap();
+    let focused = h.ui.input.focused().unwrap();
+    let scene = h.ui.scene.borrow();
+    let mut node = Some(focused);
+    let mut inside = false;
+    while let Some(n) = node {
+        inside |= n == field;
+        node = scene.parent(n);
+    }
+    assert!(inside, "the input has focus");
+}
+
+#[test]
+fn values_round_trip_through_json() {
+    let value = Value::Map(
+        vec![
+            (
+                "a".into(),
+                Value::List(vec![Value::Num(1.), Value::Str("x".into())].into()),
+            ),
+            ("b".into(), Value::Bool(true)),
+        ]
+        .into(),
+    );
+    let json = value.to_json();
+    assert_eq!(Value::from_json(&json), Some(value));
+    assert_eq!(Value::from_json("not json"), None);
+}

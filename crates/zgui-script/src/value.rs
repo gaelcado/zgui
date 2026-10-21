@@ -17,6 +17,32 @@ pub enum Value {
     Map(Rc<[(Rc<str>, Value)]>),
 }
 impl Value {
+    /// As JSON (lists as arrays, maps as objects), for a host to keep.
+    pub fn to_json(&self) -> String {
+        fn convert(value: &Value) -> serde_json::Value {
+            match value {
+                Value::Nil => serde_json::Value::Null,
+                Value::Bool(b) => serde_json::Value::Bool(*b),
+                Value::Num(n) => serde_json::Number::from_f64(*n)
+                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                Value::Str(s) => serde_json::Value::String(s.to_string()),
+                Value::List(items) => serde_json::Value::Array(items.iter().map(convert).collect()),
+                Value::Map(entries) => serde_json::Value::Object(
+                    entries
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), convert(v)))
+                        .collect(),
+                ),
+            }
+        }
+        convert(self).to_string()
+    }
+    /// JSON as a value (`to_json`'s inverse), or `None` if it is not JSON.
+    pub fn from_json(json: &str) -> Option<Value> {
+        serde_json::from_str::<serde_json::Value>(json)
+            .ok()
+            .map(|_| crate::node::json_value(json))
+    }
     pub fn truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
     }

@@ -524,13 +524,33 @@ fn poll_processes() {
 fn refresh_process(surface: usize) {
     let Some(view) = view_of(surface) else { return };
     let pid = unsafe { g::ghostty_surface_foreground_pid(surface as g::ghostty_surface_t) };
-    if pid == view.ivars().pid.replace(pid) {
-        return;
-    }
-    let process = if pid == 0 {
-        String::new()
+    // Seen through (an attach client to a session server): what is behind
+    // it changes while the client stays in front, so ask every time.
+    let resolved = if pid == 0 {
+        None
     } else {
-        process_name(pid as i32)
+        crate::terminal_process::resolve(pid as u32)
+    };
+    let (process, pid) = match resolved {
+        Some(front) => {
+            let key = (front.name.clone(), front.pid);
+            if view.ivars().front.borrow().as_ref() == Some(&key) {
+                return;
+            }
+            *view.ivars().front.borrow_mut() = Some(key);
+            (front.name, u64::from(front.pid))
+        }
+        None => {
+            if pid == view.ivars().pid.replace(pid) {
+                return;
+            }
+            let process = if pid == 0 {
+                String::new()
+            } else {
+                process_name(pid as i32)
+            };
+            (process, pid)
+        }
     };
     let term = view.ivars().term.clone();
     zgui::native_view::post(move || {
@@ -735,6 +755,8 @@ pub(crate) struct ViewState {
     pointer_here: Cell<bool>,
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     pid: Cell<u64>,
+    /// What a process resolver last saw in front (name, pid).
+    front: RefCell<Option<(String, u32)>>,
     /// Focus asked for before the view was in a window (a tab switching in).
     pending_focus: Cell<bool>,
     /// The size Ghostty was last given, in points.
@@ -1078,6 +1100,7 @@ impl TerminalView {
             pointer_here: Cell::new(false),
             tracking: RefCell::new(None),
             pid: Cell::new(0),
+            front: RefCell::new(None),
             pending_focus: Cell::new(false),
             size: Cell::new((0., 0.)),
         });
@@ -1763,7 +1786,16 @@ impl TerminalBackend for MacTerminal {
     }
     fn needs_confirm_close(&self) -> bool {
         let surface = self.view.ivars().surface.get();
-        !surface.is_null() && unsafe { g::ghostty_surface_needs_confirm_quit(surface) }
+        if surface.is_null() {
+            return false;
+        }
+        let pid = unsafe { g::ghostty_surface_foreground_pid(surface) };
+        if pid != 0
+            && let Some(front) = crate::terminal_process::resolve(pid as u32)
+        {
+            return !front.idle;
+        }
+        unsafe { g::ghostty_surface_needs_confirm_quit(surface) }
     }
     fn as_any(&self) -> &dyn Any {
         self

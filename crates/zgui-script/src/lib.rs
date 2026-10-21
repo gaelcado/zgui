@@ -288,6 +288,8 @@ struct Inner {
     required: RefCell<Vec<PathBuf>>,
     /// Terminal sessions (`ui.term`): they outlive reloads.
     terms: Rc<term::Terms>,
+    /// Web pages by id (`ui.web(id)`): they outlive reloads too.
+    webs: Rc<node::Webs>,
     /// App commands (`ui.command`) the last successful load declared.
     commands: Rc<command::Commands>,
 }
@@ -346,6 +348,7 @@ impl ScriptHost {
             stamps: RefCell::default(),
             required: RefCell::default(),
             terms: Rc::default(),
+            webs: Rc::default(),
             commands: Rc::new(command::Commands::new(runtime)),
         }))
     }
@@ -704,6 +707,7 @@ impl ScriptHost {
         node::install(&lua).map_err(fail)?;
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         term::install(&lua, &ui, self.0.terms.clone()).map_err(fail)?;
+        node::install_web(&lua, &ui, self.0.webs.clone()).map_err(fail)?;
         command::install(&lua, &ui, self.0.commands.clone()).map_err(fail)?;
         ui.set_readonly(true);
         anime::api::install(&lua).map_err(fail)?;

@@ -28,6 +28,17 @@ return {
 		'<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/>'
 	),
 
+	-- Zeron's icons (icons.zeron.sh): the same 24-point grid and stroke.
+	back = icon('<g transform="rotate(180 12 12)"><path d="M5 12h14m-5.5-5.5L19 12l-5.5 5.5"/></g>'),
+	forward = icon('<path d="M5 12h14m-5.5-5.5L19 12l-5.5 5.5"/>'),
+	refresh = icon('<path d="M19 9a7.5 7.5 0 0 0-13-3L4 8m0-4v4h4m-3 7a7.5 7.5 0 0 0 13 3l2-2m0 4v-4h-4"/>'),
+	stop = icon('<path d="m6 6 12 12M6 18 18 6"/>'),
+	search = icon('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/>'),
+	browser = icon('<circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.5" ry="8"/><path d="M4 12h16"/>'),
+	drag_handle = icon(
+		'<g fill="#fff" stroke="none"><circle cx="9" cy="6" r="1.1"/><circle cx="15" cy="6" r="1.1"/><circle cx="9" cy="12" r="1.1"/><circle cx="15" cy="12" r="1.1"/><circle cx="9" cy="18" r="1.1"/><circle cx="15" cy="18" r="1.1"/></g>'
+	),
+
 	-- Interface.
 	plus = icon('<path d="M12 5.5v13M5.5 12h13"/>'),
 	close = icon('<path d="M7 7l10 10M17 7L7 17"/>'),

@@ -1,5 +1,5 @@
 -- A terminal multiplexer: tabs in the titlebar, each a tree of split panes
--- running Ghostty terminals. Panes resize by their dividers and move by the
+-- running Ghostty terminals, or web pages. Panes resize by their dividers and move by the
 -- grip in their top padding, onto another pane's edge or onto a tab; tabs
 -- reorder by dragging. Everything here is state that survives a reload,
 -- and the shells keep running through one.
@@ -89,9 +89,38 @@ end
 local spawn_dir: { [string]: string } = {}
 local close_pane: (pane: string, force: boolean?) -> ()
 
+-- Pane id -> "browser" for a web page (a terminal otherwise). A pane keeps
+-- its kind for life.
+local kinds = ui.state("kinds", {})
+local function is_browser(pane: string?): boolean
+	return pane ~= nil and (kinds:peek())[pane] == "browser"
+end
+-- A browser pane's page: the host keeps it across reloads, as it does
+-- shells.
+local function page(pane: string)
+	return ui.web("web:" .. pane, { profile = "default" })
+end
+-- Browser panes waiting to have their address bar focused.
+local address_focus = ui.state("address_focus", "")
+
+-- Shells live in the host's session server, past the window: a pane's
+-- terminal runs a client attached to its own session (made the first time).
+local attach: string = ui.shared("attach", ""):peek()
+local function quote(s: string): string
+	return "'" .. (s:gsub("'", "'\\''")) .. "'"
+end
+-- Terminal panes whose sessions this run has asked for.
+local made: { [string]: boolean } = {}
+
 local function session(pane: string)
+	if is_browser(pane) then
+		return nil
+	end
+	made[pane] = true
+	local cwd = spawn_dir[pane] or launch_dir
 	return ui.term(pane, {
-		cwd = spawn_dir[pane],
+		cwd = cwd,
+		command = if attach ~= "" then `{attach} --attach {quote(pane)} --cwd {quote(cwd)}` else nil,
 		-- The process exited (no question), or a close binding asked.
 		on_close = function(alive)
 			close_pane(pane, not alive)
@@ -102,11 +131,14 @@ local function describe(pane: string?): names.Description
 	if not pane then
 		return { name = "", icon = "terminal", busy = false }
 	end
+	if (kinds:get())[pane] == "browser" then
+		return names.describe_page(page(pane))
+	end
 	return names.describe(ui.term(pane), home)
 end
 -- The directory a pane's shell is in, for what opens next to it.
 local function cwd_of(pane: string?): string
-	if pane then
+	if pane and not is_browser(pane) then
 		local pwd = names.path_of(ui.term(pane).pwd)
 		if pwd ~= "" then
 			return pwd
@@ -117,19 +149,31 @@ end
 
 -- Focus and tabs ------------------------------------------------------------
 
+-- Keyboard focus to a pane's terminal or page.
+local function focus_view(pane: string)
+	if is_browser(pane) then
+		page(pane):focus()
+	else
+		ui.term(pane):focus()
+	end
+end
+-- Whether closing the pane would end something running.
+local function needs_confirm(pane: string): boolean
+	return not is_browser(pane) and ui.term(pane):needs_confirm()
+end
 local function focus_pane(tab: string, pane: string)
 	if (focus:peek())[tab] ~= pane then
 		set_map(focus, tab, pane)
 	end
 	if active:peek() == tab then
-		ui.term(pane):focus()
+		focus_view(pane)
 	end
 end
 local function activate(tab: string)
 	active:set(tab)
 	local pane = (focus:peek())[tab]
 	if pane then
-		ui.term(pane):focus()
+		focus_view(pane)
 	end
 end
 local function new_tab(cwd: string, pane: string?, before: string?)
@@ -155,7 +199,8 @@ local function current(): string?
 	return (focus:peek())[active:peek()]
 end
 
-local function split(axis: string)
+-- Split the focused pane: a terminal beside it, or a browser (`kind`).
+local function split(axis: string, kind: string?)
 	local tab = active:peek()
 	local pane = current()
 	local root = root_of(tab)
@@ -163,8 +208,13 @@ local function split(axis: string)
 		return
 	end
 	local new = fresh("p")
-	spawn_dir[new] = cwd_of(pane)
-	session(new)
+	if kind == "browser" then
+		set_map(kinds, new, "browser")
+		address_focus:set(new)
+	else
+		spawn_dir[new] = cwd_of(pane)
+		session(new)
+	end
 	set_map(zoom, tab, nil)
 	set_root(tab, layout.split(root, pane, axis, new, fresh("s")))
 	focus_pane(tab, new)
@@ -204,7 +254,7 @@ local function detach(pane: string): boolean
 end
 
 close_pane = function(pane: string, force: boolean?)
-	if not force and ui.term(pane):needs_confirm() then
+	if not force and needs_confirm(pane) then
 		ui.term(pane):blur()
 		confirm:set("pane:" .. pane)
 		return
@@ -213,7 +263,14 @@ close_pane = function(pane: string, force: boolean?)
 		confirm:set("")
 	end
 	detach(pane)
-	ui.term(pane):close()
+	if is_browser(pane) then
+		page(pane):close()
+		set_map(kinds, pane, nil)
+	else
+		ui.term(pane):close()
+		-- Closed, not detached: its shell ends too.
+		ui.invoke("end_session", pane)
+	end
 	if #tabs:peek() == 0 then
 		ui.invoke("close_window")
 	end
@@ -227,7 +284,7 @@ local function close_tab(tab: string, force: boolean?)
 	local panes = layout.leaves(root)
 	if not force then
 		for _, pane in panes do
-			if ui.term(pane):needs_confirm() then
+			if needs_confirm(pane) then
 				ui.term(pane):blur()
 				confirm:set("tab:" .. tab)
 				return
@@ -374,8 +431,46 @@ end
 
 -- Start: one tab where the app was launched; every session's handlers are
 -- this run's.
+-- The layout the last run left (tabs, splits, which pane each had in
+-- focus, pages), its shells still running in the session server.
+local function restore(saved): boolean
+	if type(saved) ~= "table" or type(saved.tabs) ~= "table" or #saved.tabs == 0 then
+		return false
+	end
+	local saved_kinds = saved.kinds or {}
+	next_id:set(saved.next_id or 1)
+	kinds:set(saved_kinds)
+	ratios:set(saved.ratios or {})
+	zoom:set(saved.zoom or {})
+	focus:set(saved.focus or {})
+	tabs:set(saved.tabs)
+	local keep = {}
+	for _, tab in saved.tabs do
+		for _, pane in layout.leaves(tab.root) do
+			if saved_kinds[pane] == "browser" then
+				local url = (saved.pages or {})[pane]
+				if url then
+					page(pane):load(url)
+				end
+			else
+				spawn_dir[pane] = (saved.dirs or {})[pane] or launch_dir
+				session(pane)
+				table.insert(keep, pane)
+			end
+		end
+	end
+	-- Sessions no pane has any more go.
+	ui.invoke("keep_sessions", keep)
+	activate(if saved.active and tab_index(saved.active) then saved.active else saved.tabs[1].id)
+	return true
+end
+
 if #tabs:peek() == 0 then
-	new_tab(launch_dir)
+	if not restore(ui.shared("saved_layout", nil):peek()) then
+		-- A fresh start: no session from before is anyone's.
+		ui.invoke("keep_sessions", {})
+		new_tab(launch_dir)
+	end
 else
 	for _, tab in tabs:peek() do
 		for _, pane in layout.leaves(tab.root) do
@@ -384,6 +479,41 @@ else
 	end
 	activate(if tab_index(active:peek()) then active:peek() else tabs:peek()[1].id)
 end
+
+-- Saved as it changes (the host writes it a moment later), for the next
+-- launch to open as it was.
+ui.effect(function()
+	local list = tabs:get()
+	local k = kinds:get()
+	local pages, dirs = {}, {}
+	for _, tab in list do
+		for _, pane in layout.leaves(tab.root) do
+			if k[pane] == "browser" then
+				local url = page(pane).url
+				if url ~= "" and url ~= "about:blank" then
+					pages[pane] = url
+				end
+			elseif made[pane] then
+				local pwd = names.path_of(ui.term(pane).pwd)
+				if pwd ~= "" then
+					dirs[pane] = pwd
+				end
+			end
+		end
+	end
+	ui.invoke("save_layout", {
+		version = 1,
+		tabs = list,
+		active = active:get(),
+		focus = focus:get(),
+		ratios = ratios:get(),
+		zoom = zoom:get(),
+		kinds = k,
+		next_id = next_id:get(),
+		pages = pages,
+		dirs = dirs,
+	})
+end)
 
 -- Commands (the menus) --------------------------------------------------------
 
@@ -399,6 +529,9 @@ end)
 command("split_down", "Split Down", "Shell", "cmd+shift+d", function()
 	split("column")
 end)
+command("new_browser", "New Browser Pane", "Shell", "cmd+shift+b", function()
+	split("row", "browser")
+end)
 ui.command({ menu = "Shell", separator = true })
 command("close_pane", "Close Pane", "Shell", "cmd+w", function()
 	local pane = current()
@@ -410,10 +543,46 @@ command("close_tab", "Close Tab", "Shell", "cmd+alt+w", function()
 	close_tab(active:peek())
 end)
 
+-- What a terminal binding does on a page.
+local PAGE_ACTIONS = {
+	copy_to_clipboard = function(web)
+		web:run("document.execCommand('copy')")
+	end,
+	paste_from_clipboard = function(web)
+		web:run("document.execCommand('paste')")
+	end,
+	select_all = function(web)
+		web:run("document.execCommand('selectAll')")
+	end,
+}
+-- Page zoom by pane, for Bigger and Smaller.
+local page_zoom: { [string]: number } = {}
+local function zoom_page(pane: string, by: number?)
+	local z = if by then math.clamp((page_zoom[pane] or 1) * by, 0.3, 3) else 1
+	page_zoom[pane] = z
+	page(pane):zoom(z)
+end
+PAGE_ACTIONS["increase_font_size:1"] = function(_, pane)
+	zoom_page(pane, 1.1)
+end
+PAGE_ACTIONS["decrease_font_size:1"] = function(_, pane)
+	zoom_page(pane, 1 / 1.1)
+end
+PAGE_ACTIONS.reset_font_size = function(_, pane)
+	zoom_page(pane)
+end
 local function binding(action: string)
 	return function()
 		local pane = current()
-		if pane then
+		if not pane then
+			return
+		end
+		if is_browser(pane) then
+			local run = PAGE_ACTIONS[action]
+			if run then
+				run(page(pane), pane)
+			end
+		else
 			ui.term(pane):binding(action)
 		end
 	end
@@ -428,7 +597,7 @@ command("zoom_pane", "Zoom Pane", "View", "cmd+shift+enter", function()
 	local tab, pane = active:peek(), current()
 	if pane then
 		set_map(zoom, tab, if (zoom:peek())[tab] == pane then nil else pane)
-		ui.term(pane):focus()
+		focus_view(pane)
 	end
 end)
 command("equalize", "Equalize Panes", "View", "cmd+ctrl+=", function()
@@ -445,6 +614,19 @@ ui.command({ menu = "View", separator = true })
 command("bigger", "Bigger", "View", "cmd+=", binding("increase_font_size:1"))
 command("smaller", "Smaller", "View", "cmd+-", binding("decrease_font_size:1"))
 command("actual_size", "Actual Size", "View", "cmd+0", binding("reset_font_size"))
+ui.command({ menu = "View", separator = true })
+command("reload_page", "Reload Page", "View", "cmd+r", function()
+	local pane = current()
+	if is_browser(pane) then
+		page(pane :: string):reload()
+	end
+end)
+command("open_location", "Open Location", "View", "cmd+l", function()
+	local pane = current()
+	if is_browser(pane) then
+		address_focus:set(pane :: string)
+	end
+end)
 
 command("next_pane", "Next Pane", "Window", "cmd+]", function()
 	step_pane(1)
@@ -879,7 +1061,7 @@ local function tab_button(tab, _index)
 		ui.div({
 			hidden = function()
 				local p = pane()
-				return is_active() or p == nil or not ui.term(p).bell
+				return is_active() or p == nil or is_browser(p) or not ui.term(p).bell
 			end,
 			w = 6,
 			h = 6,
@@ -1012,6 +1194,9 @@ local titlebar = ui.row({
 	end),
 	tool("Split down", icons.split_down, function()
 		split("column")
+	end),
+	tool("New browser pane", icons.browser, function()
+		split("row", "browser")
 	end),
 })
 
@@ -1176,6 +1361,350 @@ local function dots()
 	return ui.column({ gap = 3, items = "center", row(), row() })
 end
 
+-- Browser panes -----------------------------------------------------------------
+
+-- How an address shows at rest: no scheme, no "www.", no trailing slash.
+local function pretty(url: string): string
+	if url == "" or url == "about:blank" then
+		return ""
+	end
+	local out = url:gsub("^https?://", ""):gsub("^www%.", "")
+	return (out:gsub("/$", ""))
+end
+
+-- What was typed: a URL, a bare domain, or else a search.
+local function address_of(typed: string): string?
+	local query = typed:match("^%s*(.-)%s*$") or ""
+	if query == "" then
+		return nil
+	end
+	if query:find("^%a[%w+.-]*:") then
+		return query
+	end
+	if not query:find("%s") and (query:find("%.") or query:find("^localhost")) then
+		return "https://" .. query
+	end
+	local encoded = query:gsub("[^%w%-_.~ ]", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end):gsub(" ", "+")
+	return "https://duckduckgo.com/?q=" .. encoded
+end
+
+-- A history or reload button in a page's bar: clear until hovered, dim
+-- while it can't act.
+local function nav(label: string, svg: () -> string, on_click: () -> (), enabled: (() -> boolean)?)
+	return ui.button({
+		label = label,
+		w = 26,
+		h = 26,
+		rounded = 7,
+		items = "center",
+		justify = "center",
+		shrink = 0,
+		bg = CLEAR,
+		hover = { bg = "#ffffff14" },
+		focus = { border = 0 },
+		disabled = if enabled
+			then function()
+				return not enabled()
+			end
+			else nil,
+		on_click = on_click,
+		ui.svg({
+			src = function()
+				return "code:" .. svg()
+			end,
+			w = 15,
+			h = 15,
+			tint = function()
+				return if enabled == nil or enabled() then theme.secondary else theme.quaternary
+			end,
+		}),
+	})
+end
+
+-- A browser pane's face: its bar (a handle to move it by, history,
+-- reload, the address) over the page, or over a quiet start until it has
+-- one.
+local function browser_body(pane: string, tab: string, inner: () -> number, hooks: { [string]: any })
+	local web = page(pane)
+	local address = ui.use_state("")
+	local editing = hooks.editing
+	-- The address input, once mounted (an element is no state value).
+	local field: any = nil
+	local mounted = ui.use_state(false)
+	local function blank(): boolean
+		local url = web.url
+		return url == "" or url == "about:blank"
+	end
+	-- The bar shows the page's address, except while it is being edited.
+	ui.effect(function()
+		local url = web.url
+		if not editing:get() then
+			address:set(pretty(url))
+		end
+	end)
+	-- Asked for the address bar (a new pane, Open Location): focus it.
+	ui.effect(function()
+		if mounted:get() and address_focus:get() == pane then
+			address_focus:set("")
+			field:focus()
+		end
+	end)
+	-- The page took focus: this pane is the tab's focused one.
+	ui.effect(function()
+		if web.focused and (focus:peek())[tab] ~= pane then
+			set_map(focus, tab, pane)
+		end
+	end)
+	local function go(typed: string)
+		local url = address_of(typed)
+		if not url then
+			return
+		end
+		web:load(url)
+		editing:set(false)
+		web:focus()
+	end
+	hooks.focus_address = function()
+		if field then
+			field:focus()
+		end
+	end
+	local bar = ui.row({
+		-- Below the card's top border, so its contents sit centred in what
+		-- shows of it.
+		mt = 1,
+		h = 38,
+		pl = 6,
+		pr = 6,
+		gap = 1,
+		items = "center",
+		shrink = 0,
+		context_menu_style = MENU_STYLE,
+		context_menu = function()
+			return {
+				entry("Back", function()
+					web:back()
+				end),
+				entry("Forward", function()
+					web:forward()
+				end),
+				entry("Reload", function()
+					web:reload()
+				end),
+				separator(),
+				entry("Split Right", function()
+					focus_pane(tab, pane)
+					split("row")
+				end),
+				entry("Split Down", function()
+					focus_pane(tab, pane)
+					split("column")
+				end),
+				separator(),
+				entry("Close Pane", function()
+					close_pane(pane)
+				end),
+			}
+		end,
+		nav("Back", function()
+			return icons.back
+		end, function()
+			web:back()
+		end, function()
+			return web.can_go_back
+		end),
+		nav("Forward", function()
+			return icons.forward
+		end, function()
+			web:forward()
+		end, function()
+			return web.can_go_forward
+		end),
+		nav("Reload", function()
+			return if web.loading then icons.stop else icons.refresh
+		end, function()
+			if web.loading then
+				web:stop()
+			else
+				web:reload()
+			end
+		end, function()
+			return not blank()
+		end),
+		-- The address: faint at rest, a 2-point ring while edited.
+		ui.row({
+			-- Its width is what is left, whatever the address's length.
+			w = 0,
+			grow = 1,
+			min_w = 0,
+			h = 26,
+			ml = 5,
+			pl = 9,
+			pr = 4,
+			gap = 2,
+			items = "center",
+			rounded = 7,
+			overflow = "hidden",
+			bg = function()
+				return if editing:get() then "#00000033" else "#ffffff0b"
+			end,
+			hover = { bg = "#ffffff12" },
+			border = function()
+				return if editing:get() then 2 else 1
+			end,
+			border_color = function()
+				return if editing:get() then "#ffffff40" else "#ffffff0a"
+			end,
+			ui.svg({
+				src = function()
+					return "code:" .. (if editing:get() or blank() then icons.search else icons.browser)
+				end,
+				w = 13,
+				h = 13,
+				shrink = 0,
+				tint = theme.tertiary,
+			}),
+			ui.overlay({
+				w = 0,
+				grow = 1,
+				min_w = 0,
+				h = 24,
+				ui.row({
+					w_full = true,
+					h = 24,
+					px = 8,
+					items = "center",
+					hidden = function()
+						return address:get() ~= ""
+					end,
+					ui.text({ "Search or enter address", text_size = 12.5, color = theme.quaternary }),
+				}),
+				ui.input({
+					label = "Address",
+					value = address,
+					w_full = true,
+					h = 24,
+					text_size = 12.5,
+					color = function()
+						return if editing:get() then theme.text else theme.secondary
+					end,
+					bg = CLEAR,
+					focus = { border = 0 },
+					on_mount = function(el)
+						field = el
+						mounted:set(true)
+					end,
+					on_focus = function()
+						if not editing:peek() then
+							editing:set(true)
+							-- The whole address, to edit.
+							if not blank() then
+								address:set(web.url)
+							end
+						end
+						if (focus:peek())[tab] ~= pane then
+							set_map(focus, tab, pane)
+						end
+					end,
+					on_blur = function()
+						editing:set(false)
+						address:set(pretty(web.url))
+					end,
+					on_key = function(e)
+						if e.key == "Enter" then
+							go(address:peek())
+							return true
+						elseif e.key == "Escape" then
+							editing:set(false)
+							address:set(pretty(web.url))
+							if not blank() then
+								web:focus()
+							end
+							return true
+						end
+						return false
+					end,
+				}),
+			}),
+		}),
+	})
+	-- Under the bar: a hairline, filling while the page loads.
+	local rule = ui.overlay({
+		h = 1,
+		shrink = 0,
+		bg = theme.line,
+		ui.div({
+			absolute = true,
+			left = 0,
+			top = 0,
+			h = 1,
+			bg = "#ffffff8c",
+			w = function()
+				return string.format("%d%%", math.floor(web.progress * 100))
+			end,
+			opacity = function()
+				return if web.loading then 1 else 0
+			end,
+		}),
+	})
+	return ui.column({
+		grow = 1,
+		min_h = 0,
+		items = "stretch",
+		bar,
+		rule,
+		ui.overlay({
+			grow = 1,
+			min_h = 0,
+			-- Inside the card's border.
+			mx = 1,
+			mb = 1,
+			-- As a terminal does: the page takes its final size at once, in
+			-- the top left, while the card eases around it (WebKit lays it
+			-- out once, not on every frame of the move).
+			ui.webview({
+				web = web,
+				absolute = true,
+				left = 0,
+				top = 0,
+				w = function()
+					return hooks.size:get().w
+				end,
+				h = function()
+					-- Less the bar, its top border and the rule under it.
+					return math.max(hooks.size:get().h - 39, 0)
+				end,
+				rounded_bl = inner,
+				rounded_br = inner,
+				hidden = blank,
+				on_new_window = function(url)
+					web:load(url)
+				end,
+			}),
+			-- Before the first page: where to start.
+			ui.column({
+				w_full = true,
+				h_full = true,
+				gap = 10,
+				items = "center",
+				justify = "center",
+				hidden = function()
+					return not blank()
+				end,
+				on_click = function()
+					if field then
+						field:focus()
+					end
+				end,
+				ui.svg({ code = icons.browser, w = 28, h = 28, tint = theme.quaternary }),
+				ui.text({ "Search or enter an address above", text_size = 12.5, color = theme.tertiary }),
+			}),
+		}),
+	})
+end
+
 local Pane = ui.component(function(props)
 	local pane: string = props.pane
 	local tab = active:peek()
@@ -1189,6 +1718,11 @@ local Pane = ui.component(function(props)
 		local root = live_root(tab)
 		return root ~= nil and root.kind == "split"
 	end
+	local browser = is_browser(pane)
+	-- A browser pane's bar: whether the pointer is near the top (zgui hears
+	-- it there), whether its address is being edited, its address input.
+	local bar_near = ui.use_state(false)
+	local hooks: { [string]: any } = { editing = ui.use_state(false) }
 	local function moving()
 		local d = drop:get()
 		return d.target ~= nil and d.kind == "pane" and d.id == pane
@@ -1197,6 +1731,7 @@ local Pane = ui.component(function(props)
 	-- top left while the card eases around it (clipping it): it redraws
 	-- once, not on every frame of the move.
 	local size = ui.use_state({ w = math.max(start.w - 2, 0), h = math.max(start.h - 2, 0) })
+	hooks.size = size
 	ui.effect(function()
 		local f = frames:get()
 		local r = f.panes[pane]
@@ -1219,8 +1754,13 @@ local Pane = ui.component(function(props)
 	-- only points over it count.
 	local grip = ui.use_state(0)
 	ui.effect(function()
-		local p = term.pointer
-		local near = p ~= nil and p.y >= 0 and p.y < 32 and p.x >= 0 and p.x <= size:get().w
+		local near
+		if browser then
+			near = bar_near:get() and not hooks.editing:get()
+		else
+			local p = term.pointer
+			near = p ~= nil and p.y >= 0 and p.y < 32 and p.x >= 0 and p.x <= size:get().w
+		end
 		local d = dragging:get()
 		-- While dragging, only the dragged pane's grip (hiding the source
 		-- would end the drag).
@@ -1262,7 +1802,26 @@ local Pane = ui.component(function(props)
 			end
 			return if several() and focused() then theme.ring else theme.line
 		end,
-		ui.overlay({
+		-- Over a browser's bar, zgui hears the pointer: the top 32 points
+		-- show the grip, as over a terminal.
+		on_pointer_move = if browser
+			then function(e)
+				local near = e.local_y < 32
+				if bar_near:peek() ~= near then
+					bar_near:set(near)
+				end
+			end
+			else nil,
+		on_hover = if browser
+			then function(inside)
+				if not inside and bar_near:peek() then
+					bar_near:set(false)
+				end
+			end
+			else nil,
+		if browser
+			then browser_body(pane, tab, inner, hooks)
+			else ui.overlay({
 			grow = 1,
 			min_h = 0,
 			ui.terminal({
@@ -1302,6 +1861,9 @@ local Pane = ui.component(function(props)
 						entry("Split Down", function()
 							split("column")
 						end),
+						entry("Open Browser Beside", function()
+							split("row", "browser")
+						end),
 					}
 					if several() or zoomed then
 						table.insert(
@@ -1322,7 +1884,8 @@ local Pane = ui.component(function(props)
 					return items
 				end,
 			}),
-
+		}),
+		-- The grip, centred at the top.
 			ui.row({
 				absolute = true,
 				top = 6,
@@ -1347,8 +1910,14 @@ local Pane = ui.component(function(props)
 					cursor = "grab",
 					-- (Seconds, unlike anime.animate's milliseconds.)
 					opacity = ui.tween(grip, { duration = 0.16 }),
+					-- A click (no drag): on a browser, it was meant for the
+					-- address under it.
 					on_click = function()
-						focus_pane(tab, pane)
+						if browser and hooks.focus_address then
+							hooks.focus_address()
+						else
+							focus_pane(tab, pane)
+						end
 					end,
 					on_drag = function()
 						dragging:set({ kind = "pane", id = pane })
@@ -1365,7 +1934,6 @@ local Pane = ui.component(function(props)
 					dots(),
 				}),
 			}),
-		}),
 	})
 end)
 
@@ -1498,7 +2066,7 @@ local function confirm_sheet()
 		if not yes then
 			local pane = current()
 			if pane then
-				ui.term(pane):focus()
+				focus_view(pane)
 			end
 			return
 		end
