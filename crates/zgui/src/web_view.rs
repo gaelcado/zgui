@@ -192,6 +192,8 @@ struct Inner {
     pointer: Signal<Option<(f32, f32)>>,
     attached: Signal<bool>,
     backend: RefCell<Option<Rc<dyn WebViewBackend>>>,
+    /// Closed (`close`): no page again, commands go nowhere.
+    closed: Cell<bool>,
     queued: RefCell<Vec<WebViewCommand>>,
     listeners: RefCell<Vec<(u64, Listener)>>,
     next_listener: Cell<u64>,
@@ -250,6 +252,7 @@ impl WebView {
             pointer: runtime.signal(None),
             attached: runtime.signal(false),
             backend: RefCell::new(None),
+            closed: Cell::new(false),
             queued: RefCell::new(Vec::new()),
             listeners: RefCell::new(Vec::new()),
             next_listener: Cell::new(0),
@@ -315,11 +318,29 @@ impl WebView {
         self.0.attached.get()
     }
     fn run(&self, command: WebViewCommand) {
+        if self.0.closed.get() {
+            return;
+        }
         let backend = self.0.backend.borrow().clone();
         match backend {
             Some(backend) => backend.run(command),
             None => self.0.queued.borrow_mut().push(command),
         }
+    }
+    /// End the page now: its platform page goes (with the process and the
+    /// timers behind it), however many handles to this controller remain,
+    /// and none is made for it again. Handles still kept (a script's, until
+    /// it collects them) do nothing.
+    pub fn close(&self) {
+        if self.0.closed.replace(true) {
+            return;
+        }
+        self.0.queued.borrow_mut().clear();
+        drop(self.detach());
+    }
+    /// Whether it was closed (`close`).
+    pub fn is_closed(&self) -> bool {
+        self.0.closed.get()
     }
     pub fn load_url(&self, url: impl Into<String>) {
         let url = url.into();
@@ -412,6 +433,9 @@ impl WebView {
 
     /// Attach the platform page; queued commands run now, in order.
     pub fn attach(&self, backend: Rc<dyn WebViewBackend>) {
+        if self.0.closed.get() {
+            return;
+        }
         *self.0.backend.borrow_mut() = Some(backend.clone());
         let queued = std::mem::take(&mut *self.0.queued.borrow_mut());
         for command in queued {

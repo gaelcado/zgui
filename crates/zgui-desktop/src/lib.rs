@@ -55,7 +55,10 @@ mod native_ime;
 pub mod presentation;
 pub mod raster;
 pub mod terminal_process;
-pub use terminal_process::{ForegroundProcess, resolve_terminal_processes};
+pub use terminal_process::{
+    ForegroundProcess, resolve_terminal_processes, terminal_processes_changed,
+    terminal_processes_pushed,
+};
 
 pub mod accessibility;
 

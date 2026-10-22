@@ -190,3 +190,38 @@ fn the_inspector_names_nodes_by_the_script_line_that_made_them() {
     inspector.update(&h.ui, None);
     assert_eq!(inspector.overlay(), None);
 }
+
+/// Watching, a reload follows a save without waiting out the poll: the
+/// kernel says when a file changes (macOS), in place or replaced.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_watching_host_reloads_when_a_file_is_saved() {
+    let path = temp_script("watch", APP);
+    let h = Harness::new(|runtime| ScriptHost::new(runtime, &path));
+    // A poll far longer than the test: only a file event reloads in time.
+    let watching = h.host.watch(Duration::from_secs(600));
+    h.executor.borrow_mut().spawn(watching);
+    h.settle();
+    let mut h = h;
+    let wait_for = |h: &mut Harness, label: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            h.settle();
+            h.ui.prepare_frame();
+            if h.text("label") == label {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    };
+    // Written in place.
+    rewrite(&path, &APP.replace("Count:", "Total:"));
+    assert!(wait_for(&mut h, "Total: 0"), "{}", h.text("label"));
+    // Replaced, as editors save: written beside it and renamed over it.
+    let beside = path.with_extension("tmp");
+    std::fs::write(&beside, APP.replace("Count:", "Sum:")).unwrap();
+    std::fs::rename(&beside, &path).unwrap();
+    assert!(wait_for(&mut h, "Sum: 0"), "{}", h.text("label"));
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}

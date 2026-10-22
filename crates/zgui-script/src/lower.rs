@@ -43,6 +43,14 @@ impl Assets {
             .insert(src.to_owned(), (path.to_path_buf(), modified));
         Ok(bytes)
     }
+    /// The files read.
+    pub fn files(&self) -> Vec<std::path::PathBuf> {
+        self.files
+            .borrow()
+            .values()
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
     /// Forgets the files edited since they were read, so the next build
     /// reads them again; whether there were any. Only stats files.
     pub fn changed(&self) -> bool {

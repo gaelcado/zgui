@@ -29,6 +29,8 @@ mod canvas;
 pub mod check;
 mod command;
 mod element;
+#[cfg(target_os = "macos")]
+mod file_events;
 mod lower;
 mod motion;
 mod node;
@@ -926,12 +928,45 @@ impl ScriptHost {
         }
         let host = self.clone();
         async move {
+            // The kernel says when a file changes; nothing runs meanwhile.
+            #[cfg(target_os = "macos")]
+            if let Some(mut events) = file_events::FileEvents::new() {
+                let mut heard = false;
+                loop {
+                    // After a change, open them again: a file an editor
+                    // replaced is a new file.
+                    events.watch(host.watched_files(), heard);
+                    if host.0.checker.borrow().is_some() {
+                        // A type check runs on a thread of its own: look for
+                        // its result as often as files were polled.
+                        zgui::timer::sleep(every).await;
+                        heard = false;
+                    } else if events.changed().await {
+                        // An editor's save can be several writes.
+                        zgui::timer::sleep(Duration::from_millis(30)).await;
+                        heard = true;
+                    } else {
+                        return;
+                    }
+                    host.reload_if_changed();
+                    host.poll_check();
+                }
+            }
             loop {
                 zgui::timer::sleep(every).await;
                 host.reload_if_changed();
                 host.poll_check();
             }
         }
+    }
+    /// Every file a reload depends on: the scripts, what they required, the
+    /// images they read and the theme files.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn watched_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = self.stamps().into_iter().map(|(path, _)| path).collect();
+        files.extend(self.0.assets.files());
+        files.extend(zgui::theme::Themes::of(&self.0.runtime).files());
+        files
     }
 
     /// The mounted interface, with an error banner above it.

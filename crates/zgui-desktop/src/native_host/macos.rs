@@ -855,6 +855,8 @@ impl Surfaces {
             let mut term = None;
             let (view, web): (Option<Retained<NSView>>, Option<zgui::web_view::WebView>) =
                 match content {
+                    // A closed page shows nothing (and gets no new page).
+                    NativeContent::Web(web) if web.is_closed() => (None, Some(web.clone())),
                     NativeContent::Web(web) => {
                         let backend = webkit::backend(web, self.mtm);
                         let page = backend

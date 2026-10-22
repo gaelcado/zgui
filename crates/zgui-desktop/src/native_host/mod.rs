@@ -9,6 +9,8 @@
 //! never drift a frame apart. A window without native views does none of it.
 #[cfg(all(target_os = "macos", feature = "ghostty"))]
 mod ghostty;
+#[cfg(all(target_os = "macos", feature = "ghostty"))]
+pub(crate) use ghostty::processes_changed;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -157,6 +159,8 @@ impl NativeHost {
         renderer: &mut zgui_gpu::GpuRenderer,
         scale: f32,
     ) -> Result<Vec<Rect>, zgui_gpu::GpuError> {
+        // Frames go with native geometry, in one transaction, while there is any.
+        renderer.present_with_native_views(self.active());
         if !self.active() {
             return Ok(Vec::new());
         }

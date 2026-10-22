@@ -962,6 +962,9 @@ struct LayerPresent {
     /// always (`plain_only`): they change in the caller's transaction.
     plain_until: Option<std::time::Instant>,
     plain_only: bool,
+    /// Native views share the window (`present_with_native_views`): frames
+    /// show on the plain layer, in the transaction that moves them.
+    with_natives: bool,
 }
 #[cfg(target_os = "macos")]
 impl LayerPresent {
@@ -5238,6 +5241,7 @@ impl GpuRenderer {
             .resized_at
             .is_some_and(|at| at.elapsed() < RESIZE_SETTLE)
             || present.plain_only
+            || present.with_natives
             || present
                 .plain_until
                 .is_some_and(|until| std::time::Instant::now() < until);

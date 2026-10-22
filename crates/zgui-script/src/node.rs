@@ -191,14 +191,16 @@ impl UserData for WebUd {
             w.0.go_back();
             Ok(())
         });
-        // A page from `ui.web(id)` leaves the registry (and goes once no
-        // view shows it).
+        // The page ends now (not when the script's handles are collected,
+        // which an idle script may never do); one from `ui.web(id)` leaves
+        // the registry too.
         methods.add_method("close", |_, w, ()| {
             if let Some(key) = &w.1
                 && let Some(webs) = key.webs.upgrade()
             {
                 webs.0.borrow_mut().remove(&key.id);
             }
+            w.0.close();
             Ok(())
         });
         methods.add_method("forward", |_, w, ()| {

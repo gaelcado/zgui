@@ -553,3 +553,23 @@ fn a_painted_pointer_transparent_layer_leaves_the_page_its_input() {
         PointerRoute::Native(page)
     );
 }
+
+#[test]
+fn closing_a_page_drops_its_platform_page_while_handles_remain() {
+    let ui = Ui::new(100., 100.);
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    // A handle a script still holds (until it collects it).
+    let kept = web.clone();
+    let backend = Rc::new(Recorder(RefCell::new(Vec::new())));
+    web.attach(backend.clone());
+    assert_eq!(Rc::strong_count(&backend), 2);
+    web.close();
+    assert!(kept.is_closed() && !kept.is_attached());
+    assert_eq!(Rc::strong_count(&backend), 1, "the page let go of it");
+    // Nothing reaches a page, and none attaches again.
+    kept.load_url("https://late.test/");
+    let again = Rc::new(Recorder(RefCell::new(Vec::new())));
+    kept.attach(again.clone());
+    assert!(!kept.is_attached());
+    assert!(backend.0.borrow().is_empty() && again.0.borrow().is_empty());
+}
