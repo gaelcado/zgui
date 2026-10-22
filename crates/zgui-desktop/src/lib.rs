@@ -35,7 +35,7 @@ mod wayland_files;
 mod window_chrome;
 mod window_info;
 pub use app_menu::{
-    AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction, app_menu_bar,
+    AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction, StandardItem, app_menu_bar,
     has_native_app_menu,
 };
 pub use file_dialog::{
