@@ -689,6 +689,70 @@ struct Shared {
     overlay_host: Option<Retained<CALayer>>,
 }
 
+fn ns_window(window: &winit::window::Window) -> Option<Retained<objc2_app_kit::NSWindow>> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: winit's content view, alive while its window is.
+    let view = unsafe { Retained::<NSView>::retain(handle.ns_view.as_ptr().cast()) }?;
+    view.window()
+}
+
+/// Turns the window's cursor rects off for good. winit shows zgui's cursor
+/// through a rect over its whole view, and WebKit sets no cursor of its own
+/// (the I-beam over text, the hand over links) while another view's rect is in
+/// force; turning them off only while the pointer was over a page lagged it
+/// by a frame, and a page that missed its moment kept the wrong cursor. zgui
+/// sets its cursors directly instead (`set_cursor`), as WebKit does.
+pub fn disable_cursor_rects(window: &winit::window::Window) {
+    if let Some(ns_window) = ns_window(window) {
+        ns_window.disableCursorRects();
+    }
+}
+
+/// Shows `cursor`, if the pointer is over this window (an app sets the cursor
+/// only for its own windows).
+pub fn set_cursor(window: &winit::window::Window, cursor: winit::window::CursorIcon) {
+    use objc2_app_kit::NSCursor;
+    use winit::window::CursorIcon as C;
+    let Some(ns_window) = ns_window(window) else {
+        return;
+    };
+    let mtm = MainThreadMarker::from(&*ns_window);
+    let under = objc2_app_kit::NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
+        objc2_app_kit::NSEvent::mouseLocation(),
+        0,
+        mtm,
+    );
+    if under != ns_window.windowNumber() {
+        return;
+    }
+    // The resize cursors' replacements need macOS 15; these work on every version.
+    #[allow(deprecated)]
+    let ns_cursor = match cursor {
+        C::Pointer => NSCursor::pointingHandCursor(),
+        C::Text => NSCursor::IBeamCursor(),
+        C::VerticalText => NSCursor::IBeamCursorForVerticalLayout(),
+        C::Crosshair => NSCursor::crosshairCursor(),
+        C::Grab | C::Move | C::AllScroll => NSCursor::openHandCursor(),
+        C::Grabbing => NSCursor::closedHandCursor(),
+        C::NotAllowed | C::NoDrop => NSCursor::operationNotAllowedCursor(),
+        C::Copy => NSCursor::dragCopyCursor(),
+        C::Alias => NSCursor::dragLinkCursor(),
+        C::ContextMenu => NSCursor::contextualMenuCursor(),
+        C::ColResize | C::EwResize => NSCursor::resizeLeftRightCursor(),
+        C::RowResize | C::NsResize => NSCursor::resizeUpDownCursor(),
+        C::EResize => NSCursor::resizeRightCursor(),
+        C::WResize => NSCursor::resizeLeftCursor(),
+        C::NResize => NSCursor::resizeUpCursor(),
+        C::SResize => NSCursor::resizeDownCursor(),
+        _ => NSCursor::arrowCursor(),
+    };
+    ns_cursor.set();
+}
+
 impl Surfaces {
     pub fn new(window: &winit::window::Window, router: Router) -> Result<Self, String> {
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
