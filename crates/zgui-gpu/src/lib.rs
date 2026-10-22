@@ -1780,11 +1780,11 @@ impl GpuRenderer {
         self.spare = None;
         self.target_copy_bind = None;
         // A surface of the layer's becomes the target (`begin_layer_frame`).
-        let (target_width, target_height) = if self.layer_present.is_some() {
-            (1, 1)
-        } else {
-            (width, height)
-        };
+        #[cfg(target_os = "macos")]
+        let layered = self.layer_present.is_some();
+        #[cfg(not(target_os = "macos"))]
+        let layered = false;
+        let (target_width, target_height) = if layered { (1, 1) } else { (width, height) };
         self.target = texture(&self.device, target_width, target_height, "retained output");
         self.view = self.target.create_view(&Default::default());
         #[cfg(target_os = "macos")]
@@ -5397,7 +5397,10 @@ impl GpuRenderer {
     /// window has stopped presenting for a while.
     pub fn trim(&mut self) {
         present_log::log(|| {
+            #[cfg(target_os = "macos")]
             let plane = self.layer_present.as_ref().map_or("none", |p| p.plane());
+            #[cfg(not(target_os = "macos"))]
+            let plane = "none";
             format!("{plane} trim")
         });
         self.flush_pending();
@@ -5718,6 +5721,8 @@ fn band(area: [f32; 4], edges: [f32; 4], near: f32, far: f32) -> Option<[f32; 4]
         ]
     })
 }
+// Used by macOS's plane split only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn scissor_minus(rect: Scissor, cut: Scissor, out: &mut Vec<Scissor>) {
     let (x, y, right, bottom) = (rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3);
     let (cx, cy, cr, cb) = (cut.0, cut.1, cut.0 + cut.2, cut.1 + cut.3);
@@ -5741,6 +5746,7 @@ fn scissor_minus(rect: Scissor, cut: Scissor, out: &mut Vec<Scissor>) {
     }
 }
 /// Whether `outer` contains `inner`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn scissor_holds(outer: Scissor, inner: Scissor) -> bool {
     outer.0 <= inner.0
         && outer.1 <= inner.1
