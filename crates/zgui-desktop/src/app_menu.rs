@@ -407,6 +407,88 @@ pub(crate) fn update_entry(
 }
 
 #[cfg(target_os = "macos")]
+/// A menu model as an AppKit submenu: items, check items, shortcuts, the
+/// standard edit items and nested submenus.
+#[cfg(target_os = "macos")]
+fn native_submenu(model: &AppMenu) -> Result<muda::Submenu, AppMenuError> {
+    let menu = muda::Submenu::new(&model.label, true);
+    for entry in &model.entries {
+        let result = match entry {
+            AppMenuEntry::Item {
+                label,
+                action,
+                enabled,
+                checked,
+                accelerator,
+            } => {
+                let accelerator = accelerator
+                    .as_ref()
+                    .map(|a| {
+                        a.name()?
+                            .parse::<muda::accelerator::KeyAccelerator>()
+                            .map_err(|e| AppMenuError(e.to_string()))
+                    })
+                    .transpose()?;
+                if let Some(checked) = checked {
+                    let item = muda::CheckMenuItem::with_id(
+                        action.0.clone(),
+                        label,
+                        *enabled,
+                        *checked,
+                        None,
+                    );
+                    item.set_key_accelerator(accelerator)
+                        .map_err(|e| AppMenuError(e.to_string()))?;
+                    menu.append(&item)
+                } else {
+                    let item = muda::MenuItem::with_id(action.0.clone(), label, *enabled, None);
+                    item.set_key_accelerator(accelerator)
+                        .map_err(|e| AppMenuError(e.to_string()))?;
+                    menu.append(&item)
+                }
+            }
+            AppMenuEntry::Submenu(child) => menu.append(&native_submenu(child)?),
+            AppMenuEntry::Separator => menu.append(&muda::PredefinedMenuItem::separator()),
+            AppMenuEntry::Standard(item) => menu.append(&match item {
+                StandardItem::Undo => muda::PredefinedMenuItem::undo(None),
+                StandardItem::Redo => muda::PredefinedMenuItem::redo(None),
+                StandardItem::Cut => muda::PredefinedMenuItem::cut(None),
+                StandardItem::Copy => muda::PredefinedMenuItem::copy(None),
+                StandardItem::Paste => muda::PredefinedMenuItem::paste(None),
+                StandardItem::SelectAll => muda::PredefinedMenuItem::select_all(None),
+            }),
+        };
+        result.map_err(|e| AppMenuError(e.to_string()))?;
+    }
+    Ok(menu)
+}
+
+/// Shows `entries` as a native pop-up menu at `(x, y)`, in points from the
+/// top left of the window's content, as AppKit's own controls do (a held
+/// back button's history, a context menu): press, drag to an item and let
+/// go, or click. A chosen item arrives as a menu action, like the menu
+/// bar's. Returns once the menu closes.
+#[cfg(target_os = "macos")]
+pub(crate) fn show_context_menu(
+    window: &winit::window::Window,
+    entries: &[AppMenuEntry],
+    x: f64,
+    y: f64,
+) -> Result<(), AppMenuError> {
+    use muda::ContextMenu;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let menu = native_submenu(&AppMenu::new("", entries.iter().cloned()))?;
+    let handle = window
+        .window_handle()
+        .map_err(|e| AppMenuError(e.to_string()))?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err(AppMenuError("not an AppKit window".into()));
+    };
+    let position = muda::dpi::Position::Logical(muda::dpi::LogicalPosition::new(x, y));
+    // SAFETY: winit's content view, alive while its window is.
+    unsafe { menu.show_context_menu_for_nsview(handle.ns_view.as_ptr(), Some(position)) };
+    Ok(())
+}
 pub(crate) struct NativeMenu {
     menu: muda::Menu,
     /// The standard edit items it has, whose shortcuts zgui's view takes.
@@ -415,59 +497,6 @@ pub(crate) struct NativeMenu {
 #[cfg(target_os = "macos")]
 impl NativeMenu {
     pub(crate) fn new(menus: &[AppMenu]) -> Result<Self, AppMenuError> {
-        fn submenu(model: &AppMenu) -> Result<muda::Submenu, AppMenuError> {
-            let menu = muda::Submenu::new(&model.label, true);
-            for entry in &model.entries {
-                let result = match entry {
-                    AppMenuEntry::Item {
-                        label,
-                        action,
-                        enabled,
-                        checked,
-                        accelerator,
-                    } => {
-                        let accelerator = accelerator
-                            .as_ref()
-                            .map(|a| {
-                                a.name()?
-                                    .parse::<muda::accelerator::KeyAccelerator>()
-                                    .map_err(|e| AppMenuError(e.to_string()))
-                            })
-                            .transpose()?;
-                        if let Some(checked) = checked {
-                            let item = muda::CheckMenuItem::with_id(
-                                action.0.clone(),
-                                label,
-                                *enabled,
-                                *checked,
-                                None,
-                            );
-                            item.set_key_accelerator(accelerator)
-                                .map_err(|e| AppMenuError(e.to_string()))?;
-                            menu.append(&item)
-                        } else {
-                            let item =
-                                muda::MenuItem::with_id(action.0.clone(), label, *enabled, None);
-                            item.set_key_accelerator(accelerator)
-                                .map_err(|e| AppMenuError(e.to_string()))?;
-                            menu.append(&item)
-                        }
-                    }
-                    AppMenuEntry::Submenu(child) => menu.append(&submenu(child)?),
-                    AppMenuEntry::Separator => menu.append(&muda::PredefinedMenuItem::separator()),
-                    AppMenuEntry::Standard(item) => menu.append(&match item {
-                        StandardItem::Undo => muda::PredefinedMenuItem::undo(None),
-                        StandardItem::Redo => muda::PredefinedMenuItem::redo(None),
-                        StandardItem::Cut => muda::PredefinedMenuItem::cut(None),
-                        StandardItem::Copy => muda::PredefinedMenuItem::copy(None),
-                        StandardItem::Paste => muda::PredefinedMenuItem::paste(None),
-                        StandardItem::SelectAll => muda::PredefinedMenuItem::select_all(None),
-                    }),
-                };
-                result.map_err(|e| AppMenuError(e.to_string()))?;
-            }
-            Ok(menu)
-        }
         validate(menus)?;
         let menu = muda::Menu::new();
         // AppKit reserves the first submenu for the application and replaces
@@ -488,7 +517,7 @@ impl NativeMenu {
         menu.append(&application)
             .map_err(|e| AppMenuError(e.to_string()))?;
         for model in menus {
-            menu.append(&submenu(model)?)
+            menu.append(&native_submenu(model)?)
                 .map_err(|e| AppMenuError(e.to_string()))?;
         }
         fn standard_items(model: &AppMenu, out: &mut Vec<StandardItem>) {

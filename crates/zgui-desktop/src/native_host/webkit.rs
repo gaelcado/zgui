@@ -48,6 +48,36 @@ const OBSERVED: [&str; 6] = [
     "canGoBack",
     "canGoForward",
 ];
+/// The pages back and forward from the current one, nearest first.
+fn history(
+    view: &WKWebView,
+) -> (
+    Vec<zgui::web_view::HistoryItem>,
+    Vec<zgui::web_view::HistoryItem>,
+) {
+    let list = unsafe { view.backForwardList() };
+    let walk = |step: isize| {
+        (1..)
+            .map_while(|n| unsafe { list.itemAtIndex(n * step) })
+            .take(50)
+            .map(|item| unsafe {
+                zgui::web_view::HistoryItem {
+                    url: item
+                        .URL()
+                        .absoluteString()
+                        .map(|url| url.to_string())
+                        .unwrap_or_default(),
+                    title: item
+                        .title()
+                        .map(|title| title.to_string())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect()
+    };
+    (walk(-1), walk(1))
+}
+
 /// The page-side name of the app's message channel.
 const CHANNEL: &str = "zgui";
 /// Defines `window.zgui.postMessage(value)`, sending `value` as JSON.
@@ -321,6 +351,7 @@ impl Observer {
                 view.canGoForward(),
             )
         };
+        let (back_list, forward_list) = history(&view);
         self.post(move |web| {
             let (old_url, old_title) = web
                 .state()
@@ -334,6 +365,8 @@ impl Observer {
                 state.progress = progress;
                 state.can_go_back = back;
                 state.can_go_forward = forward;
+                state.back_list = back_list;
+                state.forward_list = forward_list;
             });
             if !url.is_empty() && url != old_url {
                 web.emit(WebViewEvent::UrlChanged { url });
@@ -673,6 +706,11 @@ impl WebViewBackend for MacWebView {
                 }
                 WebViewCommand::GoForward => {
                     self.view.goForward();
+                }
+                WebViewCommand::GoToHistory(n) => {
+                    if let Some(item) = self.view.backForwardList().itemAtIndex(n as isize) {
+                        self.view.goToBackForwardListItem(&item);
+                    }
                 }
                 WebViewCommand::Evaluate { script, reply } => {
                     let reply = RefCell::new(reply);
