@@ -57,9 +57,12 @@ pub(crate) struct NativeHost {
     #[cfg(target_os = "macos")]
     overlay_live: bool,
     /// Native geometry changed and has not been applied yet.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pending: bool,
-    /// What clip views' hit tests consult.
+    /// What clip views' hit tests consult (macOS's clip views).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     scene: std::rc::Weak<std::cell::RefCell<Scene>>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     input: zgui::input::InputDispatcher,
     _waker: zgui::native_view::WakerGuard,
 }

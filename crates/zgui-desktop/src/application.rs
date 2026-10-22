@@ -955,7 +955,8 @@ struct Host {
     last_accessibility: Option<(u64, Option<NodeId>)>,
     accessibility_geometry_dirty: bool,
     native_cursor: Option<CursorIcon>,
-    /// The window's cursor rects are off (macOS; see `disable_cursor_rects`).
+    /// The window's cursor rects are off (see `disable_cursor_rects`).
+    #[cfg(target_os = "macos")]
     cursor_rects_off: bool,
     cursor_query: Option<((f32, f32), u64, Option<zgui::cursor::Cursor>)>,
     /// The pointer is over this window. Outside it, the cursor shape does not
@@ -1113,6 +1114,7 @@ impl Host {
             last_accessibility: None,
             accessibility_geometry_dirty: true,
             native_cursor: None,
+            #[cfg(target_os = "macos")]
             cursor_rects_off: false,
             cursor_query: None,
             pointer_inside: false,
@@ -1321,6 +1323,8 @@ impl Host {
                 // change in one transaction (committed when it drops).
                 let transaction = self.native.begin();
                 self.native.present_overlay()?;
+                // Checked above; `self` is borrowed in between, so no `if let`.
+                #[allow(clippy::unnecessary_unwrap)]
                 let renderer = self.renderer.as_mut().expect("checked above");
                 let status = renderer.present_with_notify(|| {
                     window.pre_present_notify();
@@ -1330,6 +1334,8 @@ impl Host {
                     }
                 })?;
                 self.native.apply();
+                // Commits the transaction (macOS; elsewhere there is none).
+                #[allow(dropping_copy_types)]
                 drop(transaction);
                 #[cfg(target_os = "macos")]
                 {
