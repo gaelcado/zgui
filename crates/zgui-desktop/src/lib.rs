@@ -24,6 +24,7 @@ mod clipboard;
 pub mod file_dialog;
 mod native_events;
 mod native_prompt;
+mod platform;
 #[cfg(target_os = "linux")]
 mod portal_dialog;
 #[cfg(target_os = "linux")]

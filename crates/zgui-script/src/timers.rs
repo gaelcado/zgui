@@ -26,7 +26,7 @@ impl Timers {
         }
         *self.tasks.borrow_mut() = Some(tasks);
     }
-    fn spawn(&self, task: impl Future<Output = ()> + 'static) {
+    pub(crate) fn spawn(&self, task: impl Future<Output = ()> + 'static) {
         match &*self.tasks.borrow() {
             Some(tasks) => tasks.spawn(task),
             None => self.pending.borrow_mut().push(Box::pin(task)),

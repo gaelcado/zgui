@@ -25,22 +25,28 @@
 //! The `ui` and `anime` libraries are documented in `docs/scripting.md`.
 mod anim;
 mod anime;
+mod bundle;
+mod calls;
 mod canvas;
 pub mod check;
 mod command;
 mod element;
 #[cfg(target_os = "macos")]
 mod file_events;
+mod io;
 mod lower;
 mod motion;
 mod node;
 mod persist;
 mod term;
+pub mod testing;
 mod theme;
 mod timers;
 mod transform;
 mod value;
 
+pub use bundle::{Bundle, BundleFile, build};
+pub use calls::{Request, Response};
 pub use command::Command;
 pub use persist::app_data_dir;
 pub use value::{ElementHandle, PathKey, Store, Value};
@@ -82,8 +88,8 @@ pub(crate) type Actions = Rc<RefCell<HashMap<String, Rc<dyn Fn(Value)>>>>;
 
 /// One script's VM.
 /// `.luaurc`'s `aliases` in `dir`, resolved against it.
-fn read_aliases(dir: &std::path::Path) -> HashMap<String, PathBuf> {
-    let Ok(text) = std::fs::read_to_string(dir.join(".luaurc")) else {
+fn read_aliases(dir: &std::path::Path, files: Files) -> HashMap<String, PathBuf> {
+    let Ok(text) = files.read_to_string(&dir.join(".luaurc")) else {
         return HashMap::new();
     };
     let Ok(config) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -177,7 +183,7 @@ pub(crate) struct Vm {
     /// Where relative image and SVG paths resolve from.
     pub(crate) base: Option<PathBuf>,
     deadline: Rc<Cell<Option<Deadline>>>,
-    budget: Duration,
+    pub(crate) budget: Duration,
     pub(crate) runtime: Runtime,
     errors: Signal<Option<String>>,
     /// The script's mounted `layout_id` nodes: ids are scoped per script.
@@ -191,7 +197,11 @@ pub(crate) struct Vm {
 impl Vm {
     /// Runs `f` with its own budget. A nested call (a component built
     /// while a handler runs) stops the outer call's clock meanwhile.
-    fn guard<R>(&self, budget: Duration, f: impl FnOnce() -> mlua::Result<R>) -> mlua::Result<R> {
+    pub(crate) fn guard<R>(
+        &self,
+        budget: Duration,
+        f: impl FnOnce() -> mlua::Result<R>,
+    ) -> mlua::Result<R> {
         self.calls.set(self.calls.get() + 1);
         let started = Deadline::start(budget);
         let outer = self.deadline.replace(Some(started));
@@ -441,6 +451,57 @@ enum Script {
     File(PathBuf),
     Inline { name: String, code: String },
 }
+/// What a plugin may do beyond its sandbox, if its host grants it
+/// (`ScriptHost::grant`). The application's own scripts may do all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Capability {
+    /// `ui.fetch`: the network, through the host's fetcher.
+    Fetch,
+    /// `ui.clipboard`: read and write the clipboard.
+    Clipboard,
+    /// `ui.open_files`, `ui.save_file` and reading and writing what the
+    /// user picks in them.
+    Files,
+}
+
+/// Where a host's files come from: the disk, or a bundle compiled into the
+/// app (which reads nothing from the disk).
+#[derive(Clone, Copy)]
+pub(crate) enum Files {
+    Disk,
+    Bundle(&'static Bundle),
+}
+impl Files {
+    pub(crate) fn read(self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+        match self {
+            Files::Disk => std::fs::read(path),
+            Files::Bundle(bundle) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's bundle")
+            }),
+        }
+    }
+    fn read_to_string(self, path: &std::path::Path) -> std::io::Result<String> {
+        String::from_utf8(self.read(path)?).map_err(std::io::Error::other)
+    }
+    fn is_dir(self, path: &std::path::Path) -> bool {
+        match self {
+            Files::Disk => path.is_dir(),
+            Files::Bundle(bundle) => bundle.is_dir(path),
+        }
+    }
+    /// The files in directory `dir`.
+    fn list(self, dir: &std::path::Path) -> Vec<PathBuf> {
+        match self {
+            Files::Disk => std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .collect(),
+            Files::Bundle(bundle) => bundle.list(dir),
+        }
+    }
+}
 impl Script {
     /// Shown in errors and tracebacks.
     fn name(&self) -> String {
@@ -467,25 +528,45 @@ impl Script {
             Script::Inline { name, .. } => format!("inline:{name}"),
         }
     }
-    fn code(&self) -> Result<String, String> {
+    /// Its source, or (from a bundle) its bytecode.
+    fn code(&self, files: Files) -> Result<Vec<u8>, String> {
         match self {
-            Script::File(path) => {
-                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
-            }
-            Script::Inline { code, .. } => Ok(code.clone()),
+            Script::File(path) => files
+                .read(path)
+                .map_err(|e| format!("{}: {e}", path.display())),
+            Script::Inline { code, .. } => Ok(code.clone().into_bytes()),
         }
     }
 }
 
 struct Loaded {
     _vms: Vec<Rc<Vm>>,
+    /// Plugins left out because they failed, and why.
+    broken: Vec<String>,
     root: Rc<node::Node>,
     lowering: Rc<lower::Lowering>,
 }
 
+type ErrorHooks = Rc<RefCell<Vec<Rc<dyn Fn(&str)>>>>;
 struct Inner {
     runtime: Runtime,
     app: Script,
+    files: Files,
+    /// `async_action`s, which `ui.call` runs.
+    async_actions: calls::AsyncActions,
+    /// The transport `ui.fetch` and remote images use (`fetcher`).
+    fetcher: calls::SharedFetcher,
+    /// What each plugin may do beyond its sandbox (`grant`), by name.
+    grants: HashMap<String, Vec<Capability>>,
+    /// The window's clipboard and dialogs, once the view mounts in one.
+    platform: io::SharedPlatform,
+    /// The files the user picked in this host's dialogs.
+    picked: io::Picked,
+    /// Whether errors show over the interface (`error_banner`).
+    show_errors: bool,
+    /// What hears each script error (`on_error`), and what follows them.
+    error_hooks: ErrorHooks,
+    error_watch: RefCell<Option<Box<dyn std::any::Any>>>,
     plugin_dir: Option<PathBuf>,
     plugins: Vec<Script>,
     limits: Limits,
@@ -594,9 +675,18 @@ impl ScriptHost {
     fn with(runtime: &Runtime, app: Script) -> Self {
         let elements = Rc::new(element::Elements::default());
         let warnings = SharedWarnings::default();
-        Self(Rc::new(Inner {
+        let host = Self(Rc::new(Inner {
             runtime: runtime.clone(),
             app,
+            files: Files::Disk,
+            async_actions: Rc::default(),
+            fetcher: Rc::default(),
+            grants: HashMap::new(),
+            platform: Rc::default(),
+            picked: Rc::default(),
+            show_errors: cfg!(debug_assertions),
+            error_hooks: Rc::default(),
+            error_watch: RefCell::default(),
             plugin_dir: None,
             plugins: Vec::new(),
             limits: Limits::default(),
@@ -639,7 +729,57 @@ impl ScriptHost {
             checker: RefCell::default(),
             type_errors: runtime.signal(None),
             theme_error: RefCell::default(),
-        }))
+        }));
+        host.0
+            .assets
+            .connect(host.0.timers.clone(), host.0.fetcher.clone());
+        host
+    }
+    /// The scripts compiled into the app (`include_bundle!`), starting at
+    /// `entry` (`"app.luau"`): what ships. Nothing is read from the disk,
+    /// `require`, `.luaurc` aliases, theme files, images and plugins
+    /// included, and `watch` watches nothing.
+    pub fn bundled(runtime: &Runtime, bundle: &'static Bundle, entry: &str) -> Self {
+        let root = PathBuf::from(bundle.root);
+        let host = Self::with(runtime, Script::File(root.join(entry)))
+            .configure(|inner| inner.files = Files::Bundle(bundle));
+        host.0.assets.set_files(Files::Bundle(bundle));
+        // Theme files from the bundle; other hosts' still from the disk.
+        zgui::theme::Themes::of(runtime).set_reader(Some(Rc::new(
+            move |path: &std::path::Path| {
+                if path.starts_with(&root) {
+                    Files::Bundle(bundle).read_to_string(path)
+                } else {
+                    std::fs::read_to_string(path)
+                }
+            },
+        )));
+        host
+    }
+    /// Whether a script error shows over the interface, with where it
+    /// happened (development), or not (what ships: the last good interface
+    /// keeps running and [`on_error`](Self::on_error) hears it). On in debug
+    /// builds, off in release ones.
+    pub fn error_banner(self, show: bool) -> Self {
+        self.configure(|inner| inner.show_errors = show)
+    }
+    /// Call `hook` with each script error (a failed load, an error in a
+    /// handler): for an app's log or crash reports.
+    pub fn on_error(&self, hook: impl Fn(&str) + 'static) {
+        self.0.error_hooks.borrow_mut().push(Rc::new(hook));
+        if self.0.error_watch.borrow().is_some() {
+            return;
+        }
+        let (error, hooks) = (self.0.error.clone(), self.0.error_hooks.clone());
+        let watch = self.0.runtime.effect(move || {
+            if let Some(message) = error.get() {
+                let hooks: Vec<_> = hooks.borrow().clone();
+                for hook in hooks {
+                    hook(&message);
+                }
+            }
+        });
+        *self.0.error_watch.borrow_mut() = Some(Box::new(watch));
     }
     fn configure(self, f: impl FnOnce(&mut Inner)) -> Self {
         let mut inner = Rc::try_unwrap(self.0)
@@ -692,6 +832,42 @@ impl ScriptHost {
             .actions
             .borrow_mut()
             .insert(name.into(), Rc::new(action));
+    }
+    /// Registers an async Rust function scripts call with `ui.call(name,
+    /// arg)`, getting a promise of its result: `Ok` settles it with the
+    /// value, `Err` rejects it with the message. The future runs on the
+    /// window's tasks (the main thread, so it need not be `Send`), woken by
+    /// what it waits for; hand blocking work to a thread and await its
+    /// answer (`zgui::task::latest`).
+    pub fn async_action<F, Fut>(&self, name: impl Into<String>, action: F)
+    where
+        F: Fn(Value) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+    {
+        self.0.async_actions.borrow_mut().insert(
+            name.into(),
+            Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
+        );
+    }
+    /// The transport for `ui.fetch` (and remote images): the app owns the
+    /// HTTP stack, headers and credentials (a token minted per request), and
+    /// answers each `Request` with a `Response`, or an error message that
+    /// rejects the script's promise. Without one, `ui.fetch` is an error.
+    pub fn fetcher<F, Fut>(&self, fetch: F)
+    where
+        F: Fn(Request) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<Response, String>> + 'static,
+    {
+        *self.0.fetcher.borrow_mut() = Some(Rc::new(move |request| -> calls::Fetch {
+            Box::pin(fetch(request))
+        }));
+    }
+    /// Let plugin `plugin` (its file name, `stats.luau`, or `plugin`'s
+    /// name) do `capability`. Plugins get none unless granted; the
+    /// application's scripts have every one.
+    pub fn grant(self, plugin: impl Into<String>, capability: Capability) -> Self {
+        let plugin = plugin.into();
+        self.configure(|inner| inner.grants.entry(plugin).or_default().push(capability))
     }
     /// State shared by the application and every script (`ui.shared`). Rust
     /// can publish model data here and observe what scripts write.
@@ -852,10 +1028,14 @@ impl ScriptHost {
         *self.0.stamps.borrow_mut() = self.stamps();
         match loaded {
             Ok(loaded) => {
+                let broken = (!loaded.broken.is_empty()).then(|| loaded.broken.join("\n"));
+                if let Some(broken) = &broken {
+                    eprintln!("{broken}");
+                }
                 *self.0.current.borrow_mut() = Some(Rc::new(loaded));
                 self.0.commands.publish();
                 self.0.runtime.batch(|| {
-                    self.0.error.set(None);
+                    self.0.error.set(broken);
                     self.0.generation.update(|g| *g += 1);
                 });
                 // The replaced scripts' animations end with them.
@@ -928,6 +1108,10 @@ impl ScriptHost {
         }
         let host = self.clone();
         async move {
+            // A bundle never changes.
+            if matches!(host.0.files, Files::Bundle(_)) {
+                return;
+            }
             // The kernel says when a file changes; nothing runs meanwhile.
             #[cfg(target_os = "macos")]
             if let Some(mut events) = file_events::FileEvents::new() {
@@ -982,6 +1166,7 @@ impl ScriptHost {
         );
         let (error, type_errors) = (self.0.error.clone(), self.0.type_errors.clone());
         let (dismiss_error, dismiss_types) = (error.clone(), type_errors.clone());
+        let show_errors = self.0.show_errors;
         let engine = self.0.engine.clone();
         let persist = self.0.persist.clone();
         let timers = self.0.timers.clone();
@@ -995,6 +1180,10 @@ impl ScriptHost {
             if cx.try_service::<zgui::compose::TaskRunner>().is_some() {
                 persist.set_tasks(cx.tasks());
                 timers.set_tasks(cx.tasks());
+            }
+            // The clipboard and file dialogs, from the window.
+            if let Some(platform) = cx.try_service::<zgui::platform::PlatformService>() {
+                *host.0.platform.borrow_mut() = Some((*platform).clone());
             }
             if let Some(inspector) = cx.try_service::<zgui::inspect::Inspector>() {
                 // When the inspector starts recording, a reload records
@@ -1023,7 +1212,11 @@ impl ScriptHost {
                 .h_full()
                 .child(app.w_full().h_full())
                 .child_when(
-                    move || error.get().or_else(|| type_errors.get()),
+                    move || {
+                        show_errors
+                            .then(|| error.get().or_else(|| type_errors.get()))
+                            .flatten()
+                    },
                     move |message, _| {
                         let (error, types) = (dismiss_error.clone(), dismiss_types.clone());
                         banner(&message, move || {
@@ -1040,10 +1233,9 @@ impl ScriptHost {
             .0
             .plugin_dir
             .as_ref()
-            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .map(|dir| self.0.files.list(dir))
             .into_iter()
             .flatten()
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| path.extension().is_some_and(|ext| ext == "luau"))
             .collect();
         files.sort();
@@ -1076,20 +1268,30 @@ impl ScriptHost {
         let mut vms = Vec::new();
         let mut slots: HashMap<String, Vec<Rc<node::Node>>> = HashMap::new();
         let files = self.scripts();
+        let mut broken = Vec::new();
         for script in self.0.plugins.iter().chain(&files) {
-            let (vm, root, contributions) = self.run(script)?;
+            // A plugin that fails is left out, not the app: the error is
+            // reported, and the app and the other plugins load.
+            let (vm, root, contributions) = match self.run(script, true) {
+                Ok(ran) => ran,
+                Err(error) => {
+                    broken.push(error);
+                    continue;
+                }
+            };
             if root.is_some() {
-                return Err(format!(
+                broken.push(format!(
                     "{}: a plugin contributes with ui.contribute; it returns nothing",
                     script.name()
                 ));
+                continue;
             }
             for (slot, node) in contributions {
                 slots.entry(slot).or_default().push(node);
             }
             vms.push(vm);
         }
-        let (vm, root, contributions) = self.run(&self.0.app)?;
+        let (vm, root, contributions) = self.run(&self.0.app, false)?;
         for (slot, node) in contributions {
             slots.entry(slot).or_default().push(node);
         }
@@ -1102,6 +1304,7 @@ impl ScriptHost {
         })?;
         Ok(Loaded {
             _vms: vms,
+            broken,
             root,
             lowering: Rc::new(lower::Lowering {
                 slots,
@@ -1125,7 +1328,11 @@ impl ScriptHost {
         let host = Rc::downgrade(&self.0);
         let modules: Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>> = Rc::default();
         let root = dir.map(|d| d.canonicalize().unwrap_or(d));
-        let aliases = root.as_deref().map(read_aliases).unwrap_or_default();
+        let files = self.0.files;
+        let aliases = root
+            .as_deref()
+            .map(|root| read_aliases(root, files))
+            .unwrap_or_default();
         let require = lua.create_function(move |lua, name: String| {
             let Some(root) = &root else {
                 return Err(mlua::Error::runtime(
@@ -1162,7 +1369,7 @@ impl ScriptHost {
                     "modules come from the script's directory or below".into(),
                 ));
             }
-            if path.is_dir() {
+            if files.is_dir(&path) {
                 path = path.join("init.luau");
             } else if path.extension().is_none() {
                 path.set_extension("luau");
@@ -1172,7 +1379,8 @@ impl ScriptHost {
                 Some(None) => return Err(fail("a require cycle".into())),
                 None => {}
             }
-            let code = std::fs::read_to_string(&path)
+            let code = files
+                .read(&path)
                 .map_err(|e| fail(format!("{}: {e}", path.display())))?;
             if let Some(host) = host.upgrade() {
                 host.required.borrow_mut().push(path.clone());
@@ -1203,10 +1411,12 @@ impl ScriptHost {
         lua.globals().set("require", require)
     }
 
-    fn run(&self, script: &Script) -> Result<Ran, String> {
+    /// Run `script`: the application's, or a `plugin` (sandboxed further:
+    /// only what the host grants it).
+    fn run(&self, script: &Script, plugin: bool) -> Result<Ran, String> {
         let name = script.name();
         let fail = |error: mlua::Error| describe(&name, &error);
-        let code = script.code()?;
+        let code = script.code(self.0.files)?;
         let lua = Lua::new();
         let limits = self.0.limits;
         lua.set_memory_limit(limits.memory).map_err(fail)?;
@@ -1258,6 +1468,25 @@ impl ScriptHost {
         term::install(&lua, &ui, self.0.terms.clone()).map_err(fail)?;
         node::install_web(&lua, &ui, self.0.webs.clone()).map_err(fail)?;
         command::install(&lua, &ui, self.0.commands.clone()).map_err(fail)?;
+        let may = |capability: Capability| {
+            !plugin
+                || self
+                    .0
+                    .grants
+                    .get(&name)
+                    .is_some_and(|granted| granted.contains(&capability))
+        };
+        let fetch = may(Capability::Fetch).then(|| self.0.fetcher.clone());
+        calls::install(&lua, &ui, self.0.async_actions.clone(), fetch).map_err(fail)?;
+        io::install(
+            &lua,
+            &ui,
+            self.0.platform.clone(),
+            self.0.picked.clone(),
+            may(Capability::Clipboard),
+            may(Capability::Files),
+        )
+        .map_err(fail)?;
         theme::install(&lua, &ui, script.dir()).map_err(fail)?;
         ui.set_readonly(true);
         anime::api::install(&lua).map_err(fail)?;

@@ -475,13 +475,22 @@ impl WindowContext {
         let runner = zgui::compose::TaskRunner::new(move |future| {
             zgui::compose::TaskToken::new(tasks.spawn_scoped(future), |task| task.is_finished())
         });
+        // The clipboard and file dialogs, for what asks (zgui-script's
+        // `ui.clipboard`, `ui.open_files`).
+        let platform = zgui::platform::PlatformService(Rc::new(crate::platform::Desktop {
+            clipboard: self.windows.clipboard.clone(),
+            dialogs: self.dialogs.clone(),
+        }));
         self.ui.render(zgui::compose::provide(
             self.frames.clone(),
             zgui::compose::provide(
                 runner,
                 zgui::compose::provide(
                     self.natives.clone(),
-                    zgui::compose::provide(self.inspector.clone(), view),
+                    zgui::compose::provide(
+                        self.inspector.clone(),
+                        zgui::compose::provide(platform, view),
+                    ),
                 ),
             ),
         ))

@@ -1,24 +1,18 @@
 #!/bin/sh
-# Build the terminal example as zterm.app (release), with its interface
-# scripts inside, and install it: ./scripts/zterm-app.sh [destination]
+# Build the terminal example as zterm.app (release), its interface
+# compiled in (terminal-bundle), and install it: ./scripts/zterm-app.sh [destination]
 # (default /Applications). Needs Zig 0.16 for Ghostty (see
 # crates/zgui-ghostty-sys).
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 dest=${1:-/Applications}
 cd "$root"
-cargo build --release -p zgui-desktop --features ghostty --example terminal
+cargo build --release -p zgui-desktop --features ghostty,terminal-bundle --example terminal
 
 app="$dest/zterm.app"
 staging=$(mktemp -d)/zterm.app
-mkdir -p "$staging/Contents/MacOS" "$staging/Contents/Resources/terminal"
+mkdir -p "$staging/Contents/MacOS" "$staging/Contents/Resources"
 cp target/release/examples/terminal "$staging/Contents/MacOS/zterm"
-# The interface: app.luau, its modules (in subdirectories too), its themes
-# (.json) and .luaurc.
-(cd crates/zgui-desktop/examples/terminal && find . -name '*.luau' -o -name '*.json' -o -name .luaurc) | while read -r file; do
-  mkdir -p "$staging/Contents/Resources/terminal/$(dirname "$file")"
-  cp "crates/zgui-desktop/examples/terminal/$file" "$staging/Contents/Resources/terminal/$file"
-done
 if [ -f scripts/zterm.icns ]; then
   cp scripts/zterm.icns "$staging/Contents/Resources/zterm.icns"
 fi

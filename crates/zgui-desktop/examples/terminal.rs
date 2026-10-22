@@ -43,15 +43,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     session::ensure_daemon();
     zgui_desktop::resolve_terminal_processes(session::resolve);
-    // In an app bundle (scripts/zterm-app.sh), the interface it carries;
-    // else the source tree's, live.
-    let script = std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/terminal/app.luau")))
-        .filter(|bundled| bundled.exists())
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/terminal/app.luau")
-        });
+    // The interface: compiled in (`terminal-bundle`, as it ships), unless
+    // `ZGUI_SCRIPTS=source` asks for the source tree's; without it, the
+    // source tree's, reloaded as it is edited.
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/terminal/app.luau");
+    let from_source = !cfg!(feature = "terminal-bundle")
+        || std::env::var("ZGUI_SCRIPTS").as_deref() == Ok("source");
     let mut application = Application::new();
     // Geist, the interface's typeface (`font.sans` in terminal/glass.json).
     for bytes in [
@@ -74,7 +71,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         })
         .run(move |cx| {
-            let host = ScriptHost::new(&cx.ui.runtime, script);
+            let host = if from_source {
+                ScriptHost::new(&cx.ui.runtime, script.clone()).error_banner(true)
+            } else {
+                bundled(&cx.ui.runtime)
+            };
+            host.on_error(|message| eprintln!("zterm: {message}"));
             // The script's view of the window: its corner radius (panes
             // stay concentric with it) and where the app was started.
             let radius = host.shared("window_radius", 10.);
@@ -213,4 +215,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             cx.render(host.view());
         })
+}
+
+/// The interface compiled in (`terminal-bundle`).
+#[cfg(feature = "terminal-bundle")]
+fn bundled(runtime: &zgui::reactive::Runtime) -> ScriptHost {
+    static UI: zgui_script::Bundle = zgui_script::include_bundle!("terminal");
+    ScriptHost::bundled(runtime, &UI, "app.luau")
+}
+#[cfg(not(feature = "terminal-bundle"))]
+fn bundled(_: &zgui::reactive::Runtime) -> ScriptHost {
+    unreachable!("built without terminal-bundle")
 }

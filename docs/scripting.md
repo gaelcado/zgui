@@ -248,6 +248,49 @@ notes:insert(1, { id = "n1", title = "Groceries" })   -- saved within 250 ms
 
 A key is read from disk the first time a run asks for it, while the script loads; after that it lives in the host like `ui.state`, so a hot reload keeps the live value and reads nothing. Keys are the script's own and a required module's are its own, as with `ui.state`. Writes are batched: the first change starts a 250 ms timer, and then every value changed since becomes JSON once, on the main thread, and are written by a background thread to a temporary file renamed over the old one, so a crash leaves the old value or the new, never half a file. `ScriptHost::save()` writes what is pending and waits; dropping the host does too. A file that is not JSON starts the key from `initial`, with a warning.
 
+### Testing an app
+
+`zgui_script::testing::TestApp` mounts a host headless, with the task executor and frame clock a window has, and drives it as a person would. Set up actions, the fetcher and shared state on the host before returning it; `TestApp::wrapped` provides what a window does (a fake `zgui::platform::PlatformService` for the clipboard and file dialogs).
+
+```rust
+use zgui_script::{ScriptHost, testing::TestApp};
+
+#[test]
+fn signing_in_greets_the_user() {
+    let mut app = TestApp::new(|runtime| {
+        let host = ScriptHost::new(runtime, "ui/app.luau");
+        host.async_action("sign_in", |_| async { Ok("Ada".into()) });
+        host
+    });
+    app.type_text("email", "ada@example.com");
+    app.click("sign-in");
+    assert!(app.wait_until(|app| app.text("greeting") == "Hello, Ada"));
+    let calls = app.calls();
+    app.frames(30);
+    assert_eq!(app.calls(), calls, "nothing runs while nothing changes");
+}
+```
+
+It has `click`, `type_text`, `key` and `key_with`, `frame` and `frames`, `settle` (run what is ready), `wait_until` (for host calls, fetches and timers, up to five seconds), `find`, `bounds`, `text`, `texts`, `opacity`, `error` and `calls` (calls into scripts: a hot path holds at zero). zgui-script's own tests use it.
+
+### Shipping an app
+
+In development a host reads its scripts from the disk and reloads them as they change (`ScriptHost::new` and `watch`). What ships carries them compiled into the binary instead: a build script bundles the directory, and the host runs from the bundle.
+
+```rust
+// build.rs (zgui-script as a build-dependency)
+fn main() {
+    zgui_script::build::bundle("ui", "app").unwrap();
+}
+// the app
+static UI: zgui_script::Bundle = zgui_script::include_bundle!("app");
+let host = ScriptHost::bundled(&cx.ui.runtime, &UI, "app.luau");
+```
+
+`bundle` compiles every `.luau` file to Luau bytecode (a script that does not parse fails the build, with its file and line) and keeps `.luaurc`, theme `.json` files and images as they are; Rust sources and other dotfiles stay out. A bundled host reads nothing from the disk: `require`, `@self`, `.luaurc` aliases, `ui.theme.load`, `ui.image` and plugins all resolve inside the bundle, and a module it does not have is an error, not a read elsewhere. `watch` on a bundled host returns at once.
+
+Errors are for the developer: `error_banner(true)` shows each over the interface with where it happened, and is the default in debug builds. In release builds the banner is off: a failed load or a handler's error leaves the last good interface running, and `host.on_error(|message| ...)` hears it, for the app's log or crash reports. The terminal example builds either way: with `--features terminal-bundle` it runs from its bundle (`ZGUI_SCRIPTS=source` reads the source tree instead), without it from the source tree, reloading as it is edited; `scripts/zterm-app.sh` packages the bundled build.
+
 ### Warnings
 
 Some mistakes are not errors but are probably wrong; each is reported once per call site, with its file and line, to stderr and to `ScriptHost::warnings()`. Durations are milliseconds everywhere (`ui.tween`, `ui.loop`, `layout_duration`, `anime`): a fractional duration under 10 (`duration = 0.16`, likely meant as seconds) and a non-looping one over a minute both warn.

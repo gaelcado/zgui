@@ -8,6 +8,8 @@ license.workspace = true
 # Terminals (`zgui::terminal`) as Ghostty surfaces: builds Ghostty with Zig
 # 0.16 (see crates/zgui-ghostty-sys). macOS only for now.
 ghostty = ["dep:zgui-ghostty-sys", "zgui-ghostty-sys/link", "dep:libc"]
+# The terminal example's interface compiled into it (build.rs), as it ships.
+terminal-bundle = ["dep:zgui-script"]
 
 [dependencies]
 zgui = { path = "../zgui" }
@@ -59,6 +61,10 @@ required-features = ["ghostty"]
 [[example]]
 name = "terminal"
 required-features = ["ghostty"]
+
+[build-dependencies]
+# `terminal-bundle`: compiles the terminal example's scripts (build.rs).
+zgui-script = { path = "../zgui-script", optional = true }
 
 [dev-dependencies]
 accesskit_consumer = "0.38.0"

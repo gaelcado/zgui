@@ -20,6 +20,15 @@ ui.toggle(state: State<boolean>) -> Action
 ui.add(state: State<number>, by: number?) -> Action
 ui.action(name: string, arg: unknown?) -> Action
 ui.invoke(name: string, arg: unknown?) -> ()
+ui.call(name: string, arg: unknown?) -> Promise
+ui.task<A...>(f: (A...) -> (), A...) -> ()
+ui.fetch(url: string, opts: FetchOptions?) -> Promise
+ui.clipboard.read() -> string?
+ui.clipboard.write(text: string) -> boolean
+ui.open_files(opts: FilePickerOptions?) -> Promise
+ui.save_file(opts: FilePickerOptions?) -> Promise
+ui.read_file(file: File | string) -> Promise
+ui.write_file(file: File | string, text: string) -> Promise
 ```
 
 ## Making state
@@ -71,6 +80,41 @@ Handlers take a function or an action Rust runs without calling the script:
 | `ui.add(state, by)` | `state:add(by)` (`by` is 1 by default) |
 | `ui.action(name, arg)` | calls the host's `ScriptHost::action(name, …)` with `arg` (plain data) |
 | `ui.invoke(name, arg)` | the same, now, from any function; an error if the host has no such action |
+
+## Host calls with results
+
+`ui.call(name, arg)` calls a host action and returns a promise of its result. An async action (`ScriptHost::async_action(name, |arg| async { Ok(value) })`) runs as a future on the window's tasks, woken by what it waits for, so nothing polls while it waits; `Err(message)` rejects the promise with that message. A plain action (`ScriptHost::action`) settles at once with nil. A promise is read three ways:
+
+| | |
+| --- | --- |
+| `p:after(on_value, on_error)` | calls one of them once it settles (at once if it has), on the script's budget |
+| `p.done`, `p.value`, `p.error` | tracked fields: an interface reading them shows loading, the result and errors as they come, with no handler |
+| `p:await()` | inside `ui.task(function() ... end)` only: waits for it, returns its value or raises its error (the host's message as it wrote it, so `pcall` catches it) |
+
+```luau
+local user = ui.call("load_user", id)            -- the interface follows it
+ui.text { function() return if user.done then user.value.name else "Loading" end }
+
+ui.task(function()                               -- steps in order
+    local token = ui.call("sign_in"):await()
+    local ok, err = pcall(function() return ui.call("sync", token):await() end)
+    if not ok then status:set(err) end
+end)
+```
+
+A rejection that nothing handles (no `on_error`, no read of `error`, no `await`) is reported as a script error with the action's name, so a failure is never silent. A script reloaded since a call hears nothing of it. A call costs about a microsecond on top of the host's work (`ui.call`, settling and an `:after` callback; `tests/calls.rs`), and the same however many are in flight.
+
+### The network
+
+`ui.fetch(url, { method, headers, body })` makes an HTTP request through the host's transport, `ScriptHost::fetcher(|request| async { … })`: the app owns the HTTP stack, redirects, headers and credentials (a token minted per request), and zgui adds no HTTP dependency. The promise settles with `{ status, ok, headers, body, json }`: `ok` for a 2xx status, header names in lower case, `json` the decoded body when the response says it is JSON; a transport error rejects it. A table `body` is sent as JSON with its content type. Without a fetcher, `ui.fetch` is an error.
+
+`ui.image { src = "https://…" }` and `ui.svg { src = "https://…" }` load through the same fetcher: one request per URL however many nodes show it, decoded off the main thread, cached for the host's life; a node shows nothing until its source arrives, and only the nodes showing it redraw.
+
+### The clipboard and files
+
+A desktop window gives scripts its clipboard and file dialogs (`zgui::platform`). `ui.clipboard.read()` returns its text, `ui.clipboard.write(text)` replaces it. `ui.open_files({ title, directory, filters = { { "Images", { "png" } } }, multiple })` settles with the files the user picks (an empty list if they cancel) and `ui.save_file({ name })` with where they choose to save (or nil), each a `{ path, name }`. A script reads and writes only files the user picked in this host's dialogs, as a web page does: `ui.read_file(file)` settles with its text and `ui.write_file(file, text)` writes beside it and renames over it (never half a file), both off the main thread. Headless, without a window, they are errors.
+
+Plugins reach the network, the clipboard and files only if the host grants each: `ScriptHost::grant("plugin.luau", Capability::Fetch)` (or `Clipboard`, `Files`). A plugin that fails to load is left out and its error reported; the app and the other plugins load.
 
 ## Computeds, effects, batches
 

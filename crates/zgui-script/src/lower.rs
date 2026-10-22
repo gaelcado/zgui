@@ -33,11 +33,31 @@ pub(crate) struct Assets {
     /// Each file's path and modification time when it was read, so a
     /// watching host sees an edited image (see `changed`).
     files: std::cell::RefCell<HashMap<String, (std::path::PathBuf, Option<std::time::SystemTime>)>>,
+    /// Where they are read from: the disk, or the app's bundle.
+    source: std::cell::Cell<Option<crate::Files>>,
+    /// Remote sources (`https://…`) by URL: fetched once, whoever shows
+    /// them; what shows one follows its `ready`.
+    remote: std::cell::RefCell<HashMap<String, zgui::reactive::Signal<bool>>>,
+    /// The host's tasks and transport, which remote sources go through.
+    links: std::cell::RefCell<Option<(Rc<crate::timers::Timers>, crate::calls::SharedFetcher)>>,
 }
 impl Assets {
+    pub(crate) fn connect(
+        &self,
+        timers: Rc<crate::timers::Timers>,
+        fetcher: crate::calls::SharedFetcher,
+    ) {
+        *self.links.borrow_mut() = Some((timers, fetcher));
+    }
+    pub(crate) fn set_files(&self, files: crate::Files) {
+        self.source.set(Some(files));
+    }
     fn read(&self, src: &str, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let bytes = std::fs::read(path)?;
+        let bytes = match self.source.get() {
+            Some(files) => files.read(path)?,
+            None => std::fs::read(path)?,
+        };
         self.files
             .borrow_mut()
             .insert(src.to_owned(), (path.to_path_buf(), modified));
@@ -1314,9 +1334,103 @@ fn resolve_path(vm: &Vm, path: &str) -> std::path::PathBuf {
         _ => path.to_path_buf(),
     }
 }
-fn load_image(vm: &Vm, low: &Lowering, src: &str) -> Option<Arc<ImageData>> {
+fn is_remote(src: &str) -> bool {
+    src.starts_with("https://") || src.starts_with("http://")
+}
+/// What a remote source decodes to, on a worker thread.
+enum Decoded {
+    Image(Arc<ImageData>),
+    Svg(Arc<SvgData>),
+}
+/// Whether remote `src` is in the caches: the first ask fetches it (once,
+/// through the host's fetcher), decodes it off the main thread and caches
+/// it. Tracked: what asked shows it once it arrives.
+fn remote_ready(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> bool {
+    let existing = low.assets.remote.borrow().get(src).cloned();
+    if let Some(ready) = existing {
+        return ready.get();
+    }
+    let ready = low.runtime.signal(false);
+    low.assets
+        .remote
+        .borrow_mut()
+        .insert(src.to_owned(), ready.clone());
+    let links = low.assets.links.borrow().clone();
+    let fetch = links
+        .as_ref()
+        .and_then(|(_, fetcher)| fetcher.borrow().clone());
+    let (Some((timers, _)), Some(fetch)) = (links, fetch) else {
+        vm.report(mlua::Error::runtime(format!(
+            "{src}: remote sources need the host's fetcher (`ScriptHost::fetcher`)"
+        )));
+        return ready.get();
+    };
+    let future = fetch(crate::calls::Request {
+        url: src.to_owned(),
+        method: "GET".into(),
+        headers: Vec::new(),
+        body: None,
+    });
+    let (assets, vm, src, runtime) = (
+        low.assets.clone(),
+        Rc::downgrade(vm),
+        src.to_owned(),
+        low.runtime.clone(),
+    );
+    let arriving = ready.clone();
+    timers.spawn(async move {
+        let bytes = match future.await {
+            Ok(response) if (200..300).contains(&response.status) => Ok(response.body),
+            Ok(response) => Err(format!("HTTP {}", response.status)),
+            Err(error) => Err(error),
+        };
+        let decoded = match bytes {
+            Ok(bytes) => {
+                // Decoding a large image takes long enough to drop frames.
+                let (tell, mut heard) = zgui::task::latest::<Result<Decoded, String>>();
+                std::thread::spawn(move || {
+                    tell.send(if svg {
+                        SvgData::new(bytes)
+                            .map(|svg| Decoded::Svg(Arc::new(svg)))
+                            .map_err(|e| e.to_string())
+                    } else {
+                        zgui_gpu::assets::decode_image(&bytes)
+                            .map(Decoded::Image)
+                            .map_err(|e| e.to_string())
+                    });
+                });
+                heard
+                    .recv()
+                    .await
+                    .unwrap_or_else(|| Err("the decoder stopped".into()))
+            }
+            Err(error) => Err(error),
+        };
+        match decoded {
+            Ok(Decoded::Image(image)) => {
+                assets.images.borrow_mut().insert(src, image);
+            }
+            Ok(Decoded::Svg(svg)) => {
+                assets.svgs.borrow_mut().insert(src, svg);
+            }
+            Err(error) => {
+                if let Some(vm) = vm.upgrade() {
+                    vm.report(mlua::Error::runtime(format!("{src}: {error}")));
+                }
+                return;
+            }
+        }
+        runtime.batch(|| arriving.set(true));
+    });
+    ready.get()
+}
+fn load_image(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Option<Arc<ImageData>> {
     if let Some(image) = low.assets.images.borrow().get(src) {
         return Some(image.clone());
+    }
+    if is_remote(src) {
+        remote_ready(vm, low, src, false);
+        return None;
     }
     let path = resolve_path(vm, src);
     let decoded = low
@@ -1340,9 +1454,18 @@ fn load_image(vm: &Vm, low: &Lowering, src: &str) -> Option<Arc<ImageData>> {
         }
     }
 }
-fn load_svg(vm: &Vm, low: &Lowering, src: &str) -> Arc<SvgData> {
+fn load_svg(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Arc<SvgData> {
     if let Some(svg) = low.assets.svgs.borrow().get(src) {
         return svg.clone();
+    }
+    if is_remote(src) {
+        remote_ready(vm, low, src, true);
+        thread_local! {
+            static NOTHING: Arc<SvgData> = Arc::new(
+                SvgData::new(&b"<svg xmlns='http://www.w3.org/2000/svg'/>"[..]).expect("empty svg"),
+            );
+        }
+        return NOTHING.with(Clone::clone);
     }
     let bytes = match src.strip_prefix("code:") {
         Some(code) => Ok(code.as_bytes().to_vec()),

@@ -84,6 +84,8 @@ struct State {
     follow: Option<(String, String)>,
     appearance: Appearance,
     files: Vec<Watched>,
+    /// Where theme files come from, when not the disk (`set_reader`).
+    reader: Option<ThemeReader>,
 }
 impl State {
     /// Every token's expression under `name`: declarations, then the
@@ -541,6 +543,7 @@ impl Themes {
                 follow: None,
                 appearance: Appearance::Dark,
                 files: Vec::new(),
+                reader: None,
             }),
             current: runtime.signal(DARK.into()),
         });
@@ -705,7 +708,8 @@ impl Themes {
     /// theme's name (the file's stem if it has none).
     pub fn load(&self, path: impl AsRef<Path>) -> Result<String, ThemeError> {
         let path = path.as_ref();
-        let theme = read_file(path)?;
+        let reader = self.shared.state.borrow().reader.clone();
+        let theme = read_file(path, reader.as_deref())?;
         let name = theme.name.clone();
         let stamp = stamp(path);
         {
@@ -756,6 +760,11 @@ impl Themes {
             None => Ok(!changed.is_empty()),
         }
     }
+    /// Read theme files with `reader` instead of from the disk (an app's
+    /// files compiled into it); `None` reads the disk again.
+    pub fn set_reader(&self, reader: Option<ThemeReader>) {
+        self.shared.state.borrow_mut().reader = reader;
+    }
     /// The theme files loaded so far, watched for changes.
     pub fn files(&self) -> Vec<PathBuf> {
         self.shared
@@ -791,11 +800,17 @@ impl Themes {
 fn stamp(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
+/// Reads a theme file's text, for [`Themes::set_reader`].
+pub type ThemeReader = Rc<ReadText>;
+type ReadText = dyn Fn(&Path) -> std::io::Result<String>;
 /// A theme file: zgui's format, or a VS Code colour theme.
-fn read_file(path: &Path) -> Result<Theme, ThemeError> {
+fn read_file(path: &Path, reader: Option<&ReadText>) -> Result<Theme, ThemeError> {
+    let read = |path: &Path| match reader {
+        Some(read) => read(path),
+        None => std::fs::read_to_string(path),
+    };
     let fail = |e: ThemeError| ThemeError(format!("{}: {e}", path.display()));
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| ThemeError(format!("{}: {e}", path.display())))?;
+    let text = read(path).map_err(|e| ThemeError(format!("{}: {e}", path.display())))?;
     let root = super::json::parse(&text).map_err(|e| fail(ThemeError(e)))?;
     let stem = path
         .file_stem()
@@ -804,8 +819,8 @@ fn read_file(path: &Path) -> Result<Theme, ThemeError> {
     if super::vscode::is_vscode(&root) {
         super::vscode::from_vscode_value(&root, Some(&stem), &mut |include| {
             let included = path.parent().unwrap_or(Path::new(".")).join(include);
-            let text = std::fs::read_to_string(&included)
-                .map_err(|e| ThemeError(format!("{}: {e}", included.display())))?;
+            let text =
+                read(&included).map_err(|e| ThemeError(format!("{}: {e}", included.display())))?;
             super::json::parse(&text)
                 .map_err(|e| ThemeError(format!("{}: {e}", included.display())))
         })

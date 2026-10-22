@@ -12,7 +12,7 @@ use crate::{
 };
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     future::Future,
     pin::Pin,
@@ -68,6 +68,10 @@ impl TaskRunner {
 #[derive(Default)]
 struct TaskOwner {
     tasks: RefCell<Vec<TaskToken>>,
+    /// The length at which finished tasks are next dropped: twice what was
+    /// left last time, so spawning stays constant time however many run
+    /// (a scan per spawn made a burst of N spawns cost N²).
+    prune_at: Cell<usize>,
 }
 /// Cloneable event-handler capability. It never keeps its component alive.
 #[derive(Clone)]
@@ -80,14 +84,18 @@ impl Tasks {
         let Some(owner) = self.owner.upgrade() else {
             return;
         };
-        // Completion callbacks and guard destructors belong to the executor.
-        // They can spawn another task through this same capability; detach the
-        // current batch before invoking either, preserving reentrant additions.
-        let mut pending = std::mem::take(&mut *owner.tasks.borrow_mut());
-        pending.retain(|task| !task.0.finished());
-        // Reuse the existing task vector on the ordinary non-reentrant path.
-        let reentrant = owner.tasks.replace(pending);
-        owner.tasks.borrow_mut().extend(reentrant);
+        if owner.tasks.borrow().len() >= owner.prune_at.get() {
+            // Completion callbacks and guard destructors belong to the
+            // executor. They can spawn another task through this same
+            // capability; detach the current batch before invoking either,
+            // preserving reentrant additions.
+            let mut pending = std::mem::take(&mut *owner.tasks.borrow_mut());
+            pending.retain(|task| !task.0.finished());
+            owner.prune_at.set((pending.len() * 2).max(1));
+            // Reuse the existing task vector on the ordinary non-reentrant path.
+            let reentrant = owner.tasks.replace(pending);
+            owner.tasks.borrow_mut().extend(reentrant);
+        }
         let task = (self.runner.0)(Box::pin(future));
         owner.tasks.borrow_mut().push(task);
     }
