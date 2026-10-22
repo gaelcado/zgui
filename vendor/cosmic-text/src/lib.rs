@@ -91,6 +91,11 @@ extern crate alloc;
 #[cfg(not(any(feature = "std", feature = "no_std")))]
 compile_error!("Either the `std` or `no_std` feature must be enabled");
 
+
+/// zgui patch: the point size UI text is set at, for fonts with an optical
+/// size axis. Shaping and drawing instance such fonts here, clamped to the axis.
+pub const TEXT_OPTICAL_SIZE: f32 = 13.0;
+
 pub use self::attrs::*;
 mod attrs;
 

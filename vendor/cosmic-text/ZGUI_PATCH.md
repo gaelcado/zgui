@@ -2,7 +2,8 @@
 
 Vendored from crates.io `cosmic-text` 0.19.0 (MIT OR Apache-2.0, license files
 unchanged) and applied through `[patch.crates-io]` in the workspace
-`Cargo.toml`. Only `src/shape.rs` differs; search for "zgui patch". The
+`Cargo.toml`. `src/shape.rs` differs, and for optical sizes (below)
+`src/lib.rs`, `src/swash.rs` and `src/font/mod.rs`; search for "zgui patch". The
 crate's tests, benchmarks, fonts, samples and scripts are left out, and
 `check/` is new.
 
@@ -43,3 +44,14 @@ directions) both versions panic, as upstream documents. Reshaping a
 streaming transcript's last seven 105-byte lines takes 40.2 µs a tick instead
 of 48.7 µs (M5 Max), and zgui's headless lab stream lays out in 0.047 ms a
 tick instead of 0.061 ms.
+
+## Optical size
+
+A font with an `opsz` axis is instanced at `TEXT_OPTICAL_SIZE` (13 pt, clamped
+to the axis) for both shaping (`Font::new`) and drawing (`swash.rs`), next to
+the weight axis upstream already sets. Upstream leaves the axis at its
+default, which for macOS's SF is 28, the Display design: drawn at 11 to 13 px
+its shapes and spacing are visibly tighter than the Text design Core Text
+uses at those sizes. One size for every size keeps the font cache keyed as
+upstream's (by font and weight); text far larger than 20 px gets the Text
+design's slightly looser spacing.

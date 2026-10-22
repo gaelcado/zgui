@@ -138,9 +138,18 @@ impl Font {
         // `ShaperData`, and once to create the persistent `FontRef` tied to the
         // lifetime of the face data.
         let font_ref = FontRef::from_index((*data).as_ref(), info.index).ok()?;
-        let location = font_ref
+        // zgui patch: a font with an optical size axis (macOS's SF has one, from
+        // 17 to 96, defaulting to 28: its Display design) is shaped at the size
+        // UI text is set at, clamped to the axis, as Core Text would draw it.
+        let optical_size = font_ref
             .axes()
-            .location([(Tag::new(b"wght"), weight.0 as f32)]);
+            .get_by_tag(Tag::new(b"opsz"))
+            .map(|axis| crate::TEXT_OPTICAL_SIZE.clamp(axis.min_value(), axis.max_value()));
+        let location = font_ref.axes().location(
+            [(Tag::new(b"wght"), weight.0 as f32)]
+                .into_iter()
+                .chain(optical_size.map(|size| (Tag::new(b"opsz"), size))),
+        );
         let metrics = font_ref.metrics(Size::unscaled(), &location);
 
         let monospace_fallback = if cfg!(feature = "monospace_fallback") {

@@ -29,17 +29,27 @@ fn swash_image(
         .as_swash()
         .variations()
         .find_by_tag(swash::Tag::from_be_bytes(*b"wght"));
+    // zgui patch: drawn at the optical size it was shaped at (see `Font::new`).
+    let optical_size = font
+        .as_swash()
+        .variations()
+        .find_by_tag(swash::Tag::from_be_bytes(*b"opsz"))
+        .map(|axis| crate::TEXT_OPTICAL_SIZE.clamp(axis.min_value(), axis.max_value()));
 
     // Build the scaler
     let mut scaler = context
         .builder(font.as_swash())
         .size(f32::from_bits(cache_key.font_size_bits))
         .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
-    if let Some(variation) = variable_width {
-        scaler = scaler.normalized_coords(font.as_swash().variations().normalized_coords([(
-            swash::Tag::from_be_bytes(*b"wght"),
-            f32::from(cache_key.font_weight.0).clamp(variation.min_value(), variation.max_value()),
-        )]));
+    if variable_width.is_some() || optical_size.is_some() {
+        let weight = variable_width.map(|variation| {
+            (
+                swash::Tag::from_be_bytes(*b"wght"),
+                f32::from(cache_key.font_weight.0).clamp(variation.min_value(), variation.max_value()),
+            )
+        });
+        let optical = optical_size.map(|size| (swash::Tag::from_be_bytes(*b"opsz"), size));
+        scaler = scaler.normalized_coords(font.as_swash().variations().normalized_coords(weight.into_iter().chain(optical)));
     }
     let mut scaler = scaler.build();
 
@@ -95,17 +105,27 @@ fn swash_outline_commands(
         .as_swash()
         .variations()
         .find_by_tag(swash::Tag::from_be_bytes(*b"wght"));
+    // zgui patch: drawn at the optical size it was shaped at (see `Font::new`).
+    let optical_size = font
+        .as_swash()
+        .variations()
+        .find_by_tag(swash::Tag::from_be_bytes(*b"opsz"))
+        .map(|axis| crate::TEXT_OPTICAL_SIZE.clamp(axis.min_value(), axis.max_value()));
 
     // Build the scaler
     let mut scaler = context
         .builder(font.as_swash())
         .size(f32::from_bits(cache_key.font_size_bits))
         .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
-    if let Some(variation) = variable_width {
-        scaler = scaler.normalized_coords(font.as_swash().variations().normalized_coords([(
-            swash::Tag::from_be_bytes(*b"wght"),
-            f32::from(cache_key.font_weight.0).clamp(variation.min_value(), variation.max_value()),
-        )]));
+    if variable_width.is_some() || optical_size.is_some() {
+        let weight = variable_width.map(|variation| {
+            (
+                swash::Tag::from_be_bytes(*b"wght"),
+                f32::from(cache_key.font_weight.0).clamp(variation.min_value(), variation.max_value()),
+            )
+        });
+        let optical = optical_size.map(|size| (swash::Tag::from_be_bytes(*b"opsz"), size));
+        scaler = scaler.normalized_coords(font.as_swash().variations().normalized_coords(weight.into_iter().chain(optical)));
     }
     let mut scaler = scaler.build();
 
