@@ -6,25 +6,34 @@
 //! change (`zgui::native_view::post`), applied at the event loop's next safe
 //! point. The page's view is mounted by the window host (macos.rs).
 use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
+    msg_send,
     rc::{Retained, Weak},
     runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject},
     sel,
 };
 use objc2_app_kit::{NSColor, NSView};
 use objc2_foundation::{
-    NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSNumber,
-    NSObjectNSKeyValueObserverRegistration, NSRect, NSString, NSURL, NSURLRequest, NSUUID,
+    NSData, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
+    NSKeyValueObservingOptions, NSNumber, NSObjectNSKeyValueObserverRegistration, NSRect, NSString,
+    NSURL, NSURLRequest, NSUUID,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKUserContentController, WKUserScript,
-    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
-    WKWindowFeatures,
+    WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask,
+    WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
 };
-use std::{cell::RefCell, collections::HashMap, ffi::c_void, mem::ManuallyDrop, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    ffi::c_void,
+    mem::ManuallyDrop,
+    rc::Rc,
+};
 use zgui::web_view::{
-    ScriptResult, WeakWebView, WebProfile, WebView, WebViewBackend, WebViewCommand, WebViewEvent,
+    NavigationRequest, SchemeHandler, SchemeRequest, SchemeResponder, SchemeResponse, ScriptResult,
+    WeakWebView, WebProfile, WebView, WebViewBackend, WebViewCommand, WebViewEvent,
 };
 
 #[link(name = "WebKit", kind = "framework")]
@@ -65,8 +74,16 @@ define_class!(
     }
     unsafe impl WKNavigationDelegate for Observer {
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
-        fn policy(&self, _view: &WKWebView, _action: &WKNavigationAction, decision: &block2::DynBlock<dyn Fn(WKNavigationActionPolicy)>) {
-            decision.call((WKNavigationActionPolicy::Allow,));
+        fn policy(&self, _view: &WKWebView, action: &WKNavigationAction, decision: &block2::DynBlock<dyn Fn(WKNavigationActionPolicy)>) {
+            let request = unsafe {
+                NavigationRequest {
+                    url: action.request().URL().and_then(|url| url.absoluteString()).map(|url| url.to_string()).unwrap_or_default(),
+                    // No target frame: a new window, which the UI delegate handles.
+                    main_frame: action.targetFrame().is_none_or(|frame| frame.isMainFrame()),
+                }
+            };
+            let allowed = self.ivars().web.upgrade().is_none_or(|web| web.allows(&request));
+            decision.call((if allowed { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
         }
         #[unsafe(method(webView:didStartProvisionalNavigation:))]
         fn start(&self, view: &WKWebView, _navigation: Option<&WKNavigation>) {
@@ -134,6 +151,142 @@ define_class!(
     }
 );
 
+pub(crate) struct SchemeState {
+    web_view: u64,
+    serve: Rc<dyn Fn(SchemeRequest, SchemeResponder)>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZguiSchemeHandler"]
+    #[ivars = SchemeState]
+    pub(crate) struct SchemeServer;
+    unsafe impl NSObjectProtocol for SchemeServer {}
+    unsafe impl WKURLSchemeHandler for SchemeServer {
+        #[unsafe(method(webView:startURLSchemeTask:))]
+        fn start(&self, _view: &WKWebView, task: &ProtocolObject<dyn WKURLSchemeTask>) {
+            let request = unsafe { task.request() };
+            let request = {
+                SchemeRequest {
+                    web_view: self.ivars().web_view,
+                    url: request
+                        .URL()
+                        .and_then(|url| url.absoluteString())
+                        .map(|url| url.to_string())
+                        .unwrap_or_default(),
+                    method: request
+                        .HTTPMethod()
+                        .map(|method| method.to_string())
+                        .unwrap_or_else(|| "GET".into()),
+                    headers: request
+                        .allHTTPHeaderFields()
+                        .map(|fields| {
+                            let (keys, values) = fields.to_vecs();
+                            keys.iter()
+                                .zip(values.iter())
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    body: request
+                        .HTTPBody()
+                        .map(|body| body.to_vec())
+                        .unwrap_or_default(),
+                }
+            };
+            let id = SCHEME_TASKS.with(|tasks| {
+                let id = NEXT_SCHEME_TASK.with(|next| {
+                    next.set(next.get() + 1);
+                    next.get()
+                });
+                tasks.borrow_mut().insert(id, task.retain());
+                id
+            });
+            let responder = SchemeResponder::new(move |response| {
+                dispatch2::DispatchQueue::main()
+                    .exec_async(move || finish_scheme_task(id, response));
+            });
+            (self.ivars().serve)(request, responder);
+        }
+        #[unsafe(method(webView:stopURLSchemeTask:))]
+        fn stop(&self, _view: &WKWebView, task: &ProtocolObject<dyn WKURLSchemeTask>) {
+            // WebKit gave up on it (navigation, close): a late answer is dropped.
+            SCHEME_TASKS.with(|tasks| {
+                tasks
+                    .borrow_mut()
+                    .retain(|_, kept| !std::ptr::eq(&**kept, task))
+            });
+        }
+    }
+);
+
+thread_local! {
+    /// Requests being served, by id, until answered or stopped (main thread).
+    static SCHEME_TASKS: RefCell<HashMap<u64, Retained<ProtocolObject<dyn WKURLSchemeTask>>>> = RefCell::new(HashMap::new());
+    static NEXT_SCHEME_TASK: Cell<u64> = const { Cell::new(0) };
+}
+
+impl SchemeServer {
+    fn new(web: &WebView, handler: &SchemeHandler, mtm: MainThreadMarker) -> Retained<Self> {
+        let object = mtm.alloc().set_ivars(SchemeState {
+            web_view: web.id(),
+            serve: handler.serve.clone(),
+        });
+        unsafe { msg_send![super(object), init] }
+    }
+}
+
+/// Hands a response to WebKit (main thread), unless the request was stopped.
+fn finish_scheme_task(id: u64, response: Option<SchemeResponse>) {
+    let Some(task) = SCHEME_TASKS.with(|tasks| tasks.borrow_mut().remove(&id)) else {
+        return;
+    };
+    unsafe {
+        let Some(url) = task.request().URL() else {
+            return;
+        };
+        let Some(response) = response else {
+            // Unanswered: fail it as a network error for that URL would.
+            let domain = NSString::from_str("NSURLErrorDomain");
+            let key = NSString::from_str("NSErrorFailingURLKey");
+            let info = NSDictionary::<NSString, AnyObject>::from_slices(&[&*key], &[&**url]);
+            task.didFailWithError(&NSError::errorWithDomain_code_userInfo(
+                &domain,
+                -1,
+                Some(&info),
+            ));
+            return;
+        };
+        let keys: Vec<Retained<NSString>> = response
+            .headers
+            .iter()
+            .map(|(k, _)| NSString::from_str(k))
+            .collect();
+        let values: Vec<Retained<NSString>> = response
+            .headers
+            .iter()
+            .map(|(_, v)| NSString::from_str(v))
+            .collect();
+        let fields = NSDictionary::from_slices(
+            &keys.iter().map(|k| &**k).collect::<Vec<_>>(),
+            &values.iter().map(|v| &**v).collect::<Vec<_>>(),
+        );
+        let Some(http) = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
+            NSHTTPURLResponse::alloc(),
+            &url,
+            isize::from(response.status as i16),
+            Some(&NSString::from_str("HTTP/1.1")),
+            Some(&fields),
+        ) else {
+            return;
+        };
+        task.didReceiveResponse(&http);
+        task.didReceiveData(&NSData::with_bytes(&response.body));
+        task.didFinish();
+    }
+}
+
 impl Observer {
     fn new(web: &WebView, mtm: MainThreadMarker) -> Retained<Self> {
         let object = mtm.alloc().set_ivars(ObserverState {
@@ -195,7 +348,20 @@ impl Observer {
         if error.code() == -999 {
             return;
         }
-        let url = url_of(view);
+        // The URL that failed, not the page still showing (for a provisional
+        // navigation they differ).
+        let info = error.userInfo();
+        let failing = |key: &str| info.objectForKey(&NSString::from_str(key));
+        let url = failing("NSErrorFailingURLKey")
+            .and_then(|url| url.downcast::<NSURL>().ok())
+            .and_then(|url| url.absoluteString())
+            .map(|url| url.to_string())
+            .or_else(|| {
+                failing("NSErrorFailingURLStringKey")
+                    .and_then(|url| url.downcast::<NSString>().ok())
+                    .map(|url| url.to_string())
+            })
+            .unwrap_or_else(|| url_of(view));
         let message = error.localizedDescription().to_string();
         self.post(move |web| {
             web.update_state(|state| {
@@ -327,6 +493,8 @@ fn identifier(name: &str) -> [u8; 16] {
 pub(crate) struct MacWebView {
     view: Retained<WKWebView>,
     observer: Retained<Observer>,
+    /// The page's custom-scheme servers, kept for as long as it is.
+    _schemes: Vec<Retained<SchemeServer>>,
     messages: bool,
     transparent: bool,
     /// The last HTML shown and its base: WebKit reloads such a page by
@@ -339,9 +507,30 @@ impl MacWebView {
     pub fn new(web: &WebView, mtm: MainThreadMarker) -> Self {
         let options = web.options().clone();
         let observer = Observer::new(web, mtm);
+        let schemes: Vec<Retained<SchemeServer>> = options
+            .schemes
+            .iter()
+            .map(|handler| SchemeServer::new(web, handler, mtm))
+            .collect();
         let view = unsafe {
             let configuration = WKWebViewConfiguration::new(mtm);
             configuration.setWebsiteDataStore(&data_store(&options.profile, mtm));
+            for (handler, server) in options.schemes.iter().zip(&schemes) {
+                configuration.setURLSchemeHandler_forURLScheme(
+                    Some(ProtocolObject::from_ref(&**server)),
+                    &NSString::from_str(&handler.scheme),
+                );
+            }
+            let content = configuration.userContentController();
+            for script in &options.scripts {
+                let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                    mtm.alloc(),
+                    &NSString::from_str(&script.source),
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    script.main_frame_only,
+                );
+                content.addUserScript(&script);
+            }
             if options.messages {
                 let content = configuration.userContentController();
                 content.addScriptMessageHandler_name(
@@ -388,6 +577,7 @@ impl MacWebView {
         Self {
             view,
             observer,
+            _schemes: schemes,
             messages: options.messages,
             transparent: options.transparent,
             html: RefCell::new(None),

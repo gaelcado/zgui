@@ -303,6 +303,8 @@ fn web_options(table: &Table) -> mlua::Result<zgui::web_view::WebViewOptions> {
         new_windows: table
             .get::<Option<bool>>("new_windows")?
             .unwrap_or(defaults.new_windows),
+        // Scripts and schemes are set from Rust, not from Luau.
+        ..defaults
     })
 }
 

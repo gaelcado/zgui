@@ -52,6 +52,101 @@ pub enum WebProfile {
     Named(String),
 }
 
+/// A script run in each page before the page's own (see
+/// [`WebViewOptions::scripts`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserScript {
+    pub source: String,
+    /// Only in the top frame, not in iframes.
+    pub main_frame_only: bool,
+}
+
+/// A request for a URL in a scheme the app serves (see [`SchemeHandler`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SchemeRequest {
+    /// The [`WebView::id`] of the page asking.
+    pub web_view: u64,
+    pub url: String,
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SchemeResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Answers one [`SchemeRequest`], from any thread, once. Dropping it
+/// unanswered fails the request; an answer after the page gave up on the
+/// request (it navigated away, or closed) is dropped.
+pub struct SchemeResponder(Option<Box<dyn FnOnce(Option<SchemeResponse>) + Send>>);
+impl SchemeResponder {
+    /// `deliver` gets the response, or `None` if the responder was dropped.
+    pub fn new(deliver: impl FnOnce(Option<SchemeResponse>) + Send + 'static) -> Self {
+        Self(Some(Box::new(deliver)))
+    }
+    pub fn respond(mut self, response: SchemeResponse) {
+        if let Some(deliver) = self.0.take() {
+            deliver(Some(response));
+        }
+    }
+}
+impl Drop for SchemeResponder {
+    fn drop(&mut self) {
+        if let Some(deliver) = self.0.take() {
+            deliver(None);
+        }
+    }
+}
+impl std::fmt::Debug for SchemeResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SchemeResponder")
+    }
+}
+
+/// Serves a URL scheme of the app's own (`myapp://…`) to pages: `serve` is
+/// called on the UI thread for each request and may answer later, from
+/// another thread, through its responder.
+#[derive(Clone)]
+pub struct SchemeHandler {
+    pub scheme: String,
+    pub serve: Rc<dyn Fn(SchemeRequest, SchemeResponder)>,
+}
+impl SchemeHandler {
+    pub fn new(
+        scheme: impl Into<String>,
+        serve: impl Fn(SchemeRequest, SchemeResponder) + 'static,
+    ) -> Self {
+        Self {
+            scheme: scheme.into(),
+            serve: Rc::new(serve),
+        }
+    }
+}
+impl std::fmt::Debug for SchemeHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchemeHandler")
+            .field("scheme", &self.scheme)
+            .finish()
+    }
+}
+impl PartialEq for SchemeHandler {
+    fn eq(&self, other: &Self) -> bool {
+        self.scheme == other.scheme && Rc::ptr_eq(&self.serve, &other.serve)
+    }
+}
+
+/// A navigation about to start, for [`WebView::set_navigation_policy`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationRequest {
+    pub url: String,
+    /// The top frame navigates (not an iframe).
+    pub main_frame: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WebViewOptions {
     /// Draw no page background of the view's own: the node's (and what lies
@@ -68,6 +163,11 @@ pub struct WebViewOptions {
     /// Pages may open windows (`window.open`, target=_blank): each request
     /// arrives as [`WebViewEvent::NewWindowRequested`] and opens nothing.
     pub new_windows: bool,
+    /// Scripts injected at document start, in order, before the page's own.
+    pub scripts: Vec<UserScript>,
+    /// Schemes the app serves itself. On macOS each page served this way is
+    /// its own origin and, like `https`, a secure context.
+    pub schemes: Vec<SchemeHandler>,
 }
 impl Default for WebViewOptions {
     fn default() -> Self {
@@ -78,6 +178,8 @@ impl Default for WebViewOptions {
             user_agent: None,
             messages: true,
             new_windows: true,
+            scripts: Vec::new(),
+            schemes: Vec::new(),
         }
     }
 }
@@ -184,6 +286,7 @@ pub trait WebViewBackend {
 }
 
 type Listener = Rc<RefCell<dyn FnMut(&WebViewEvent)>>;
+type Policy = Rc<dyn Fn(&NavigationRequest) -> bool>;
 struct Inner {
     id: u64,
     options: WebViewOptions,
@@ -199,6 +302,7 @@ struct Inner {
     next_listener: Cell<u64>,
     /// The last `set_src`, so an unchanged reactive source navigates once.
     src: RefCell<Option<String>>,
+    policy: RefCell<Option<Policy>>,
 }
 /// A web page's controller; clones share it.
 #[derive(Clone)]
@@ -257,6 +361,7 @@ impl WebView {
             listeners: RefCell::new(Vec::new()),
             next_listener: Cell::new(0),
             src: RefCell::new(None),
+            policy: RefCell::new(None),
         }))
     }
     /// Unique per controller in this thread.
@@ -414,6 +519,18 @@ impl WebView {
     }
     pub fn set_zoom(&self, zoom: f64) {
         self.run(WebViewCommand::SetZoom(zoom));
+    }
+    /// Decide each navigation before it starts: `false` cancels it. Called on
+    /// the UI thread from inside the platform's callback, so it must answer
+    /// at once and not call back into this controller.
+    pub fn set_navigation_policy(&self, policy: impl Fn(&NavigationRequest) -> bool + 'static) {
+        *self.0.policy.borrow_mut() = Some(Rc::new(policy));
+    }
+    /// Whether the navigation policy lets `request` go ahead (the platform's
+    /// question; with no policy, everything may).
+    pub fn allows(&self, request: &NavigationRequest) -> bool {
+        let policy = self.0.policy.borrow().clone();
+        policy.is_none_or(|policy| policy(request))
     }
     /// Call `listener` with each platform event, until the subscription drops.
     pub fn on_event(&self, listener: impl FnMut(&WebViewEvent) + 'static) -> WebViewSubscription {
