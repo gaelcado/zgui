@@ -122,6 +122,11 @@ enum WindowCommand {
     Visible(bool),
     Focus,
     MaxFrameRate(Option<f64>),
+    ContextMenu {
+        entries: Vec<crate::AppMenuEntry>,
+        x: f64,
+        y: f64,
+    },
 }
 #[derive(Debug)]
 struct WindowState {
@@ -147,7 +152,9 @@ impl WindowState {
             WindowCommand::Fullscreen(value) => options.fullscreen = *value,
             WindowCommand::Decorations(value) => options.decorations = *value,
             WindowCommand::MinSize(value) => options.min_size = *value,
-            WindowCommand::Drag | WindowCommand::RefreshInfo => {}
+            WindowCommand::Drag
+            | WindowCommand::RefreshInfo
+            | WindowCommand::ContextMenu { .. } => {}
             WindowCommand::Title(title) => options.title.clone_from(title),
             WindowCommand::Size(width, height) => {
                 options.width = *width;
@@ -251,6 +258,13 @@ impl WindowHandle {
                 .proxy
                 .send_event(Event::WindowCommand(self.token, command));
         }
+    }
+    /// Show `entries` as a native pop-up menu at `(x, y)`, in points from the
+    /// top left of the window's content (macOS; elsewhere it does nothing).
+    /// A chosen item arrives through the window's menu action handler, and
+    /// the press that opened the menu ends when it closes.
+    pub fn show_context_menu(&self, entries: Vec<crate::AppMenuEntry>, x: f64, y: f64) {
+        self.command(WindowCommand::ContextMenu { entries, x, y });
     }
     /// Change the native and accessible window title, including while suspended.
     pub fn set_title(&self, title: impl Into<String>) {
@@ -1685,6 +1699,22 @@ impl Host {
             }
             WindowCommand::Fullscreen(value) => {
                 window.set_fullscreen(value.then_some(winit::window::Fullscreen::Borderless(None)))
+            }
+            WindowCommand::ContextMenu { entries, x, y } => {
+                #[cfg(target_os = "macos")]
+                {
+                    let shown = crate::app_menu::show_context_menu(window, &entries, x, y);
+                    self.context
+                        .window_info
+                        .last_request_error
+                        .set(shown.err().map(|e| e.0));
+                    // The menu's own tracking took the mouse-up: end the press that opened it.
+                    self.context
+                        .ui
+                        .dispatch(zgui::input::InputEvent::PointerCancel);
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = (entries, x, y);
             }
             WindowCommand::Decorations(value) => window.set_decorations(value),
             WindowCommand::MinSize(value) => {

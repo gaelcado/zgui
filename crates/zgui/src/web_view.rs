@@ -184,6 +184,13 @@ impl Default for WebViewOptions {
     }
 }
 
+/// A page in a web view's history.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HistoryItem {
+    pub url: String,
+    pub title: String,
+}
+
 /// A page's navigation state, kept by the controller.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WebViewState {
@@ -194,6 +201,10 @@ pub struct WebViewState {
     pub progress: f64,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+    /// The pages back and forward from this one, nearest first: what a
+    /// browser's held back and forward buttons list.
+    pub back_list: Vec<HistoryItem>,
+    pub forward_list: Vec<HistoryItem>,
     /// The page has keyboard focus.
     pub focused: bool,
     /// The last navigation's failure, until the next starts.
@@ -247,6 +258,8 @@ pub enum WebViewCommand {
     Stop,
     GoBack,
     GoForward,
+    /// Go `n` pages through history: negative back, positive forward.
+    GoToHistory(i32),
     Evaluate {
         script: String,
         reply: Option<Box<dyn FnOnce(ScriptResult)>>,
@@ -269,6 +282,7 @@ impl std::fmt::Debug for WebViewCommand {
             Self::Stop => f.write_str("Stop"),
             Self::GoBack => f.write_str("GoBack"),
             Self::GoForward => f.write_str("GoForward"),
+            Self::GoToHistory(n) => f.debug_tuple("GoToHistory").field(n).finish(),
             Self::Evaluate { script, .. } => {
                 f.debug_struct("Evaluate").field("script", script).finish()
             }
@@ -485,6 +499,17 @@ impl WebView {
     }
     pub fn go_forward(&self) {
         self.run(WebViewCommand::GoForward);
+    }
+    /// Go `n` pages through history (`-1` is back, `1` forward); see
+    /// [`WebViewState::back_list`].
+    pub fn go_to_history(&self, n: i32) {
+        self.run(WebViewCommand::GoToHistory(n));
+    }
+    pub fn back_list(&self) -> Vec<HistoryItem> {
+        self.0.state.with(|state| state.back_list.clone())
+    }
+    pub fn forward_list(&self) -> Vec<HistoryItem> {
+        self.0.state.with(|state| state.forward_list.clone())
     }
     /// Evaluate `script` in the page; `reply` gets its result as JSON (an
     /// `undefined` result is `null`), on the UI thread at a safe point.
