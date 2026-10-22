@@ -2,6 +2,7 @@
 local theme = require("../theme")
 local icons = require("../icons")
 local names = require("@lib/names")
+local kit = require("./kit")
 
 local M = {}
 
@@ -15,7 +16,7 @@ local EASE = "cubicBezier(.22, 1, .36, 1)"
 -- (a platform blur view for each move: the window flashed on every switch). One piece per `id`:
 -- when `shown()` moves to another row, the glass slides there rather than
 -- one fading out while another fades in.
-function M.glass(id: string, shown: () -> boolean, radius: number): Node
+function M.glass(id: string, shown: () -> boolean, radius: number | string): Node
 	return ui.presence(function()
 		return if shown() then "on" else nil
 	end, function(): Node
@@ -41,7 +42,7 @@ end
 -- A fainter glass that fades in under a row while the pointer is over it
 -- (under `glass`, so the active row shows only that). Returns the layer and
 -- what the row's `on_hover` calls.
-function M.hover_glass(radius: number): (Node, (inside: boolean) -> ())
+function M.hover_glass(radius: number | string): (Node, (inside: boolean) -> ())
 	local layer: Element? = nil
 	local node = ui.div {
 		absolute = true,
@@ -108,17 +109,9 @@ function M.glyph(desc: () -> names.Description, size: number, dim: () -> boolean
 end
 
 -- A square icon button in the titlebar.
-function M.tool(svg: string, on_click: () -> (), size: number?): Node
+function M.tool(svg: string, on_click: () -> ()): Node
 	return ui.button {
-		w = size or 28,
-		h = size or 28,
-		rounded = 8,
-		items = "center",
-		justify = "center",
-		shrink = 0,
-		bg = theme.clear,
-		hover = { bg = "#ffffff14" },
-		focus = { border = 0 },
+		variants = kit.button { tone = "ghost", size = "icon" },
 		on_click = on_click,
 		ui.svg { code = svg, w = 15, h = 15, tint = theme.secondary },
 	}
@@ -134,13 +127,13 @@ end
 -- Six dots, two rows of three: a grip.
 function M.dots(): Node
 	local function row()
-		local out: ContainerProps = { gap = 3, items = "center" }
+		local out: ContainerProps = { gap = "$terminal.grip.gap", items = "center" }
 		for _ = 1, 3 do
-			table.insert(out, ui.div { w = 3, h = 3, rounded = 2, bg = "#ffffff99" })
+			table.insert(out, ui.div { w = 3, h = 3, rounded = "$radius.full", bg = "$terminal.grip.dot" })
 		end
 		return ui.row(out)
 	end
-	return ui.column { gap = 3, items = "center", row(), row() }
+	return ui.column { gap = "$terminal.grip.gap", items = "center", row(), row() }
 end
 
 return M

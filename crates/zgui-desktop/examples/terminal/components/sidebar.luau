@@ -7,6 +7,7 @@ local state = require("../state")
 local agents = require("../agents")
 local icons = require("../icons")
 local controls = require("./controls")
+local kit = require("./kit")
 
 local M = {}
 
@@ -91,18 +92,10 @@ end
 -- (app.luau), so it never moves while the sidebar opens or closes.
 function M.Toggle(): Node
 	return ui.button {
+		variants = kit.button { tone = "ghost", size = "icon" },
 		absolute = true,
 		left = M.TOGGLE_LEFT,
 		top = (theme.titlebar - M.TOGGLE_SIZE) / 2,
-		w = M.TOGGLE_SIZE,
-		h = M.TOGGLE_SIZE,
-		rounded = 8,
-		items = "center",
-		justify = "center",
-		shrink = 0,
-		bg = theme.clear,
-		hover = { bg = "#ffffff14" },
-		focus = { border = 0 },
 		on_click = function()
 			sidebar:set(not sidebar:peek())
 		end,
@@ -121,16 +114,16 @@ local function mark(agent: () -> agents.Agent): Node
 			h = 10,
 			-- The arc's box counts from the ring's.
 			relative = true,
-			rounded = 5,
+			rounded = "$radius.full",
 			border = 1.5,
-			border_color = "#ffffff1f",
+			border_color = "$terminal.button.hover",
 			ui.div {
 				absolute = true,
 				left = -1.5,
 				top = -1.5,
 				w = 10,
 				h = 10,
-				rounded = 5,
+				rounded = "$radius.full",
 				border_over = true,
 				border = 1.5,
 				border_color = theme.accent,
@@ -142,7 +135,7 @@ local function mark(agent: () -> agents.Agent): Node
 		}
 	end
 	local function dot(color: string): Node
-		return ui.div { w = 6, h = 6, rounded = 3, bg = color }
+		return ui.div { w = 6, h = 6, rounded = "$radius.full", bg = color }
 	end
 	return ui.presence(function()
 		return agent().status
@@ -157,7 +150,7 @@ local function mark(agent: () -> agents.Agent): Node
 				elseif status == "blocked" then dot(theme.bell)
 				elseif status == "error" then dot(theme.danger)
 				elseif status == "done" then ui.svg { code = icons.check, w = 11, h = 11, tint = theme.secondary }
-				else ui.div { w = 6, h = 6, rounded = 3, border = 1.25, border_color = theme.tertiary },
+				else ui.div { w = 6, h = 6, rounded = "$radius.full", border = 1.25, border_color = theme.tertiary },
 		}
 	end, {
 		w = 10,
@@ -186,22 +179,12 @@ local function row(agent: () -> agents.Agent): Node
 			anime.animate(element, params)
 		end
 	end
-	local hover_layer, hover = controls.hover_glass(8)
+	local hover_layer, hover = controls.hover_glass("$terminal.button.radius")
 	return ui.button {
 		id = "agent:" .. agent().pane,
-		relative = true,
-		px = 10,
-		py = 7,
-		gap = 10,
-		rounded = 8,
-		items = "center",
-		shrink = 0,
 		-- The glass layers below are its hover and its selection: none of a
 		-- button's own fills (they are solid surfaces).
-		bg = theme.clear,
-		hover = { bg = theme.clear },
-		active = { bg = theme.clear },
-		focus = { border = 0 },
+		variants = kit.row { kind = "agent" },
 		on_mount = function(el: Element)
 			element = el
 		end,
@@ -219,7 +202,7 @@ local function row(agent: () -> agents.Agent): Node
 		-- The active agent's frosted glass (one piece, sliding between rows)
 		-- over a fainter glass while the pointer is on the row.
 		hover_layer,
-		controls.glass("agent-active", current, 8),
+		controls.glass("agent-active", current, "$terminal.button.radius"),
 		controls.glyph(
 			function()
 				local a = agent()
@@ -237,15 +220,15 @@ local function row(agent: () -> agents.Agent): Node
 			gap = 3,
 			items = "stretch",
 			ui.row {
-				gap = 8,
+				gap = "$space.2",
 				items = "center",
 				ui.text {
 					function()
 						local a = agent()
 						return if a.name ~= "" then a.name else a.where
 					end,
-					text_size = 13,
-					weight = 500,
+					text_size = "$terminal.type.lg",
+					weight = "$font.weight.medium",
 					color = theme.text,
 					truncate = true,
 					grow = 1,
@@ -256,7 +239,7 @@ local function row(agent: () -> agents.Agent): Node
 					function()
 						return ago(agent().since)
 					end,
-					text_size = 11,
+					text_size = "$terminal.type.xs",
 					color = theme.tertiary,
 					tabular = true,
 					shrink = 0,
@@ -274,7 +257,7 @@ local function row(agent: () -> agents.Agent): Node
 							else SAYS[a.status]
 						return if a.where ~= "" then `{says} · {a.where}` else says
 					end,
-					text_size = 11.5,
+					text_size = "$terminal.type.sm",
 					color = function()
 						return if agent().status == "blocked" then theme.bell else theme.tertiary
 					end,
@@ -316,18 +299,23 @@ function M.Sidebar(): Node
 					controls.drag_space { grow = 1 },
 				},
 				ui.row {
-					px = 16,
-					pt = 4,
+					px = "$space.4",
+					pt = "$space.1",
 					pb = 6,
 					gap = 6,
 					items = "center",
 					shrink = 0,
-					ui.text { "Agents", text_size = 12, weight = 600, color = theme.secondary },
+					ui.text {
+						"Agents",
+						text_size = "$terminal.type.md",
+						weight = "$font.weight.semibold",
+						color = theme.secondary,
+					},
 					ui.text {
 						function()
 							return tostring(#agents.list:get())
 						end,
-						text_size = 12,
+						text_size = "$terminal.type.md",
 						color = theme.tertiary,
 					},
 				},
@@ -338,9 +326,9 @@ function M.Sidebar(): Node
 					fade = { 14, 18 },
 					fade_overflow = true,
 					ui.column {
-						px = 8,
+						px = "$space.2",
 						pt = 2,
-						pb = 12,
+						pb = "$space.3",
 						gap = 1,
 						items = "stretch",
 						ui.show(
@@ -355,9 +343,9 @@ function M.Sidebar(): Node
 										then "Restart zterm's sessions to list agents"
 										else "No agents running"
 								end,
-								px = 8,
+								px = "$space.2",
 								pt = 6,
-								text_size = 12.5,
+								text_size = "$terminal.type.body",
 								color = theme.tertiary,
 								wrap = true,
 							}

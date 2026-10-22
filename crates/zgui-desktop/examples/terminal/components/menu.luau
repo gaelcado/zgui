@@ -23,7 +23,7 @@ function M.entry(label: string, run: () -> ()): Node
 		h = 24,
 		px = "$space.2",
 		rounded = "$radius.md",
-		text_size = "$terminal.text",
+		text_size = "$terminal.type.body",
 		color = theme.text,
 		bg = theme.clear,
 		hover = { bg = "$terminal.menu.hover" },

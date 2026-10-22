@@ -62,10 +62,10 @@ return ui.component(function(props: Props)
 		on_mount = function(el)
 			element = el
 		end,
-		rounded = 3,
+		rounded = "$radius.full",
 		cursor = if row then "col_resize" else "row_resize",
 		bg = theme.clear,
-		hover = { bg = "#ffffff12" },
+		hover = { bg = "$terminal.key.bg" },
 		on_press = function(e)
 			local d = find((frames.frames:peek()).dividers)
 			if d then

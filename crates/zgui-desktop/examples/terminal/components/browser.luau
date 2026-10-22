@@ -6,6 +6,7 @@ local state = require("../state")
 local sessions = require("../sessions")
 local actions = require("../actions")
 local menu = require("./menu")
+local kit = require("./kit")
 
 local focus = state.focus
 
@@ -52,15 +53,7 @@ end
 -- while it can't act.
 local function nav(svg: () -> string, on_click: () -> (), enabled: (() -> boolean)?): Node
 	return ui.button {
-		w = 26,
-		h = 26,
-		rounded = 7,
-		items = "center",
-		justify = "center",
-		shrink = 0,
-		bg = theme.clear,
-		hover = { bg = "#ffffff14" },
-		focus = { border = 0 },
+		variants = kit.button { tone = "ghost", size = "icon_sm" },
 		disabled = if enabled
 			then function()
 				return not enabled()
@@ -197,21 +190,21 @@ function M.Body(pane: string, tab: string, inner: () -> number, hooks: Hooks): N
 			h = 26,
 			ml = 5,
 			pl = 9,
-			pr = 4,
+			pr = "$space.1",
 			gap = 2,
 			items = "center",
-			rounded = 7,
+			rounded = "$terminal.button.radius_sm",
 			overflow = "hidden",
 			bg = function()
-				return if editing:get() then "#00000033" else "#ffffff0b"
+				return if editing:get() then "$terminal.field.editing" else "$terminal.field.bg"
 			end,
-			hover = { bg = "#ffffff12" },
+			hover = { bg = "$terminal.key.bg" },
 			border = function()
 				return if editing:get() then 2 else 1
 			end,
 			border_over = true,
 			border_color = function()
-				return if editing:get() then "#ffffff40" else "#ffffff0a"
+				return if editing:get() then "$terminal.field.ring" else "$terminal.field.line"
 			end,
 			ui.svg {
 				src = function()
@@ -236,7 +229,7 @@ function M.Body(pane: string, tab: string, inner: () -> number, hooks: Hooks): N
 					select_on_focus = true,
 					w_full = true,
 					h = 24,
-					text_size = 12.5,
+					text_size = "$terminal.type.body",
 					color = function()
 						return if editing:get() then theme.text else theme.secondary
 					end,
@@ -287,7 +280,7 @@ function M.Body(pane: string, tab: string, inner: () -> number, hooks: Hooks): N
 			left = 0,
 			top = 0,
 			h = 1,
-			bg = "#ffffff8c",
+			bg = "$terminal.progress",
 			w = function()
 				return string.format("%d%%", math.floor(web.progress * 100))
 			end,
@@ -333,7 +326,7 @@ function M.Body(pane: string, tab: string, inner: () -> number, hooks: Hooks): N
 				-- (A ref has no `focus`: its element does.)
 				on_click = focus_address,
 				ui.svg { code = icons.browser, w = 28, h = 28, tint = theme.quaternary },
-				ui.text { "Search or enter an address above", text_size = 12.5, color = theme.tertiary },
+				ui.text { "Search or enter an address above", text_size = "$terminal.type.body", color = theme.tertiary },
 			},
 		},
 	}

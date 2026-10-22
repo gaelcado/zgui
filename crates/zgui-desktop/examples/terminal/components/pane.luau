@@ -187,7 +187,7 @@ return ui.component(function(props: Props)
 		border = 1,
 		border_color = function()
 			if moving() then
-				return "#ffffff59"
+				return "$terminal.moving"
 			end
 			return if several() and focused() then theme.ring else theme.line
 		end,
@@ -228,15 +228,15 @@ return ui.component(function(props: Props)
 			ui.column {
 				w = 36,
 				h = 22,
-				rounded = 7,
+				rounded = "$terminal.grip.radius",
 				items = "center",
 				justify = "center",
 				-- Frosted, as the window: the terminal shows through, blurred.
-				bg = "#5a5c6440",
+				bg = "$terminal.grip.bg",
 				backdrop_blur = 14,
 				border = 1,
-				border_color = "#ffffff1a",
-				shadow = { y = 2, blur = 8, color = "#00000033" },
+				border_color = "$terminal.grip.line",
+				shadow = "$terminal.grip.shadow",
 				cursor = "grab",
 				opacity = ui.tween(grip, { duration = 160 }),
 				-- A click (no drag): on a browser, it was meant for the

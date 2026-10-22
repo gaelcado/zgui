@@ -35,7 +35,19 @@ cat > "$staging/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --deep --sign - "$staging" >/dev/null 2>&1 || true
+# Signed with a stable identity, macOS keeps what the user allowed it (its
+# shells reading ~/Documents, say) across rebuilds; an ad-hoc signature
+# changes every build, so each install would be a new app to it and asking
+# again, or refusing. ZTERM_SIGN_IDENTITY picks one; else the first valid
+# Apple Development identity, else ad-hoc.
+identity=${ZTERM_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null |
+  grep '"Apple Development' | grep -v CSSMERR | head -1 | awk '{print $2}')}
+if [ -n "$identity" ] && codesign --force --deep --sign "$identity" "$staging" >/dev/null 2>&1; then
+  echo "signed with $identity"
+else
+  codesign --force --deep --sign - "$staging" >/dev/null 2>&1 || true
+  echo "signed ad hoc: macOS asks again for its permissions after each install"
+fi
 rm -rf "$app"
 mv "$staging" "$app"
 echo "installed $app"

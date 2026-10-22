@@ -9,6 +9,7 @@ local state = require("../state")
 local sessions = require("../sessions")
 local actions = require("../actions")
 local controls = require("./controls")
+local kit = require("./kit")
 local layout = require("@lib/layout")
 
 local open, query, row = state.palette, state.palette_query, state.palette_row
@@ -194,16 +195,8 @@ end
 -- A key in a hint: a small raised chip.
 local function key(label: string): Node
 	return ui.row {
-		h = 18,
-		min_w = 18,
-		px = 5,
-		items = "center",
-		justify = "center",
-		rounded = 5,
-		bg = "#ffffff12",
-		border = 1,
-		border_color = "#ffffff0d",
-		ui.text { label, text_size = 10.5, weight = 500, color = theme.secondary },
+		variants = kit.chip { kind = "key" },
+		ui.text { label, text_size = "$terminal.type.xxs", weight = "$font.weight.medium", color = theme.secondary },
 	}
 end
 
@@ -211,8 +204,8 @@ end
 local function highlighted(
 	text: string,
 	typed: string,
-	size: number,
-	weight: number,
+	size: string,
+	weight: string,
 	base: string,
 	bright: string
 ): Node
@@ -228,7 +221,8 @@ local function highlighted(
 		color = base,
 		truncate = true,
 		ui.span { text:sub(1, at - 1) },
-		ui.span { text:sub(at, stop - 1), color = bright, weight = math.max(weight, 600) },
+		-- (Spans take numbers, not tokens.)
+		ui.span { text:sub(at, stop - 1), color = bright, weight = 600 },
 		ui.span { text:sub(stop) },
 	}
 end
@@ -239,13 +233,7 @@ local function entry(item: Item, index: number, typed: string): Node
 	end
 	return ui.row {
 		id = "open:" .. item.kind,
-		relative = true,
-		h = 46,
-		px = 8,
-		gap = 12,
-		items = "center",
-		rounded = 9,
-		cursor = "pointer",
+		variants = kit.row { kind = "option" },
 		on_hover = function(inside)
 			if inside and row:peek() ~= index then
 				row:set(index)
@@ -255,31 +243,39 @@ local function entry(item: Item, index: number, typed: string): Node
 			M.choose(item)
 		end,
 		-- The highlight: one piece that slides to the chosen row.
-		controls.glass("palette-choice", chosen, 9),
+		controls.glass("palette-choice", chosen, "$terminal.row.option_radius"),
 		ui.row {
-			w = 30,
-			h = 30,
-			shrink = 0,
-			rounded = 8,
-			items = "center",
-			justify = "center",
-			bg = item.tint .. "1f",
-			border = 1,
-			border_color = item.tint .. "29",
-			ui.svg { code = icons[item.icon], w = 16, h = 16, tint = item.tint },
+			variants = kit.tile { size = "md" },
+			bg = kit.tint(item.tint, "1f"),
+			border_color = kit.tint(item.tint, "29"),
+			ui.svg { code = icons[item.icon], w = 16, h = 16, tint = kit.tint(item.tint, "") },
 		},
 		ui.column {
 			grow = 1,
 			shrink = 1,
 			min_w = 0,
 			gap = 2,
-			highlighted(item.title, typed, 13.5, 500, theme.text, "#ffffff"),
-			highlighted(item.detail, typed, 11.5, 400, theme.tertiary, theme.secondary),
+			highlighted(
+				item.title,
+				typed,
+				"$terminal.type.option",
+				"$font.weight.medium",
+				theme.text,
+				"$terminal.bright"
+			),
+			highlighted(
+				item.detail,
+				typed,
+				"$terminal.type.sm",
+				"$font.weight.regular",
+				theme.tertiary,
+				theme.secondary
+			),
 		},
 		-- Its own shortcut at rest; Return, where the choice is.
 		ui.show(function()
 			return item.key ~= nil and not chosen()
-		end, ui.text { item.key or "", shrink = 0, text_size = 11.5, color = theme.quaternary }),
+		end, ui.text { item.key or "", shrink = 0, text_size = "$terminal.type.sm", color = theme.quaternary }),
 		ui.show(chosen, key("↵")),
 	}
 end
@@ -288,21 +284,21 @@ local function section(title: string): Node
 	return ui.text {
 		title,
 		pt = 10,
-		pb = 4,
+		pb = "$space.1",
 		px = 10,
-		text_size = 11,
-		weight = 600,
+		text_size = "$terminal.type.xs",
+		weight = "$font.weight.semibold",
 		letter_spacing = 0.3,
 		color = theme.quaternary,
 	}
 end
 
 local function hint(keys: { string }, what: string): Node
-	local out: ContainerProps = { gap = 4, items = "center" }
+	local out: ContainerProps = { gap = "$space.1", items = "center" }
 	for _, k in keys do
 		table.insert(out, key(k))
 	end
-	table.insert(out, ui.text { what, ml = 2, text_size = 11.5, color = theme.tertiary })
+	table.insert(out, ui.text { what, ml = 2, text_size = "$terminal.type.sm", color = theme.tertiary })
 	return ui.row(out)
 end
 
@@ -311,25 +307,13 @@ function M.Palette(): Node
 		return if open:get() then "open" else nil
 	end, function(): Node
 		return ui.div {
-			w_full = true,
-			h_full = true,
-			bg = "#0000002e",
-			items = "center",
-			pt = 56,
-			pb = 24,
+			variants = kit.scrim { kind = "palette" },
 			on_click = M.close,
 			ui.column {
+				variants = kit.sheet { kind = "palette" },
 				w = 560,
 				-- A short window: the list gives way and scrolls.
 				max_h = "100%",
-				items = "stretch",
-				rounded = 16,
-				overflow = "hidden",
-				bg = "#1b1c20eb",
-				backdrop_blur = 40,
-				border = 1,
-				border_color = "#ffffff1c",
-				shadow = { y = 24, blur = 64, color = "#00000099" },
 				-- Clicks on it stay on it.
 				on_click = function() end,
 				on_mount = function(el: Element)
@@ -343,8 +327,8 @@ function M.Palette(): Node
 				end,
 				ui.row {
 					h = 54,
-					px = 18,
-					gap = 12,
+					px = "$terminal.sheet.pad",
+					gap = "$space.3",
 					items = "center",
 					ui.svg { code = icons.search, w = 17, h = 17, shrink = 0, tint = theme.tertiary },
 					ui.input {
@@ -356,7 +340,7 @@ function M.Palette(): Node
 						grow = 1,
 						h = 26,
 						px = 0,
-						text_size = 15,
+						text_size = "$terminal.type.xxl",
 						color = theme.text,
 						bg = theme.clear,
 						focus = { border = 0 },
@@ -367,10 +351,10 @@ function M.Palette(): Node
 					},
 					key("esc"),
 				},
-				ui.div { h = 1, bg = "#ffffff12" },
+				ui.div { h = 1, bg = "$terminal.key.bg" },
 				ui.column {
-					px = 8,
-					pb = 8,
+					px = "$space.2",
+					pb = "$space.2",
 					items = "stretch",
 					max_h = 380,
 					shrink = 1,
@@ -388,25 +372,25 @@ function M.Palette(): Node
 							return #items:get() > 0
 						end,
 						py = 28,
-						gap = 8,
+						gap = "$space.2",
 						items = "center",
 						ui.svg { code = icons.search, w = 22, h = 22, tint = theme.quaternary },
 						ui.text {
 							function()
 								return `Nothing matches “{query:get()}”`
 							end,
-							text_size = 12.5,
+							text_size = "$terminal.type.body",
 							color = theme.tertiary,
 						},
 					},
 				},
-				ui.div { h = 1, bg = "#ffffff0f" },
+				ui.div { h = 1, bg = theme.wash },
 				ui.row {
 					h = 36,
-					px = 16,
-					gap = 18,
+					px = "$space.4",
+					gap = "$terminal.sheet.pad",
 					items = "center",
-					bg = "#ffffff05",
+					bg = "$terminal.footer",
 					hint({ "↑", "↓" }, "Choose"),
 					hint({ "↵" }, "Open beside"),
 					hint({ "⇧", "↵" }, "New tab"),

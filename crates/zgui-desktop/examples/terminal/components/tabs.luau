@@ -8,6 +8,7 @@ local actions = require("../actions")
 local sidebar = require("./sidebar")
 local controls = require("./controls")
 local menu = require("./menu")
+local kit = require("./kit")
 local layout = require("@lib/layout")
 
 local tabs, active, focus = state.tabs, state.active, state.focus
@@ -47,41 +48,25 @@ local tab_style = ui.variants {
 	defaults = { kind = "tab" },
 }
 
--- A tile under a tab's icon, dimmer while the tab is not active.
-local tile = ui.variants {
-	base = {
-		h = 20,
-		min_w = 20,
-		shrink = 0,
-		items = "center",
-		justify = "center",
-		rounded = "$terminal.tab.tile_radius",
-		border = 1,
-		border_color = "$terminal.tile_line",
-	},
-	variants = { dim = { [true] = { bg = "$terminal.tile_dim" }, [false] = { bg = "$terminal.tile_bg" } } },
-	defaults = { dim = false },
-}
-
 -- A pane's icon in a tab: on a little tile of its own, tinted for agents.
 local function badge(pane: string, dim: () -> boolean): Node
 	local desc = function()
 		return sessions.describe(pane)
 	end
 	return ui.row {
-		variants = tile { dim = dim },
+		variants = kit.tile { dim = dim },
 		w = 20,
 		-- An agent's tile takes its own colour, from its session.
 		bg = function()
 			local tint = desc().tint
 			if tint then
-				return ui.raw(tint .. (if dim() then "1f" else "2e"), "an agent's own colour")
+				return kit.tint(tint, if dim() then "1f" else "2e")
 			end
 			return if dim() then "$terminal.tile_dim" else "$terminal.tile_bg"
 		end,
 		border_color = function()
 			local tint = desc().tint
-			return if tint then ui.raw(tint .. "33", "an agent's own colour") else "$terminal.tile_line"
+			return if tint then kit.tint(tint, "33") else "$terminal.tile_line"
 		end,
 		controls.glyph(desc, 12, dim),
 	}
@@ -90,7 +75,7 @@ end
 -- More panes than fit: "+3" on a tile like the icons'.
 local function more_badge(count: number, dim: () -> boolean): Node
 	return ui.row {
-		variants = tile { dim = dim },
+		variants = kit.tile { dim = dim },
 		px = "$terminal.tab.tile_pad",
 		ui.text {
 			`+{count}`,
@@ -167,7 +152,7 @@ function M.chip(pane: string?, tab: string?): Node
 			end,
 			shrink = 1,
 			min_w = 0,
-			text_size = "$terminal.text",
+			text_size = "$terminal.type.body",
 			truncate = true,
 			color = theme.text,
 		},
@@ -184,7 +169,7 @@ local function tab_button(id: string): Node
 	local function is_active()
 		return active:get() == id
 	end
-	local hover_layer, hover = controls.hover_glass(8)
+	local hover_layer, hover = controls.hover_glass("$terminal.tab.radius")
 	-- Lifted out of the strip, it folds away (still mounted: unmounting the
 	-- dragged tab would end the drag), and unfolds where it lands.
 	local element: Element? = nil
@@ -331,7 +316,7 @@ local function tab_button(id: string): Node
 		-- The active tab's frosted glass (one piece, sliding between tabs)
 		-- over a fainter glass while the pointer is on the tab.
 		hover_layer,
-		controls.glass("tab-active", is_active, 8),
+		controls.glass("tab-active", is_active, "$terminal.tab.radius"),
 		ui.row {
 			gap = "$terminal.tab.tile_gap",
 			shrink = 0,
@@ -346,7 +331,7 @@ local function tab_button(id: string): Node
 			end,
 			shrink = 1,
 			min_w = 0,
-			text_size = "$terminal.text",
+			text_size = "$terminal.type.body",
 			truncate = true,
 			color = function()
 				return if is_active() then theme.text else theme.secondary
@@ -407,7 +392,7 @@ local function slot_tab(pane: string): Node
 			end,
 			shrink = 1,
 			min_w = 0,
-			text_size = "$terminal.text",
+			text_size = "$terminal.type.body",
 			truncate = true,
 			color = theme.secondary,
 		},

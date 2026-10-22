@@ -4,6 +4,7 @@ local theme = require("../theme")
 local state = require("../state")
 local sessions = require("../sessions")
 local actions = require("../actions")
+local kit = require("./kit")
 
 local confirm = state.confirm
 
@@ -60,52 +61,27 @@ function M.Sheet(): Node
 		end
 		return "Close this tab?", "Processes running in its panes will be ended."
 	end
-	local function button(label: string, primary: boolean, on_click: () -> ()): Node
-		return ui.button {
-			label,
-			h = 30,
-			px = 14,
-			rounded = 8,
-			text_size = 13,
-			color = if primary then "#ffffff" else theme.text,
-			bg = if primary then "#e5534bd9" else theme.wash,
-			hover = { bg = if primary then "#f0645c" else "#ffffff1f" },
-			focus = { border = 0 },
-			on_click = on_click,
-		}
-	end
 	return ui.div {
+		variants = kit.scrim,
 		hidden = function()
 			return confirm:get() == ""
 		end,
 		absolute = true,
 		left = 0,
 		top = 0,
-		w_full = true,
-		h_full = true,
-		bg = "#0000004d",
-		items = "center",
-		justify = "center",
 		on_click = function()
 			M.decide(false)
 		end,
 		ui.column {
+			variants = kit.sheet,
 			w = 340,
-			p = 18,
-			gap = 6,
-			rounded = 14,
-			bg = "#1d1e22d9",
-			backdrop_blur = 28,
-			border = 1,
-			border_color = "#ffffff1f",
-			shadow = { y = 18, blur = 48, color = "#00000080" },
 			-- Clicks on the sheet stay on it.
 			on_click = function() end,
 			ui.text {
 				function()
 					return (what())
 				end,
-				text_size = 14,
+				text_size = "$terminal.type.xl",
 				bold = true,
 				color = theme.text,
 			},
@@ -114,19 +90,27 @@ function M.Sheet(): Node
 					local _, body = what()
 					return body
 				end,
-				text_size = 12.5,
+				text_size = "$terminal.type.body",
 				color = theme.secondary,
 			},
 			ui.row {
-				mt = 12,
-				gap = 8,
+				mt = "$space.3",
+				gap = "$space.2",
 				justify = "end",
-				button("Cancel", false, function()
-					M.decide(false)
-				end),
-				button("Close", true, function()
-					M.decide(true)
-				end),
+				ui.button {
+					"Cancel",
+					variants = kit.button,
+					on_click = function()
+						M.decide(false)
+					end,
+				},
+				ui.button {
+					"Close",
+					variants = kit.button { tone = "danger" },
+					on_click = function()
+						M.decide(true)
+					end,
+				},
 			},
 		},
 	}

@@ -9,25 +9,17 @@ local icons = require("../icons")
 local state = require("../state")
 local sessions = require("../sessions")
 local consent = require("./consent")
+local kit = require("./kit")
 
 local M = {}
 
 -- A quiet button with an icon (the page's own actions).
 local function action(svg: string, label: string, on_click: () -> ()): Node
 	return ui.button {
-		h = 28,
-		px = 10,
-		gap = 6,
-		rounded = 8,
-		items = "center",
-		bg = theme.wash,
-		border = 1,
-		border_color = "#ffffff0d",
-		hover = { bg = "#ffffff1f" },
-		focus = { border = 0 },
+		variants = kit.button { tone = "outline", size = "sm" },
 		on_click = on_click,
 		ui.svg { code = svg, w = 13, h = 13, tint = theme.secondary },
-		ui.text { label, text_size = 12, weight = 500, color = theme.text },
+		ui.text { label },
 	}
 end
 
@@ -49,17 +41,17 @@ local PERMISSION_ICONS: { [string]: icons.Name } = {
 
 -- A permission or a panel: a small rounded label.
 local function chip(svg: string?, label: string, tint: string?): Node
+	local tinted = tint ~= nil
+	local own = tint or ""
 	return ui.row {
-		h = 22,
-		px = 8,
-		gap = 5,
-		items = "center",
-		rounded = 6,
-		bg = if tint then tint .. "1a" else "#ffffff0a",
-		border = 1,
-		border_color = if tint then tint .. "26" else "#ffffff0d",
-		ui.show(svg ~= nil, ui.svg { code = svg or "", w = 11, h = 11, tint = tint or theme.tertiary }),
-		ui.text { label, text_size = 11.5, color = if tint then tint else theme.secondary },
+		variants = kit.chip,
+		bg = if tinted then kit.tint(own, "1a") else nil,
+		border_color = if tinted then kit.tint(own, "26") else nil,
+		ui.show(
+			svg ~= nil,
+			ui.svg { code = svg or "", w = 11, h = 11, tint = if tinted then kit.tint(own, "") else theme.tertiary }
+		),
+		ui.text { label, text_size = "$terminal.type.sm", color = if tinted then kit.tint(own, "") else theme.secondary },
 	}
 end
 
@@ -67,25 +59,10 @@ end
 -- and loads or drops the plugin).
 local function switch(on: boolean, on_click: () -> ()): Node
 	return ui.button {
-		w = 34,
-		h = 20,
-		px = 2,
-		rounded = 10,
-		shrink = 0,
-		items = "center",
-		justify = if on then "end" else "start",
-		bg = if on then "#3d7cf0" else "#ffffff1f",
-		hover = { bg = if on then "#5a90f5" else "#ffffff29" },
-		focus = { border = 0 },
+		variants = kit.switch { on = on },
 		label = if on then "Turn off" else "Turn on",
 		on_click = on_click,
-		ui.div {
-			w = 16,
-			h = 16,
-			rounded = 8,
-			bg = "#ffffff",
-			shadow = { y = 1, blur = 3, color = "#00000059" },
-		},
+		ui.div { variants = kit.knob },
 	}
 end
 
@@ -115,70 +92,57 @@ local function card(plugin: state.PluginInfo): Node
 	elseif plugin.status == "pending" then
 		control = ui.button {
 			"Review",
-			h = 26,
-			px = 12,
-			rounded = 7,
-			text_size = 12,
-			weight = 500,
-			color = "#ffffff",
-			bg = "#3d7cf0e6",
-			hover = { bg = "#5a90f5" },
-			focus = { border = 0 },
+			variants = kit.button { tone = "primary", size = "xs" },
 			on_click = function()
 				state.consent_later:set_key(plugin.id, nil)
 			end,
 		}
 	end
 	return ui.row {
-		p = 14,
-		gap = 14,
-		items = "start",
-		rounded = 12,
-		bg = "#ffffff08",
-		border = 1,
-		border_color = "#ffffff0f",
+		variants = kit.card,
 		ui.row {
-			w = 36,
-			h = 36,
-			shrink = 0,
-			rounded = 10,
-			items = "center",
-			justify = "center",
-			bg = status.tint .. "1f",
-			border = 1,
-			border_color = status.tint .. "33",
-			ui.svg { code = icons.plugin, w = 18, h = 18, tint = status.tint },
+			variants = kit.tile { size = "lg" },
+			bg = kit.tint(status.tint, "1f"),
+			border_color = kit.tint(status.tint, "33"),
+			ui.svg { code = icons.plugin, w = 18, h = 18, tint = kit.tint(status.tint, "") },
 		},
 		ui.column {
 			grow = 1,
 			shrink = 1,
 			min_w = 0,
-			gap = 8,
+			gap = "$space.2",
 			ui.column {
 				gap = 3,
 				ui.row {
-					gap = 8,
+					gap = "$space.2",
 					items = "center",
-					ui.text { plugin.name, text_size = 14, weight = 600, color = theme.text },
+					ui.text {
+						plugin.name,
+						text_size = "$terminal.type.xl",
+						weight = "$font.weight.semibold",
+						color = theme.text,
+					},
 					ui.show(
 						status.badge ~= nil,
 						ui.row {
-							h = 18,
-							px = 7,
-							items = "center",
-							rounded = 9,
-							bg = status.tint .. "24",
-							ui.text { status.badge or "", text_size = 10.5, weight = 600, color = status.tint },
+							variants = kit.chip { kind = "badge" },
+							bg = kit.tint(status.tint, "24"),
+							ui.text {
+								status.badge or "",
+								text_size = "$terminal.type.xxs",
+								weight = "$font.weight.semibold",
+								color = kit.tint(status.tint, ""),
+							},
 						}
 					),
 				},
-				ui.text { byline, hidden = byline == "", text_size = 11.5, color = theme.tertiary },
+				ui.text { byline, hidden = byline == "", text_size = "$terminal.type.sm", color = theme.tertiary },
 			},
 			ui.text {
 				plugin.description,
 				hidden = plugin.description == "",
 				wrap = true,
-				text_size = 12.5,
+				text_size = "$terminal.type.body",
 				line_height = 18,
 				color = theme.secondary,
 			},
@@ -186,8 +150,8 @@ local function card(plugin: state.PluginInfo): Node
 				plugin.error or "",
 				hidden = plugin.error == nil,
 				wrap = true,
-				text_size = 12,
-				color = "#ff8f87",
+				text_size = "$terminal.type.md",
+				color = "$terminal.error_text",
 			},
 			ui.row(chips),
 		},
@@ -217,14 +181,19 @@ local function plugins_view(): Node
 					shrink = 1,
 					min_w = 0,
 					gap = 4,
-					ui.text { "Plugins", text_size = 20, weight = 600, color = theme.text },
+					ui.text {
+						"Plugins",
+						text_size = "$terminal.type.title",
+						weight = "$font.weight.semibold",
+						color = theme.text,
+					},
 					ui.text {
 						function()
 							local n = #state.plugins:get()
 							local count = if n == 1 then "1 plugin" else `{n} plugins`
 							return `{count} in {state.plugins_dir}`
 						end,
-						text_size = 12,
+						text_size = "$terminal.type.md",
 						color = theme.tertiary,
 						truncate = true,
 					},
@@ -246,13 +215,18 @@ local function plugins_view(): Node
 				gap = 10,
 				items = "center",
 				ui.svg { code = icons.plugin, w = 28, h = 28, tint = theme.quaternary },
-				ui.text { "No plugins yet", text_size = 14, weight = 600, color = theme.secondary },
+				ui.text {
+					"No plugins yet",
+					text_size = "$terminal.type.xl",
+					weight = "$font.weight.semibold",
+					color = theme.secondary,
+				},
 				ui.text {
 					"A plugin is a folder holding plugin.json (its name, what it asks for, its panels) and init.luau. Put one in the plugins folder and look again.",
 					wrap = true,
 					align = "center",
 					max_w = 420,
-					text_size = 12,
+					text_size = "$terminal.type.md",
 					color = theme.tertiary,
 				},
 			},
@@ -288,7 +262,7 @@ local function waiting(plugin_id: string, panel_id: string): Node
 			end,
 			wrap = true,
 			align = "center",
-			text_size = 12.5,
+			text_size = "$terminal.type.body",
 			color = theme.secondary,
 		},
 		ui.button {
@@ -300,14 +274,7 @@ local function waiting(plugin_id: string, panel_id: string): Node
 				local _, action = why()
 				return action == nil
 			end,
-			h = 26,
-			px = 11,
-			rounded = 7,
-			text_size = 12,
-			color = theme.text,
-			bg = theme.wash,
-			hover = { bg = "#ffffff1f" },
-			focus = { border = 0 },
+			variants = kit.button { size = "xs" },
 			on_click = function()
 				local plugin = sessions.plugin(plugin_id)
 				if plugin and plugin.status == "off" then
