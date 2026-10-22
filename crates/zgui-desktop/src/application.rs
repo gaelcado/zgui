@@ -1724,6 +1724,8 @@ impl Host {
                     self.context
                         .ui
                         .dispatch(zgui::input::InputEvent::PointerCancel);
+                    // And it showed its own cursor: set zgui's again.
+                    self.native_cursor = None;
                 }
                 #[cfg(not(target_os = "macos"))]
                 let _ = (entries, x, y);
@@ -2027,6 +2029,9 @@ impl Host {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.pointer_inside = false;
+                // Outside, others set the cursor: back in, zgui sets its own
+                // again rather than trust what it last set.
+                self.native_cursor = None;
                 self.native.pointer_left();
                 self.dispatch(InputEvent::PointerLeave)?
             }
@@ -2095,6 +2100,8 @@ impl Host {
             }
             WindowEvent::Focused(true) => {
                 zgui_gpu::present_log::log(|| "window-focus true".into());
+                // AppKit may have reset the cursor while another app had it.
+                self.native_cursor = None;
                 self.native_focused = true;
                 self.focus_memory.activate(&self.context.ui);
             }

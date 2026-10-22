@@ -729,9 +729,32 @@ pub fn set_cursor(window: &winit::window::Window, cursor: winit::window::CursorI
     if under != ns_window.windowNumber() {
         return;
     }
+    // AppKit's unpublished cursors, as winit (and Safari) use them: the
+    // help, zoom, diagonal-resize and busy cursors. The arrow if one is gone.
+    fn private(selector: objc2::runtime::Sel) -> Retained<NSCursor> {
+        let class = NSCursor::class();
+        let responds: bool = unsafe { msg_send![class, respondsToSelector: selector] };
+        let cursor: Option<Retained<NSCursor>> = if responds {
+            unsafe { msg_send![class, performSelector: selector] }
+        } else {
+            None
+        };
+        cursor.unwrap_or_else(NSCursor::arrowCursor)
+    }
     // The resize cursors' replacements need macOS 15; these work on every version.
     #[allow(deprecated)]
     let ns_cursor = match cursor {
+        C::Help => private(objc2::sel!(_helpCursor)),
+        C::ZoomIn => private(objc2::sel!(_zoomInCursor)),
+        C::ZoomOut => private(objc2::sel!(_zoomOutCursor)),
+        C::NeResize => private(objc2::sel!(_windowResizeNorthEastCursor)),
+        C::NwResize => private(objc2::sel!(_windowResizeNorthWestCursor)),
+        C::SeResize => private(objc2::sel!(_windowResizeSouthEastCursor)),
+        C::SwResize => private(objc2::sel!(_windowResizeSouthWestCursor)),
+        C::NeswResize => private(objc2::sel!(_windowResizeNorthEastSouthWestCursor)),
+        C::NwseResize => private(objc2::sel!(_windowResizeNorthWestSouthEastCursor)),
+        // What Safari and Chrome show for both.
+        C::Wait | C::Progress => private(objc2::sel!(busyButClickableCursor)),
         C::Pointer => NSCursor::pointingHandCursor(),
         C::Text => NSCursor::IBeamCursor(),
         C::VerticalText => NSCursor::IBeamCursorForVerticalLayout(),
