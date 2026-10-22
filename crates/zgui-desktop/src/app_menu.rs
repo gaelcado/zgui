@@ -434,7 +434,6 @@ pub(crate) fn update_entry(
     false
 }
 
-#[cfg(target_os = "macos")]
 /// A menu model as an AppKit submenu: items, check items, shortcuts, the
 /// standard edit items and nested submenus.
 #[cfg(target_os = "macos")]
@@ -519,6 +518,7 @@ pub(crate) fn show_context_menu(
     unsafe { menu.show_context_menu_for_nsview(handle.ns_view.as_ptr(), Some(position)) };
     Ok(())
 }
+#[cfg(target_os = "macos")]
 pub(crate) struct NativeMenu {
     menu: muda::Menu,
     /// The standard edit items it has, whose shortcuts zgui's view takes.

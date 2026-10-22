@@ -108,7 +108,7 @@ impl Default for Semantics {
     fn default() -> Self {
         static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
         let instance = NEXT_INSTANCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .expect("semantic store identity exhausted");
