@@ -37,7 +37,7 @@ ui.command(opts: CommandOptions) -> ()
 | `on_navigate` | `(e: WebEvent) -> ()` | none | `e` is `{ kind, url }`, `kind` one of `"started"`, `"committed"`, `"finished"`, `"failed"`, `"changed"` |
 | `on_load` | `(url: string) -> ()` | none | a navigation finished |
 | `on_title` | `(title: string) -> ()` | none | |
-| `on_message` | `(value: any) -> ()` | none | what the page posted, as Luau data |
+| `on_message` | `(value: any, origin: string, main_frame: boolean) -> ()` | none | what the page posted, as Luau data, and who posted it: the sending frame's origin (`https://example.com`) and whether it is the top frame. Any page the view shows, and any iframe in it, can post: check `origin` before acting on a message |
 | `on_error` | `(url: string, err: string) -> ()` | none | a navigation failed, or the page's process ended (`url` empty) |
 | `on_new_window` | `(url: string) -> ()` | none | |
 

@@ -513,7 +513,7 @@ fn web_views_load_their_source_and_report_page_events() {
                 on_navigate = function(e) note(e.kind .. " " .. e.url) end,
                 on_load = function(url) note("load " .. url) end,
                 on_title = function(t) note("title " .. t) end,
-                on_message = function(m) note("message " .. m.kind .. " " .. m.count) end,
+                on_message = function(m, origin, top) note(`message {m.kind} {m.count} from {origin} {top}`) end,
                 on_error = function(url, err) note("error " .. err) end,
             },
             ui.text { function() return web.title end, id = "title" },
@@ -554,6 +554,8 @@ fn web_views_load_their_source_and_report_page_events() {
     web.emit(WebViewEvent::TitleChanged { title: "B".into() });
     web.emit(WebViewEvent::Message {
         body: r#"{"kind":"ping","count":3}"#.into(),
+        origin: "https://b.test".into(),
+        main_frame: true,
     });
     web.emit(WebViewEvent::NavigationFailed {
         url: "https://c.test/".into(),
@@ -564,7 +566,7 @@ fn web_views_load_their_source_and_report_page_events() {
     assert_eq!(
         h.text("log"),
         "started https://b.test/;finished https://b.test/;load https://b.test/;title B;\
-         message ping 3;failed https://c.test/;error offline;"
+         message ping 3 from https://b.test true;failed https://c.test/;error offline;"
     );
     h.click("eval");
     zgui::native_view::deliver_posted();

@@ -21,6 +21,7 @@ const PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>served</title>
   document.getElementById("facts").textContent = JSON.stringify({
     origin: location.origin, secure: isSecureContext, injected: window.injectedFirst === true,
   })
+  window.zgui.postMessage({ hello: "from the page" })
 </script>"#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,7 +59,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let web = WebView::new(
                 &cx.ui.runtime,
                 WebViewOptions {
-                    schemes: vec![demo],
+                    // `https` is WebKit's own: left out, with a warning, not a crash.
+                    schemes: vec![demo, SchemeHandler::new("https", |_, _| {})],
                     scripts: vec![UserScript {
                         source: "window.injectedFirst = true".into(),
                         main_frame_only: true,
@@ -90,12 +92,17 @@ fn run_fixture(cx: &mut zgui_desktop::WindowContext, web: WebView) {
         }
     };
     let failed_loads = Rc::new(RefCell::new(Vec::<String>::new()));
+    let senders = Rc::new(RefCell::new(Vec::<(String, bool)>::new()));
     let subscription = {
-        let failed_loads = failed_loads.clone();
-        web.on_event(move |event| {
-            if let WebViewEvent::NavigationFailed { url, .. } = event {
+        let (failed_loads, senders) = (failed_loads.clone(), senders.clone());
+        web.on_event(move |event| match event {
+            WebViewEvent::NavigationFailed { url, .. } => {
                 failed_loads.borrow_mut().push(url.clone());
             }
+            WebViewEvent::Message {
+                origin, main_frame, ..
+            } => senders.borrow_mut().push((origin.clone(), *main_frame)),
+            _ => {}
         })
     };
     cx.tasks.spawn(async move {
@@ -128,6 +135,14 @@ fn run_fixture(cx: &mut zgui_desktop::WindowContext, web: WebView) {
             facts.contains(r#"\"injected\":true"#),
             "script ran before the page's",
             facts.clone(),
+        );
+        check(
+            senders
+                .borrow()
+                .first()
+                .is_some_and(|(origin, top)| origin == "demo://site.one" && *top),
+            "a message says who sent it",
+            format!("{:?}", senders.borrow()),
         );
 
         web.load_url("demo://blocked.example/");

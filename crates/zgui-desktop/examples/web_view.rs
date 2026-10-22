@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let subscription = {
                 let (messages, finished) = (messages.clone(), finished.clone());
                 web.on_event(move |event| match event {
-                    WebViewEvent::Message { body } => {
+                    WebViewEvent::Message { body, .. } => {
                         println!("MESSAGE {body}");
                         messages.update(|count| *count += 1);
                     }
