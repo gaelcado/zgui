@@ -8,6 +8,10 @@ ui.theme.tokens {
 		pane = "{surface.sunken}",
 		-- A selected tab, a dialog's button.
 		wash = "{pressed}",
+		-- Frosted glass under what is active (the tab, the agent); a fainter
+		-- one under the pointer.
+		glass = "{pressed}",
+		glass_hover = "{hover}",
 		-- The focused pane's border, when there are several.
 		ring = "{border.strong}",
 		-- Claude's colour, whatever the theme.
@@ -20,6 +24,8 @@ return {
 	tint = "$glass.tint",
 	pane = "$terminal.pane",
 	wash = "$terminal.wash",
+	glass = "$terminal.glass",
+	glass_hover = "$terminal.glass_hover",
 	hover = "$hover",
 	line = "$border.subtle",
 	ring = "$terminal.ring",

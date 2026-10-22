@@ -17,6 +17,8 @@ struct App {
     actions: Rc<RefCell<Vec<String>>>,
     /// The last layout the script asked to save.
     saved: Rc<RefCell<Value>>,
+    /// Where a drag has the pointer.
+    pointer: (f32, f32),
 }
 impl App {
     fn new() -> Self {
@@ -53,7 +55,12 @@ impl App {
             host
         });
         assert_eq!(h.host.error().get(), None);
-        let mut app = Self { h, actions, saved };
+        let mut app = Self {
+            h,
+            actions,
+            saved,
+            pointer: (0., 0.),
+        };
         // The test window is 400 points wide: panes get all of it.
         app.run("toggle_sidebar");
         app
@@ -320,6 +327,111 @@ fn dropping_a_pane_on_the_tab_bar_opens_it_as_a_tab_where_previewed() {
     assert_eq!(app.h.host.error().get(), None);
 }
 
+impl App {
+    /// The tabs' names in the strip, left to right, where they show.
+    fn tab_names(&mut self) -> Vec<Rect> {
+        use zgui::scene::NodeKind;
+        self.h.ui.prepare_frame();
+        let scene = self.h.ui.scene.borrow();
+        let mut out = Vec::new();
+        let mut stack = vec![scene.root()];
+        while let Some(n) = stack.pop() {
+            if let NodeKind::Text { text, .. } = scene.kind(n)
+                && &**text == "Terminal"
+                && scene.bounds(n).y < 40.
+            {
+                out.push(scene.bounds(n));
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        out.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+        out
+    }
+    /// Press at `from` and drag to `to`.
+    fn drag(&mut self, from: (f32, f32), to: (f32, f32)) {
+        use zgui::input::{InputEvent, PointerButton};
+        let (x, y) = from;
+        self.h.ui.dispatch(InputEvent::PointerMove { x, y });
+        self.h.ui.dispatch(InputEvent::PointerDown {
+            x,
+            y,
+            button: PointerButton::Primary,
+        });
+        self.pointer = from;
+        self.drag_to(to);
+    }
+    /// Move the pointer to `to` in eight steps, and settle there.
+    fn drag_to(&mut self, (tx, ty): (f32, f32)) {
+        let (x, y) = self.pointer;
+        for step in 1..=8 {
+            let t = step as f32 / 8.;
+            self.h.ui.dispatch(zgui::input::InputEvent::PointerMove {
+                x: x + (tx - x) * t,
+                y: y + (ty - y) * t,
+            });
+        }
+        self.pointer = (tx, ty);
+        self.settle();
+    }
+    fn release(&mut self, (x, y): (f32, f32)) {
+        use zgui::input::{InputEvent, PointerButton};
+        self.h.ui.dispatch(InputEvent::PointerUp {
+            x,
+            y,
+            button: PointerButton::Primary,
+        });
+        self.settle();
+    }
+}
+
+#[test]
+fn the_active_tab_dragged_down_shows_the_next_and_comes_back_in_the_strip() {
+    let mut app = App::new();
+    app.run("split_right");
+    app.run("new_tab");
+    let strip = app.tab_names();
+    assert_eq!(strip.len(), 2, "{strip:?}");
+    assert_eq!(app.panes().len(), 1, "the second tab shows");
+    let grab = (strip[1].x + 4., strip[1].y + strip[1].height / 2.);
+    // Down into the panes: it leaves the strip, and the first tab shows.
+    app.drag(grab, (200., 200.));
+    assert_eq!(app.panes().len(), 2, "the first tab shows");
+    let out = app.tab_names();
+    assert!(
+        out.len() == 1 || out[1].width < 1.,
+        "it folds out of the strip: {out:?}"
+    );
+    // Back up to the strip, past the first tab: it shows again.
+    let back = (strip[1].x + strip[1].width, grab.1);
+    app.drag_to(back);
+    assert_eq!(app.panes().len(), 1, "the second tab again");
+    app.release(back);
+    assert_eq!(app.tab_names(), strip, "back where it was");
+    assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
+fn the_active_tab_dragged_onto_the_next_tabs_pane_joins_it() {
+    let mut app = App::new();
+    app.run("split_right");
+    app.run("new_tab");
+    let strip = app.tab_names();
+    let grab = (strip[1].x + 4., strip[1].y + strip[1].height / 2.);
+    app.drag(grab, (200., 200.));
+    let first = app.panes();
+    assert_eq!(first.len(), 2);
+    // Near the bottom of the left pane: the tab goes under it.
+    let target = (
+        first[0].x + first[0].width / 2.,
+        first[0].y + first[0].height - 20.,
+    );
+    app.drag_to(target);
+    app.release(target);
+    assert_eq!(app.panes().len(), 3, "its pane joined the first tab");
+    assert_eq!(app.tab_names().len(), 1, "one tab left");
+    assert_eq!(app.h.host.error().get(), None);
+}
+
 #[test]
 fn a_browser_pane_opens_beside_with_its_address_bar_focused_and_closes() {
     use zgui::native_view::NativeContent;
@@ -481,6 +593,42 @@ fn a_long_address_stays_inside_its_browser_pane() {
     }
     drop(scene);
     assert_eq!(app.h.host.error().get(), None);
+}
+
+impl App {
+    /// The shown terminals.
+    fn terminals(&mut self) -> Vec<zgui::terminal::Terminal> {
+        self.h.ui.prepare_frame();
+        self.h
+            .natives
+            .nodes()
+            .into_iter()
+            .filter_map(|n| match self.h.natives.content(n) {
+                Some(zgui::native_view::NativeContent::Terminal(term)) => Some(term),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn a_new_tab_starts_where_its_terminal_is_unless_that_is_the_root() {
+    let mut app = App::new();
+    let start = |app: &mut App| {
+        let terms = app.terminals();
+        assert_eq!(terms.len(), 1);
+        terms[0].options().working_directory
+    };
+    let first = app.terminals()[0].clone();
+    first.update_state(|s| s.pwd = "file://mac/Users/someone/src".into());
+    app.run("new_tab");
+    assert_eq!(start(&mut app), Some("/Users/someone/src".into()));
+    // A shell at the root (one started from the Finder by an older build):
+    // the next starts where the app was launched instead.
+    app.run("tab_1");
+    first.update_state(|s| s.pwd = "file://mac/".into());
+    app.run("new_tab");
+    assert_eq!(start(&mut app), Some("/tmp".into()));
 }
 
 #[test]

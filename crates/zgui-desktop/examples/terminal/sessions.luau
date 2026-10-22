@@ -59,15 +59,17 @@ function M.describe(pane: string?): names.Description
 	return names.describe(ui.term(pane), state.home)
 end
 
+-- Where a shell starts given a directory to start in: there, unless it is
+-- none or the root (where an app opened from the Finder starts, not a place
+-- anyone works), then where the app was launched (home from the Finder).
+function M.start_dir(dir: string?): string
+	return if dir and dir ~= "" and dir ~= "/" then dir else state.launch_dir
+end
+
 -- The directory a pane's shell is in, for what opens next to it.
 function M.cwd_of(pane: string?): string
-	if pane and not M.is_browser(pane) then
-		local pwd = names.path_of(ui.term(pane).pwd)
-		if pwd ~= "" then
-			return pwd
-		end
-	end
-	return state.launch_dir
+	local pwd = if pane and not M.is_browser(pane) then names.path_of(ui.term(pane).pwd) else nil
+	return M.start_dir(pwd)
 end
 
 -- Keyboard focus to a pane's terminal or page.

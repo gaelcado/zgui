@@ -23,6 +23,10 @@
 		"font.sans": "Geist",
 		// Each terminal's card: a little darker than the window, still glass.
 		"terminal.pane": "#0a0b0e4d",
-		"terminal.wash": "#ffffff0f"
+		"terminal.wash": "#ffffff0f",
+		// Frosted glass under the active tab and agent, clearer than the
+		// wash; a faint one under the pointer.
+		"terminal.glass": "#ffffff1c",
+		"terminal.glass_hover": "#ffffff0d"
 	}
 }

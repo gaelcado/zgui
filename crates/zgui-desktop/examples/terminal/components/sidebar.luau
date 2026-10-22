@@ -112,62 +112,60 @@ end
 
 -- An agent's status as a mark before its words: an arc turning while it
 -- works, a dot when it needs the user (amber) or failed (red), a check when
--- it finished unseen, a hollow ring at rest.
+-- it finished unseen, a hollow ring at rest. A change cross-fades.
 local function mark(agent: () -> agents.Agent): Node
-	local function status(): agents.Status
-		return agent().status
-	end
-	local function dot(when: agents.Status, color: string): Node
-		return ui.show(function()
-			return status() == when
-		end, ui.div { w = 6, h = 6, rounded = 3, bg = color })
-	end
-	return ui.overlay {
-		w = 10,
-		h = 10,
-		shrink = 0,
-		items = "center",
-		justify = "center",
-		-- Working: a quarter arc turning on a faint ring, 30 frames a second.
-		ui.show(
-			function()
-				return status() == "working"
-			end,
+	local function arc(): Node
+		-- A quarter arc turning on a faint ring, 30 frames a second.
+		return ui.div {
+			w = 10,
+			h = 10,
+			-- The arc's box counts from the ring's.
+			relative = true,
+			rounded = 5,
+			border = 1.5,
+			border_color = "#ffffff1f",
 			ui.div {
+				absolute = true,
+				left = -1.5,
+				top = -1.5,
 				w = 10,
 				h = 10,
 				rounded = 5,
+				border_over = true,
 				border = 1.5,
-				border_color = "#ffffff1f",
-				ui.div {
-					absolute = true,
-					left = -1.5,
-					top = -1.5,
-					w = 10,
-					h = 10,
-					rounded = 5,
-					border_over = true,
-					border = 1.5,
-					border_color = theme.accent,
-					clip_inset = { 0, 0, 5, 5 },
-					on_mount = function(el: Element)
-						anime.animate(
-							el,
-							{ rotate = 360, duration = 900, ease = "linear", loop = true, frameRate = 30 }
-						)
-					end,
-				},
-			}
-		),
-		dot("blocked", theme.bell),
-		dot("error", theme.danger),
-		ui.show(function()
-			return status() == "done"
-		end, ui.svg { code = icons.check, w = 11, h = 11, tint = theme.secondary }),
-		ui.show(function()
-			return status() == "idle"
-		end, ui.div { w = 6, h = 6, rounded = 3, border = 1.25, border_color = theme.tertiary }),
-	}
+				border_color = theme.accent,
+				clip_inset = { 0, 0, 5, 5 },
+				on_mount = function(el: Element)
+					anime.animate(el, { rotate = 360, duration = 900, ease = "linear", loop = true, frameRate = 30 })
+				end,
+			},
+		}
+	end
+	local function dot(color: string): Node
+		return ui.div { w = 6, h = 6, rounded = 3, bg = color }
+	end
+	return ui.presence(function()
+		return agent().status
+	end, function(status: agents.Status): Node
+		return ui.overlay {
+			w = 10,
+			h = 10,
+			items = "center",
+			justify = "center",
+			if status == "working"
+				then arc()
+				elseif status == "blocked" then dot(theme.bell)
+				elseif status == "error" then dot(theme.danger)
+				elseif status == "done" then ui.svg { code = icons.check, w = 11, h = 11, tint = theme.secondary }
+				else ui.div { w = 6, h = 6, rounded = 3, border = 1.25, border_color = theme.tertiary },
+		}
+	end, {
+		w = 10,
+		h = 10,
+		shrink = 0,
+		enter = { opacity = { 0, 1 }, scale = { 0.6, 1 }, duration = 220, ease = "outBack(1.6)" },
+		exit = { opacity = 0, scale = 0.6, duration = 120, ease = "inQuad" },
+	})
 end
 
 -- What each status says, and a blocked agent's wait in words.
@@ -182,22 +180,46 @@ local function row(agent: () -> agents.Agent): Node
 		local a = agent()
 		return state.active:get() == a.tab and (state.focus:get())[a.tab] == a.pane
 	end
+	local element: Element? = nil
+	local function to(params: ElementParams)
+		if element then
+			anime.animate(element, params)
+		end
+	end
+	local hover_layer, hover = controls.hover_glass(8)
 	return ui.button {
 		id = "agent:" .. agent().pane,
+		relative = true,
 		px = 10,
 		py = 7,
 		gap = 10,
 		rounded = 8,
 		items = "center",
 		shrink = 0,
-		bg = function()
-			return if current() then theme.wash else theme.clear
-		end,
-		hover = { bg = "#ffffff0d" },
+		-- The glass layers below are its hover and its selection: none of a
+		-- button's own fills (they are solid surfaces).
+		bg = theme.clear,
+		hover = { bg = theme.clear },
+		active = { bg = theme.clear },
 		focus = { border = 0 },
+		on_mount = function(el: Element)
+			element = el
+		end,
+		-- Hover washes in and out; a press gives a little, as glass does.
+		on_hover = hover,
+		on_press = function()
+			to { scale = 0.985, duration = 90, ease = "outQuad" }
+		end,
+		on_release = function()
+			to { scale = 1, duration = 260, ease = "outBack(2)" }
+		end,
 		on_click = function()
 			agents.open(agent())
 		end,
+		-- The active agent's frosted glass (one piece, sliding between rows)
+		-- over a fainter glass while the pointer is on the row.
+		hover_layer,
+		controls.glass("agent-active", current, 8),
 		controls.glyph(
 			function()
 				local a = agent()
@@ -357,7 +379,7 @@ function M.Sidebar(): Node
 							end,
 							-- Re-sorting by status slides rows to their places.
 							animate = { duration = 260, ease = "outQuint" },
-							enter = { opacity = { 0, 1 }, duration = 180 },
+							enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 220, ease = "outQuad" },
 							exit = { opacity = 0, duration = 140 },
 						}),
 					},

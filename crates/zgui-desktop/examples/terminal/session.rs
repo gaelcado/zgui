@@ -26,7 +26,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -155,10 +155,12 @@ pub fn watch(mut heard: impl FnMut(String) -> bool) {
             let mut answered = false;
             while let Ok((REPLY, payload)) = read_frame(&mut stream) {
                 answered = true;
+                remember_fronts(&payload);
                 if !heard(String::from_utf8_lossy(&payload).into_owned()) {
                     return;
                 }
             }
+            forget_fronts();
             if !answered && !told {
                 told = true;
                 if !heard(r#"{"unsupported":true}"#.into()) {
@@ -185,35 +187,68 @@ pub fn attach_command(id: &str, cwd: &str) -> String {
     )
 }
 
+/// What runs in front of each session, from the server's last snapshot
+/// (`watch`): `None` until one arrives, or while the server is one that
+/// does not send it (older than this; `resolve` asks then).
+static FRONTS: Mutex<Option<HashMap<String, zgui_desktop::ForegroundProcess>>> = Mutex::new(None);
+fn remember_fronts(snapshot: &[u8]) {
+    let parsed: serde_json::Value = serde_json::from_slice(snapshot).unwrap_or_default();
+    let fronts = parsed["sessions"].as_object().and_then(|sessions| {
+        sessions
+            .iter()
+            .map(|(id, s)| {
+                Some((
+                    id.clone(),
+                    zgui_desktop::ForegroundProcess {
+                        name: s["process"].as_str()?.to_owned(),
+                        pid: s["pid"].as_u64()? as u32,
+                        idle: s["idle"].as_bool()?,
+                        status: reported_from(&s["reported"]),
+                    },
+                ))
+            })
+            .collect::<Option<HashMap<_, _>>>()
+    });
+    *FRONTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = fronts;
+}
+fn forget_fronts() {
+    *FRONTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+/// Whether the server tells what runs in front of its sessions as it
+/// changes (`resolve` needs no asking, and nothing need poll it).
+pub fn fronts_told() -> bool {
+    FRONTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
 /// Seen through a terminal's attach client (by its pid): what runs in front
 /// of its session.
 pub fn resolve(pid: u32) -> Option<zgui_desktop::ForegroundProcess> {
     let id = attached_session(pid)?;
+    // Told; a session newer than the last snapshot is asked about.
+    let told = FRONTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|fronts| fronts.get(&id).cloned());
+    if told.is_some() {
+        return told;
+    }
     let info = request(INFO, serde_json::json!({ "id": id }))?;
     if !info["exists"].as_bool()? {
         return None;
     }
-    let status = info["status"].as_object().and_then(|s| {
-        let text = |key: &str| s.get(key).and_then(|v| v.as_str()).map(str::to_owned);
-        Some(zgui::terminal::ProgramStatus {
-            state: zgui::terminal::ProgramState::parse(s.get("state")?.as_str()?)?,
-            kind: text("kind"),
-            progress: s.get("progress").and_then(|v| v.as_u64()).map(|p| p as u8),
-            app: text("app"),
-            title: text("title"),
-            msg: text("msg"),
-            child_blocked: s
-                .get("child_blocked")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            since_ms: s.get("since_ms").and_then(|v| v.as_u64()).unwrap_or(0),
-        })
-    });
     Some(zgui_desktop::ForegroundProcess {
         name: info["name"].as_str()?.to_owned(),
         pid: info["pid"].as_u64()? as u32,
         idle: info["idle"].as_bool()?,
-        status,
+        status: reported_from(&info["status"]),
     })
 }
 /// Now, in Unix milliseconds.
@@ -225,22 +260,20 @@ fn unix_ms() -> u64 {
 
 thread_local! {
     /// Attach clients' sessions by pid (their arguments never change).
-    static ATTACHED: std::cell::RefCell<HashMap<u32, Option<String>>> = Default::default();
+    static ATTACHED: std::cell::RefCell<HashMap<u32, String>> = Default::default();
 }
 fn attached_session(pid: u32) -> Option<String> {
-    ATTACHED.with(|cache| {
-        cache
-            .borrow_mut()
-            .entry(pid)
-            .or_insert_with(|| {
-                // Ghostty's foreground group is `login`'s, whose arguments
-                // are root's and unreadable: the client is its child.
-                std::iter::once(pid as libc::pid_t)
-                    .chain(children(pid as libc::pid_t))
-                    .find_map(|pid| session_in(&arguments(pid)?))
-            })
-            .clone()
-    })
+    if let Some(id) = ATTACHED.with(|cache| cache.borrow().get(&pid).cloned()) {
+        return Some(id);
+    }
+    // Ghostty's foreground group is `login`'s, whose arguments are root's
+    // and unreadable: the client is its child. A terminal just started may
+    // not have it yet: asked again next time.
+    let id = std::iter::once(pid as libc::pid_t)
+        .chain(children(pid as libc::pid_t))
+        .find_map(|pid| session_in(&arguments(pid)?))?;
+    ATTACHED.with(|cache| cache.borrow_mut().insert(pid, id.clone()));
+    Some(id)
 }
 /// `pid`'s child processes.
 fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
@@ -364,27 +397,35 @@ pub fn attach(id: &str, cwd: &str) -> ! {
             }
         }
     });
-    // Size changes.
-    static RESIZED: AtomicBool = AtomicBool::new(false);
+    // Size changes, passed on as they happen: until the program hears one,
+    // what it draws for the old size wraps and scrolls in the new. The
+    // signal handler wakes the thread through a pipe.
+    static WAKE: AtomicI32 = AtomicI32::new(-1);
     extern "C" fn on_winch(_: libc::c_int) {
-        RESIZED.store(true, Ordering::Relaxed);
+        let fd = WAKE.load(Ordering::Relaxed);
+        if fd >= 0 {
+            unsafe { libc::write(fd, [0u8].as_ptr().cast(), 1) };
+        }
     }
-    unsafe { libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t) };
+    let mut pipe = [-1; 2];
+    if unsafe { libc::pipe(pipe.as_mut_ptr()) } == 0 {
+        unsafe { libc::fcntl(pipe[1], libc::F_SETFL, libc::O_NONBLOCK) };
+        WAKE.store(pipe[1], Ordering::Relaxed);
+        unsafe { libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t) };
+    }
     let mut sizes = stream.try_clone().expect("socket");
     thread::spawn(move || {
         let mut last = (cols, rows);
-        loop {
-            thread::sleep(Duration::from_millis(16));
-            if RESIZED.swap(false, Ordering::Relaxed) {
-                let size = tty_size();
-                if size != last {
-                    last = size;
-                    let mut payload = Vec::with_capacity(4);
-                    payload.extend_from_slice(&size.0.to_le_bytes());
-                    payload.extend_from_slice(&size.1.to_le_bytes());
-                    if write_frame(&mut sizes, RESIZE, &payload).is_err() {
-                        return;
-                    }
+        let mut wakes = [0u8; 64];
+        while unsafe { libc::read(pipe[0], wakes.as_mut_ptr().cast(), wakes.len()) } > 0 {
+            let size = tty_size();
+            if size != last {
+                last = size;
+                let mut payload = Vec::with_capacity(4);
+                payload.extend_from_slice(&size.0.to_le_bytes());
+                payload.extend_from_slice(&size.1.to_le_bytes());
+                if write_frame(&mut sizes, RESIZE, &payload).is_err() {
+                    return;
                 }
             }
         }
@@ -651,11 +692,119 @@ pub fn daemon() -> ! {
         let server = server.clone();
         thread::spawn(move || broadcast(server));
     }
+    if let Some(queue) = fronts_queue() {
+        let server = server.clone();
+        thread::spawn(move || watch_fronts(queue, server));
+    }
     for stream in listener.incoming().flatten() {
         let server = server.clone();
         thread::spawn(move || serve(stream, server));
     }
     std::process::exit(0)
+}
+
+/// What the kernel says of the sessions' processes, so a program coming to
+/// the front is noticed without its output (`sleep 60` prints nothing) and
+/// without polling: a shell forking (to run a command), and the program in
+/// front changing (exec) or ending. Each is a moment later checked against
+/// the terminal's foreground group, which the shell hands over just after
+/// it forks.
+fn fronts_queue() -> Option<RawFd> {
+    static QUEUE: std::sync::OnceLock<Option<RawFd>> = std::sync::OnceLock::new();
+    *QUEUE.get_or_init(|| {
+        let queue = unsafe { libc::kqueue() };
+        (queue >= 0).then_some(queue)
+    })
+}
+/// Hear `pid`'s forks, execs and exit, for the session whose shell is
+/// `shell`.
+fn watch_process(pid: libc::pid_t, shell: libc::pid_t) {
+    let Some(queue) = fronts_queue() else { return };
+    let change = libc::kevent {
+        ident: pid as usize,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_CLEAR,
+        fflags: libc::NOTE_FORK | libc::NOTE_EXEC | libc::NOTE_EXIT,
+        data: 0,
+        udata: shell as usize as *mut libc::c_void,
+    };
+    unsafe { libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+}
+/// Check the session of shell `shell` in `ms` milliseconds.
+fn check_front_in(queue: RawFd, shell: libc::pid_t, ms: isize) {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let change = libc::kevent {
+        ident: NEXT.fetch_add(1, Ordering::Relaxed) as usize,
+        filter: libc::EVFILT_TIMER,
+        flags: libc::EV_ADD | libc::EV_ONESHOT,
+        fflags: 0,
+        data: ms,
+        udata: shell as usize as *mut libc::c_void,
+    };
+    unsafe { libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+}
+fn watch_fronts(queue: RawFd, server: Shared) {
+    let mut events: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+    loop {
+        let n = unsafe {
+            libc::kevent(
+                queue,
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                events.len() as libc::c_int,
+                std::ptr::null(),
+            )
+        };
+        if n < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        for event in &events[..n as usize] {
+            let shell = event.udata as usize as libc::pid_t;
+            if event.filter == libc::EVFILT_TIMER {
+                check_front(&server, shell);
+            } else if event.fflags & libc::NOTE_EXEC != 0 {
+                // A new program in the same process: its name.
+                check_front(&server, shell);
+            } else if event.fflags & (libc::NOTE_FORK | libc::NOTE_EXIT) != 0
+                && !(event.ident as libc::pid_t == shell && event.fflags & libc::NOTE_EXIT != 0)
+            {
+                // The shell runs something, or what ran ended: the
+                // terminal changes hands a moment later.
+                check_front_in(queue, shell, 20);
+                check_front_in(queue, shell, 150);
+            }
+        }
+    }
+}
+/// The program in front of the session of shell `shell` now; watchers hear
+/// if it changed.
+fn check_front(server: &Shared, shell: libc::pid_t) {
+    let session = server
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sessions
+        .values()
+        .find(|session| session.child == shell)
+        .cloned();
+    let Some(session) = session else { return };
+    let mut live = session.live();
+    if live.closed {
+        return;
+    }
+    let group = unsafe { libc::tcgetpgrp(session.master) };
+    let pid = if group > 0 { group } else { shell };
+    let front = (group, process_name(pid));
+    if live.front != front {
+        live.front = front;
+        watchers().changed();
+    }
+    if group > 0 && group != shell {
+        watch_process(group, shell);
+    }
 }
 
 /// The windows watching every session's activity (`WATCH`), and whether it
@@ -760,7 +909,11 @@ fn snapshot(server: &Shared) -> String {
             id,
             serde_json::json!({
                 "process": live.front.1,
+                "pid": pid,
                 "idle": pid == session.child,
+                // What the program reports itself, as `INFO` has it (the
+                // window's terminals take their program from here).
+                "reported": reported.as_ref().map(reported_json),
                 "title": title,
                 "pwd": pwd,
                 "status": {
@@ -776,6 +929,37 @@ fn snapshot(server: &Shared) -> String {
         );
     }
     serde_json::json!({ "sessions": out }).to_string()
+}
+/// A program's own report of its status, as `INFO` and snapshots send it.
+fn reported_json(s: &zgui::terminal::ProgramStatus) -> serde_json::Value {
+    serde_json::json!({
+        "state": s.state.name(),
+        "kind": s.kind,
+        "progress": s.progress,
+        "app": s.app,
+        "title": s.title,
+        "msg": s.msg,
+        "child_blocked": s.child_blocked,
+        "since_ms": s.since_ms,
+    })
+}
+/// The other way: what `reported_json` made.
+fn reported_from(s: &serde_json::Value) -> Option<zgui::terminal::ProgramStatus> {
+    let s = s.as_object()?;
+    let text = |key: &str| s.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    Some(zgui::terminal::ProgramStatus {
+        state: zgui::terminal::ProgramState::parse(s.get("state")?.as_str()?)?,
+        kind: text("kind"),
+        progress: s.get("progress").and_then(|v| v.as_u64()).map(|p| p as u8),
+        app: text("app"),
+        title: text("title"),
+        msg: text("msg"),
+        child_blocked: s
+            .get("child_blocked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        since_ms: s.get("since_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
 }
 
 fn session(server: &Shared, id: &str) -> Option<Arc<Session>> {
@@ -811,16 +995,7 @@ fn serve(mut stream: UnixStream, server: Shared) {
                         "pid": pid,
                         "name": process_name(pid),
                         "idle": pid == session.child,
-                        "status": status.map(|s| serde_json::json!({
-                            "state": s.state.name(),
-                            "kind": s.kind,
-                            "progress": s.progress,
-                            "app": s.app,
-                            "title": s.title,
-                            "msg": s.msg,
-                            "child_blocked": s.child_blocked,
-                            "since_ms": s.since_ms,
-                        })),
+                        "status": status.as_ref().map(reported_json),
                     })
                 }
                 None => serde_json::json!({ "exists": false }),
@@ -897,6 +1072,7 @@ fn attach_client(mut stream: UnixStream, server: Shared, id: &str, hello: &serde
                     return;
                 };
                 let session = Arc::new(session);
+                watch_process(session.child, session.child);
                 guard.sessions.insert(id.to_owned(), session.clone());
                 guard.empty_since = None;
                 let reading = session.clone();

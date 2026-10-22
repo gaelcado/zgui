@@ -157,11 +157,54 @@ local function tab_button(id: string): Node
 	local function is_active()
 		return active:get() == id
 	end
-	local function hovered()
-		return state.hovered_tab:get() == id
-	end
+	local hover_layer, hover = controls.hover_glass(8)
+	-- Lifted out of the strip, it folds away (still mounted: unmounting the
+	-- dragged tab would end the drag), and unfolds where it lands.
+	local element: Element? = nil
+	local width = 0
+	local SPACE = { "width", "minWidth", "paddingLeft", "paddingRight", "marginRight", "opacity" }
+	ui.effect(function()
+		local out = state.lifted:get() == id
+		local el = element
+		if not el then
+			return
+		end
+		if out then
+			width = el.width or 0
+			anime.animate(el, {
+				minWidth = 0,
+				width = 0,
+				paddingLeft = 0,
+				paddingRight = 0,
+				-- Its gap in the strip closes too.
+				marginRight = -3,
+				opacity = 0,
+				duration = 220,
+				ease = "outQuint",
+			})
+		elseif width > 0 then
+			local d = dragging:peek()
+			anime.animate(el, {
+				width = width,
+				paddingLeft = 3,
+				paddingRight = 10,
+				marginRight = 0,
+				opacity = if d.kind == "tab" and d.id == id then 0.35 else 1,
+				duration = 240,
+				ease = "outQuint",
+				onComplete = function()
+					anime.utils.cleanInlineStyles(el, SPACE)
+				end,
+			})
+			width = 0
+		end
+	end)
 	return ui.row {
 		h = 28,
+		relative = true,
+		on_mount = function(el: Element)
+			element = el
+		end,
 		-- The icons' tiles sit as far in from the tab's edge as from its
 		-- top; the name, without a tile, a little more.
 		pl = 3,
@@ -177,18 +220,9 @@ local function tab_button(id: string): Node
 			local d = dragging:get()
 			return if d.kind == "tab" and d.id == id then 0.35 else 1
 		end,
+		-- A tab dropped here: its slot lights.
 		bg = function()
-			if tab_drop:get() == id then
-				return "#ffffff1f"
-			end
-			if is_active() then
-				return theme.wash
-			end
-			return if hovered() then theme.hover else theme.clear
-		end,
-		border = 1,
-		border_color = function()
-			return if is_active() then theme.line else theme.clear
+			return if tab_drop:get() == id then "#ffffff1f" else theme.clear
 		end,
 		on_click = function()
 			actions.activate(id)
@@ -220,13 +254,7 @@ local function tab_button(id: string): Node
 			end
 			return items
 		end,
-		on_hover = function(inside)
-			if inside then
-				state.hovered_tab:set(id)
-			elseif state.hovered_tab:peek() == id then
-				state.hovered_tab:set("")
-			end
-		end,
+		on_hover = hover,
 		on_drag = function(): state.Payload
 			dragging:set { kind = "tab", id = id }
 			return { kind = "tab", id = id }
@@ -237,15 +265,19 @@ local function tab_button(id: string): Node
 		on_drag_end = function()
 			dragging:set {}
 			state.drop:set {}
+			-- Let go away from the strip and from another tab's panes: it is
+			-- back where it was.
+			actions.land(id)
 		end,
 		drop_when = function(payload: state.Payload)
 			return payload.kind == "pane" or (payload.kind == "tab" and payload.id ~= id)
 		end,
-		-- A tab takes this one's place as it passes. A pane over its middle
-		-- marks it (dropping moves the pane in); near an edge, a new tab
-		-- opens up beside it.
+		-- A tab takes this one's place as it passes (a lifted one lands). A
+		-- pane over its middle marks it (dropping moves the pane in); near an
+		-- edge, a new tab opens up beside it.
 		on_drag_over = function(payload: state.Payload, e)
 			if payload.kind == "tab" then
+				actions.land(payload.id)
 				actions.reorder(payload.id, id, if e.local_x < e.w / 2 then "before" else "after")
 				return
 			end
@@ -279,6 +311,10 @@ local function tab_button(id: string): Node
 				actions.move_pane_to_tab(payload.id, id)
 			end
 		end,
+		-- The active tab's frosted glass (one piece, sliding between tabs)
+		-- over a fainter glass while the pointer is on the tab.
+		hover_layer,
+		controls.glass("tab-active", is_active, 8),
 		ui.row {
 			gap = 3,
 			shrink = 0,
@@ -378,17 +414,22 @@ function M.Titlebar(): Node
 		h = theme.titlebar,
 		items = "center",
 		-- A pane anywhere else on it (the new tab button, the tools) opens as
-		-- a tab where the slot shows, at the end if none does yet.
+		-- a tab where the slot shows, at the end if none does yet. A lifted
+		-- tab back on it lands.
 		drop_when = function(payload: state.Payload)
-			return payload.kind == "pane"
+			return payload.kind == "pane" or payload.kind == "tab"
 		end,
 		on_drag_over = function(payload: state.Payload)
-			if not (tab_slot:peek()).pane then
+			if payload.kind == "tab" then
+				actions.land(payload.id)
+			elseif not (tab_slot:peek()).pane then
 				actions.show_slot(payload.id, "")
 			end
 		end,
-		on_drop = function()
-			actions.commit_slot()
+		on_drop = function(payload: state.Payload)
+			if payload.kind == "pane" then
+				actions.commit_slot()
+			end
 		end,
 		gap = 3,
 		pr = 6,

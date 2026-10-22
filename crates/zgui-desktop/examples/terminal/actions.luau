@@ -273,6 +273,29 @@ function M.reorder(tab: string, target: string, side: "before" | "after")
 	tabs:set(next)
 end
 
+-- Dragging the active tab down out of the strip lifts it: the tab beside it
+-- shows (a drop on its panes joins them), until the drag comes back to the
+-- strip or ends.
+function M.lift(tab: string)
+	local list = tabs:peek()
+	local i = M.tab_index(tab)
+	if not i or #list < 2 or active:peek() ~= tab or state.lifted:peek() == tab then
+		return
+	end
+	state.lifted:set(tab)
+	M.activate(list[if i < #list then i + 1 else i - 1].id)
+end
+-- The lifted tab back in the strip, shown again (unless it joined another).
+function M.land(tab: string)
+	if state.lifted:peek() ~= tab then
+		return
+	end
+	state.lifted:set("")
+	if M.tab_index(tab) then
+		M.activate(tab)
+	end
+end
+
 -- Moving focus --------------------------------------------------------------
 
 function M.step_pane(by: number)

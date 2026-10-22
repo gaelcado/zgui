@@ -122,6 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cx.tasks.spawn(async move {
                 while let Some(json) = hearing.recv().await {
                     agents.set(Value::from_json(&json).unwrap_or(Value::Nil));
+                    // The snapshot says what runs in front of every session:
+                    // the terminals take it from there, and nothing polls.
+                    zgui_desktop::terminal_processes_pushed(session::fronts_told());
+                    zgui_desktop::terminal_processes_changed();
                 }
             });
             host.action("seen_session", |id| {
@@ -143,7 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session::keep(&ids);
             });
             // Saved a moment after it changes (a divider drag changes it
-            // on every move), and when the window closes.
+            // on every move), and when the window closes. Nothing runs while
+            // it does not change.
             let pending = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
             let save = {
                 let (pending, layout_file) = (pending.clone(), layout_file.clone());
@@ -158,17 +163,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             {
-                let pending = pending.clone();
+                let (pending, save, tasks) = (pending.clone(), save.clone(), cx.tasks.clone());
                 host.action("save_layout", move |layout| {
-                    *pending.borrow_mut() = Some(layout.to_json());
-                });
-            }
-            {
-                let save = save.clone();
-                cx.tasks.spawn(async move {
-                    loop {
-                        zgui::timer::sleep(Duration::from_millis(500)).await;
-                        save();
+                    let waiting = pending.borrow_mut().replace(layout.to_json()).is_some();
+                    if !waiting {
+                        let save = save.clone();
+                        tasks.spawn(async move {
+                            zgui::timer::sleep(Duration::from_millis(500)).await;
+                            save();
+                        });
                     }
                 });
             }

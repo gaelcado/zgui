@@ -20,11 +20,17 @@ return function(): Node
 		on_mount = function(el)
 			frames.set_area(el)
 		end,
+		-- The active tab itself comes here lifted out of the strip, when
+		-- another can show.
 		drop_when = function(payload: state.Payload)
-			return payload.kind == "pane" or (payload.kind == "tab" and payload.id ~= active:peek())
+			return payload.kind == "pane"
+				or (payload.kind == "tab" and (payload.id ~= active:peek() or #state.tabs:peek() > 1))
 		end,
 		on_drag_over = function(payload: state.Payload, e)
 			actions.hide_slot()
+			if payload.kind == "tab" then
+				actions.lift(payload.id)
+			end
 			local target, zone = frames.target_at(e.local_x, e.local_y)
 			if target == payload.id then
 				target = nil

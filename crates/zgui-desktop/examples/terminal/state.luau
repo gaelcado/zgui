@@ -59,12 +59,14 @@ M.zoom = ui.state("zoom", {} :: { [string]: string })
 M.kinds = ui.state("kinds", {} :: { [string]: string })
 -- "pane:<id>" or "tab:<id>" awaiting confirmation to close.
 M.confirm = ui.state("confirm", "")
-M.hovered_tab = ui.state("hovered_tab", "")
 M.drop = ui.state("drop", {} :: Drop)
 M.dragging = ui.state("dragging", {} :: Dragging)
 -- The tab a dragged pane hovers (dropping moves it there).
 M.tab_drop = ui.state("tab_drop", "")
 M.tab_slot = ui.state("tab_slot", {} :: Slot)
+-- The tab dragged down out of the strip (while it is out, the tab beside it
+-- shows), or "".
+M.lifted = ui.state("lifted", "")
 -- Browser panes waiting to have their address bar focused.
 M.address_focus = ui.state("address_focus", "")
 -- The agents sidebar is open.

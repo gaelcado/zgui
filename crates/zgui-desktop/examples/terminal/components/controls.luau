@@ -5,6 +5,71 @@ local names = require("@lib/names")
 
 local M = {}
 
+-- The motion glass moves with (icons.zeron.sh's ease).
+local EASE = "cubicBezier(.22, 1, .36, 1)"
+
+-- Frosted glass under a row's content (the row must be `relative`): a
+-- clear tint over the window's own blur. No backdrop blur of its own: there
+-- is nothing of zgui's behind it to blur, and its margin would reach over
+-- the terminals below the tabs, putting it on the overlay plane above them
+-- (a platform blur view for each move: the window flashed on every switch). One piece per `id`:
+-- when `shown()` moves to another row, the glass slides there rather than
+-- one fading out while another fades in.
+function M.glass(id: string, shown: () -> boolean, radius: number): Node
+	return ui.presence(function()
+		return if shown() then "on" else nil
+	end, function(): Node
+		return ui.div {
+			layout_id = id,
+			layout_duration = 320,
+			layout_ease = EASE,
+			w_full = true,
+			h_full = true,
+			rounded = radius,
+			bg = theme.glass,
+		}
+	end, {
+		absolute = true,
+		top = 0,
+		left = 0,
+		right = 0,
+		bottom = 0,
+		enter = { opacity = { 0, 1 }, duration = 160 },
+	})
+end
+
+-- A fainter glass that fades in under a row while the pointer is over it
+-- (under `glass`, so the active row shows only that). Returns the layer and
+-- what the row's `on_hover` calls.
+function M.hover_glass(radius: number): (Node, (inside: boolean) -> ())
+	local layer: Element? = nil
+	local node = ui.div {
+		absolute = true,
+		top = 0,
+		left = 0,
+		right = 0,
+		bottom = 0,
+		rounded = radius,
+		bg = theme.glass_hover,
+		border = 1,
+		border_color = theme.glass_hover,
+		opacity = 0,
+		on_mount = function(el: Element)
+			layer = el
+		end,
+	}
+	return node,
+		function(inside: boolean)
+			if layer then
+				anime.animate(layer, {
+					opacity = if inside then 1 else 0,
+					duration = if inside then 140 else 220,
+					ease = "outQuad",
+				})
+			end
+		end
+end
+
 -- A pane's icon: its program's, or the glyph its title starts with.
 function M.glyph(desc: () -> names.Description, size: number, dim: () -> boolean): Node
 	return ui.overlay {
