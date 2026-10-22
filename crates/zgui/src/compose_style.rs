@@ -179,6 +179,9 @@ pub(crate) struct Variants {
     /// widget never hovered, pressed or focused keeps none of them. They
     /// set no typography.
     pub defaults: [Option<fn() -> Styles>; 3],
+    /// The default focus ring shows only for focus from the keyboard, as the
+    /// web's `:focus-visible` (a clicked button shows none; an editor always does).
+    pub keyboard_focus_ring: bool,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum ActivationKey {
@@ -191,6 +194,8 @@ struct Interaction {
     pointer_active: bool,
     key_active: Option<ActivationKey>,
     focus: bool,
+    /// Focused other than by a press: by Tab, or by the program.
+    focus_visible: bool,
 }
 
 #[cfg(test)]
@@ -399,6 +404,7 @@ pub(crate) fn mount_style_with_intrinsic(
         .into_iter()
         .any(|variant| variant.as_deref().is_some_and(Styles::sets_typography));
     let defaults = variants.defaults;
+    let keyboard_focus_ring = variants.keyboard_focus_ring && variants.focus.is_none();
     debug_assert!(
         defaults
             .iter()
@@ -456,9 +462,13 @@ pub(crate) fn mount_style_with_intrinsic(
                     ..
                 }
                 | InputEvent::PointerCancel => state.pointer_active = false,
-                InputEvent::Focus if event.target == node => state.focus = true,
+                InputEvent::Focus if event.target == node => {
+                    state.focus = true;
+                    state.focus_visible = !state.pointer_active;
+                }
                 InputEvent::Blur if event.target == node => {
                     state.focus = false;
+                    state.focus_visible = false;
                     state.pointer_active = false;
                     state.key_active = None;
                 }
@@ -544,7 +554,7 @@ pub(crate) fn mount_style_with_intrinsic(
         let in_effect = [
             !is_disabled && state.hover,
             !is_disabled && (state.pointer_active || state.key_active.is_some()),
-            !is_disabled && state.focus,
+            !is_disabled && state.focus && (state.focus_visible || !keyboard_focus_ring),
             is_disabled,
         ];
         if lazy {
@@ -1295,6 +1305,7 @@ mod tests {
                 focus: Some(Box::new(Styles::new().border(2.).border_over(true))),
                 disabled: Some(Box::new(color(4))),
                 defaults: Default::default(),
+                keyboard_focus_ring: false,
             },
             Some(Box::new(move || read_disabled.get())),
             true,

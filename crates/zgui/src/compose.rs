@@ -2043,6 +2043,7 @@ fn mount_element(
             }
             if view.variants.focus.is_none() {
                 view.variants.defaults[2] = Some(focus_ring(&view.styles));
+                view.variants.keyboard_focus_ring = true;
             }
             ui.container(parent, Layout::Row, Default::default())
         }
@@ -2059,6 +2060,7 @@ fn mount_element(
             }
             if view.variants.focus.is_none() {
                 view.variants.defaults[2] = Some(focus_ring(&view.styles));
+                view.variants.keyboard_focus_ring = true;
             }
             let root = ui.container(parent, Layout::Row, Default::default());
             let mut semantics = SemanticNode::new(Role::CheckBox, label.clone());
@@ -2106,6 +2108,7 @@ fn mount_element(
             view.styles = defaults;
             if view.variants.focus.is_none() {
                 view.variants.defaults[2] = Some(focus_ring(&view.styles));
+                view.variants.keyboard_focus_ring = true;
             }
             let root = ui.container(parent, Layout::Overlay, Default::default());
             let mut semantic = SemanticNode::new(Role::Slider, label);
@@ -2158,6 +2161,7 @@ fn mount_element(
             view.styles = defaults;
             if keyboard_navigation && view.variants.focus.is_none() {
                 view.variants.defaults[2] = Some(focus_ring(&view.styles));
+                view.variants.keyboard_focus_ring = true;
             }
             region = Some(Box::new(move |ui: &mut Ui, root, environment| {
                 build(ui, root, environment, scrollbar, keyboard_navigation)
