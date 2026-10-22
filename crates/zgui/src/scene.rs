@@ -1234,7 +1234,7 @@ impl Scene {
         };
         Self {
             identity: NEXT_SCENE_ID
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                 .expect("scene identity exhausted"),
             slots: vec![Slot {
                 generation: 0,
