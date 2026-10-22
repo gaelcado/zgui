@@ -955,6 +955,8 @@ struct Host {
     last_accessibility: Option<(u64, Option<NodeId>)>,
     accessibility_geometry_dirty: bool,
     native_cursor: Option<CursorIcon>,
+    /// The window's cursor rects are off (macOS; see `disable_cursor_rects`).
+    cursor_rects_off: bool,
     cursor_query: Option<((f32, f32), u64, Option<zgui::cursor::Cursor>)>,
     /// The pointer is over this window. Outside it, the cursor shape does not
     /// matter, so animating geometry need not be hit-tested every frame.
@@ -1111,6 +1113,7 @@ impl Host {
             last_accessibility: None,
             accessibility_geometry_dirty: true,
             native_cursor: None,
+            cursor_rects_off: false,
             cursor_query: None,
             pointer_inside: false,
             ime_geometry: None,
@@ -1390,9 +1393,18 @@ impl Host {
                 .input
                 .hovered()
                 .is_some_and(|node| self.native.is_native(node));
+        #[cfg(target_os = "macos")]
+        if !std::mem::replace(&mut self.cursor_rects_off, true) {
+            crate::native_host::disable_cursor_rects(&window);
+        }
         if over_native {
             self.native_cursor = None;
         } else if Some(cursor) != self.native_cursor {
+            // Only when zgui's own choice changes, so at a page's edge it never
+            // takes back a cursor the page has just set.
+            #[cfg(target_os = "macos")]
+            crate::native_host::set_cursor(&window, cursor);
+            #[cfg(not(target_os = "macos"))]
             window.set_cursor(cursor);
             self.native_cursor = Some(cursor);
         }

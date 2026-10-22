@@ -26,6 +26,8 @@ use zgui::{
 #[cfg(target_os = "macos")]
 pub use macos::{BackdropReport, NativeDiagnostics, NativeViewReport};
 #[cfg(target_os = "macos")]
+pub(crate) use macos::{disable_cursor_rects, set_cursor};
+#[cfg(target_os = "macos")]
 pub(crate) type NativeDiagnosticsHandle = NativeDiagnostics;
 #[cfg(not(target_os = "macos"))]
 pub(crate) type NativeDiagnosticsHandle = Rc<()>;
