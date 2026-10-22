@@ -8,6 +8,7 @@
 //! window: its items draw relative to that box, as an isolated layer's do.
 //! Both show their frames as plain layer contents, so they change with the
 //! native views' geometry in one Core Animation transaction.
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 use crate::{GpuError, GpuRenderer};
 use std::{borrow::Cow, rc::Rc};
 use zgui::{
