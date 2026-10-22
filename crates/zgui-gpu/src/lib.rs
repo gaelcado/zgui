@@ -36,7 +36,9 @@ fn premultiply_into_cell(cell: &mut [u8], pixels: &[u8], width: u32) {
     for (y, source) in pixels.chunks_exact(row).enumerate() {
         let start = ((y + 1) * (width as usize + 2) + 1) * 4;
         for (texel, pixel) in cell[start..start + row]
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip(source.as_chunks::<4>().0)
         {
             let alpha = u16::from(pixel[3]);
@@ -4871,7 +4873,9 @@ impl GpuRenderer {
                 SwashContent::Mask => {
                     for (row, alphas) in image.data.chunks_exact(p.width as usize).enumerate() {
                         let start = row_start(row as u32);
-                        for (texel, alpha) in rgba[start..].chunks_exact_mut(4).zip(alphas) {
+                        for (texel, alpha) in
+                            rgba[start..].as_chunks_mut::<4>().0.iter_mut().zip(alphas)
+                        {
                             texel.copy_from_slice(&[255, 255, 255, *alpha]);
                         }
                     }
@@ -4888,7 +4892,9 @@ impl GpuRenderer {
                     for (row, pixels) in image.data.chunks_exact(bytes).enumerate() {
                         let start = row_start(row as u32);
                         for (texel, pixel) in rgba[start..]
-                            .chunks_exact_mut(4)
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
                             .zip(pixels.as_chunks::<4>().0)
                         {
                             texel.copy_from_slice(&[
@@ -5629,7 +5635,7 @@ impl GpuRenderer {
         }
         // Retained textures are BGRA (see `FORMAT`); callers read RGBA.
         if texture.format() == wgpu::TextureFormat::Bgra8Unorm {
-            for pixel in pixels.chunks_exact_mut(4) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
         }
