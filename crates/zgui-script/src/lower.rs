@@ -345,10 +345,15 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
                 WebViewEvent::ProcessTerminated => {
                     call(&error, pack(&["", "the page's process ended"]))
                 }
-                WebViewEvent::Message { body } => {
+                WebViewEvent::Message {
+                    body,
+                    origin,
+                    main_frame,
+                } => {
                     if let Some(f) = &message {
                         let value = crate::node::json_value(body);
-                        if let Err(e) = vm.call::<()>(f, value) {
+                        // Who sent it: check before acting on it.
+                        if let Err(e) = vm.call::<()>(f, (value, origin.as_str(), *main_frame)) {
                             vm.report(e);
                         }
                     }

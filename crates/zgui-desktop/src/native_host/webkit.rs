@@ -20,8 +20,8 @@ use objc2_foundation::{
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask,
-    WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
+    WKNavigationType, WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKURLSchemeHandler,
+    WKURLSchemeTask, WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
     WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
 };
 use std::{
@@ -32,8 +32,9 @@ use std::{
     rc::Rc,
 };
 use zgui::web_view::{
-    NavigationRequest, SchemeHandler, SchemeRequest, SchemeResponder, SchemeResponse, ScriptResult,
-    WeakWebView, WebProfile, WebView, WebViewBackend, WebViewCommand, WebViewEvent,
+    NavigationKind, NavigationRequest, SchemeHandler, SchemeRequest, SchemeResponder,
+    SchemeResponse, ScriptResult, WeakWebView, WebProfile, WebView, WebViewBackend, WebViewCommand,
+    WebViewEvent,
 };
 
 #[link(name = "WebKit", kind = "framework")]
@@ -98,8 +99,13 @@ define_class!(
     unsafe impl NSObjectProtocol for Observer {}
     impl Observer {
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
-        fn observe(&self, _key: Option<&NSString>, _object: Option<&AnyObject>, _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>, _context: *mut c_void) {
-            self.changed();
+        fn observe(&self, key: Option<&NSString>, _object: Option<&AnyObject>, _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>, _context: *mut c_void) {
+            // Progress and loading change many times a load; history does not.
+            let history = key.is_none_or(|key| {
+                let key = key.to_string();
+                key != "estimatedProgress" && key != "loading"
+            });
+            self.changed_with(history);
         }
     }
     unsafe impl WKNavigationDelegate for Observer {
@@ -110,6 +116,20 @@ define_class!(
                     url: action.request().URL().and_then(|url| url.absoluteString()).map(|url| url.to_string()).unwrap_or_default(),
                     // No target frame: a new window, which the UI delegate handles.
                     main_frame: action.targetFrame().is_none_or(|frame| frame.isMainFrame()),
+                    kind: match action.navigationType() {
+                        WKNavigationType::LinkActivated => NavigationKind::Link,
+                        WKNavigationType::FormSubmitted => NavigationKind::FormSubmission,
+                        WKNavigationType::BackForward => NavigationKind::BackForward,
+                        WKNavigationType::Reload => NavigationKind::Reload,
+                        WKNavigationType::FormResubmitted => NavigationKind::FormResubmission,
+                        _ => NavigationKind::Other,
+                    },
+                    source_url: action
+                        .sourceFrame()
+                        .and_then(|frame| frame.request().URL())
+                        .and_then(|url| url.absoluteString())
+                        .map(|url| url.to_string())
+                        .unwrap_or_default(),
                 }
             };
             let allowed = self.ivars().web.upgrade().is_none_or(|web| web.allows(&request));
@@ -176,7 +196,26 @@ define_class!(
                 Some(text) => text.to_string(),
                 None => json(Some(&body)),
             };
-            self.post(move |web| web.emit(WebViewEvent::Message { body }));
+            // Who sent it: any page, any frame, can.
+            let (origin, main_frame) = unsafe {
+                let frame = message.frameInfo();
+                let origin = frame.securityOrigin();
+                let (scheme, host, port) =
+                    (origin.protocol().to_string(), origin.host().to_string(), origin.port());
+                let origin = if port == 0 {
+                    format!("{scheme}://{host}")
+                } else {
+                    format!("{scheme}://{host}:{port}")
+                };
+                (origin, frame.isMainFrame())
+            };
+            self.post(move |web| {
+                web.emit(WebViewEvent::Message {
+                    body,
+                    origin,
+                    main_frame,
+                })
+            });
         }
     }
 );
@@ -222,6 +261,11 @@ define_class!(
                     body: request
                         .HTTPBody()
                         .map(|body| body.to_vec())
+                        .unwrap_or_default(),
+                    main_document_url: request
+                        .mainDocumentURL()
+                        .and_then(|url| url.absoluteString())
+                        .map(|url| url.to_string())
                         .unwrap_or_default(),
                 }
             };
@@ -274,6 +318,12 @@ fn finish_scheme_task(id: u64, response: Option<SchemeResponse>) {
     };
     unsafe {
         let Some(url) = task.request().URL() else {
+            // Nothing to answer for: fail it rather than leave it waiting.
+            task.didFailWithError(&NSError::errorWithDomain_code_userInfo(
+                &NSString::from_str("NSURLErrorDomain"),
+                -1000,
+                None,
+            ));
             return;
         };
         let Some(response) = response else {
@@ -305,7 +355,7 @@ fn finish_scheme_task(id: u64, response: Option<SchemeResponse>) {
         let Some(http) = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
             NSHTTPURLResponse::alloc(),
             &url,
-            isize::from(response.status as i16),
+            response.status as isize,
             Some(&NSString::from_str("HTTP/1.1")),
             Some(&fields),
         ) else {
@@ -336,6 +386,11 @@ impl Observer {
     }
     /// Report the page's navigation state as it is now.
     fn changed(&self) {
+        self.changed_with(true);
+    }
+    /// The same, reading the back-forward list only if `history` (it walks
+    /// up to a hundred items).
+    fn changed_with(&self, history: bool) {
         let Some(view) = self.ivars().view.borrow().load() else {
             return;
         };
@@ -351,7 +406,7 @@ impl Observer {
                 view.canGoForward(),
             )
         };
-        let (back_list, forward_list) = history(&view);
+        let lists = history.then(|| self::history(&view));
         self.post(move |web| {
             let (old_url, old_title) = web
                 .state()
@@ -365,8 +420,10 @@ impl Observer {
                 state.progress = progress;
                 state.can_go_back = back;
                 state.can_go_forward = forward;
-                state.back_list = back_list;
-                state.forward_list = forward_list;
+                if let Some((back_list, forward_list)) = lists {
+                    state.back_list = back_list;
+                    state.forward_list = forward_list;
+                }
             });
             if !url.is_empty() && url != old_url {
                 web.emit(WebViewEvent::UrlChanged { url });
@@ -540,15 +597,33 @@ impl MacWebView {
     pub fn new(web: &WebView, mtm: MainThreadMarker) -> Self {
         let options = web.options().clone();
         let observer = Observer::new(web, mtm);
-        let schemes: Vec<Retained<SchemeServer>> = options
+        // WebKit throws (and the app aborts) on a scheme it serves itself or
+        // one registered twice: leave those out.
+        let mut taken = std::collections::HashSet::new();
+        let handlers: Vec<&SchemeHandler> = options
             .schemes
+            .iter()
+            .filter(|handler| {
+                let scheme = handler.scheme.as_str();
+                let usable = zgui::web_view::is_app_scheme(scheme)
+                    && !unsafe { WKWebView::handlesURLScheme(&NSString::from_str(scheme), mtm) }
+                    && taken.insert(scheme.to_owned());
+                if !usable {
+                    eprintln!(
+                        "zgui: web view scheme `{scheme}` left out: not a scheme an app can serve, or given twice"
+                    );
+                }
+                usable
+            })
+            .collect();
+        let schemes: Vec<Retained<SchemeServer>> = handlers
             .iter()
             .map(|handler| SchemeServer::new(web, handler, mtm))
             .collect();
         let view = unsafe {
             let configuration = WKWebViewConfiguration::new(mtm);
             configuration.setWebsiteDataStore(&data_store(&options.profile, mtm));
-            for (handler, server) in options.schemes.iter().zip(&schemes) {
+            for (handler, server) in handlers.iter().zip(&schemes) {
                 configuration.setURLSchemeHandler_forURLScheme(
                     Some(ProtocolObject::from_ref(&**server)),
                     &NSString::from_str(&handler.scheme),

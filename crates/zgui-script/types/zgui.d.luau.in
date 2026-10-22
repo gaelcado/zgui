@@ -1088,7 +1088,9 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_load: ((url: string) -> ...unknown)?,
 	on_title: ((title: string) -> ...unknown)?,
 	-- What the page posted, as Luau data: JSON from the page, so `any`.
-	on_message: ((value: any) -> ...unknown)?,
+	-- `origin` is the sending frame's (any page, any iframe, can post):
+	-- check it before acting on a message.
+	on_message: ((value: any, origin: string, main_frame: boolean) -> ...unknown)?,
 	on_error: ((url: string, err: string) -> ...unknown)?,
 	on_new_window: ((url: string) -> ...unknown)?,
 }>>

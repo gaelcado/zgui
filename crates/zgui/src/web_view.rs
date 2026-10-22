@@ -62,11 +62,17 @@ pub struct UserScript {
 }
 
 /// A request for a URL in a scheme the app serves (see [`SchemeHandler`]).
+/// Any page in the view can make one (an `<img>`, an `<iframe>`, a
+/// `fetch` on a site the view shows): a handler whose requests do more than
+/// read checks who asked (`main_document_url`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SchemeRequest {
     /// The [`WebView::id`] of the page asking.
     pub web_view: u64,
     pub url: String,
+    /// The top page the request is made for (empty when the platform does
+    /// not say): a site that embeds or fetches the scheme's URLs shows here.
+    pub main_document_url: String,
     pub method: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
@@ -110,6 +116,13 @@ impl std::fmt::Debug for SchemeResponder {
 /// Serves a URL scheme of the app's own (`myapp://…`) to pages: `serve` is
 /// called on the UI thread for each request and may answer later, from
 /// another thread, through its responder.
+///
+/// The scheme is lowercase letters, digits, `+`, `-` and `.`, starting with
+/// a letter, and not one the platform serves itself (`http`, `https`,
+/// `file`, `data`, `blob`, `about`…): a web view leaves out a scheme it
+/// cannot register, with a warning, rather than fail. `serve` lives as long
+/// as the page: hold the page in it through a [`WeakWebView`], or the two
+/// keep each other alive.
 #[derive(Clone)]
 pub struct SchemeHandler {
     pub scheme: String,
@@ -145,6 +158,42 @@ pub struct NavigationRequest {
     pub url: String,
     /// The top frame navigates (not an iframe).
     pub main_frame: bool,
+    /// What started it: a link, a form, history, a reload, or anything else
+    /// (a script, a redirect, the app).
+    pub kind: NavigationKind,
+    /// The page of the frame that started it (empty for the app's own).
+    pub source_url: String,
+}
+/// What started a navigation ([`NavigationRequest::kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationKind {
+    Link,
+    FormSubmission,
+    BackForward,
+    Reload,
+    FormResubmission,
+    Other,
+}
+/// Whether `scheme` can be one an app serves (see [`SchemeHandler`]): its
+/// syntax, and not a scheme every platform's web view serves itself.
+pub fn is_app_scheme(scheme: &str) -> bool {
+    const BUILT_IN: &[&str] = &[
+        "http",
+        "https",
+        "file",
+        "data",
+        "blob",
+        "about",
+        "javascript",
+        "ws",
+        "wss",
+        "ftp",
+    ];
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '+' | '-' | '.'))
+        && !BUILT_IN.contains(&scheme)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -233,9 +282,17 @@ pub enum WebViewEvent {
     UrlChanged {
         url: String,
     },
-    /// A page message (see [`WebViewOptions::messages`]), as JSON.
+    /// A page message (see [`WebViewOptions::messages`]), as JSON, with
+    /// who sent it. Every page in the view, and every frame in it (an ad's
+    /// iframe), can post one: check `origin` (and `main_frame`) before
+    /// acting on a message that does anything.
     Message {
         body: String,
+        /// The sending frame's origin: `https://example.com`,
+        /// `myapp://settings` (a port only when it is not the scheme's own).
+        origin: String,
+        /// Sent by the top frame, not an iframe.
+        main_frame: bool,
     },
     NewWindowRequested {
         url: String,
@@ -761,4 +818,37 @@ fn placeholder(content: NativeContent) -> View {
                 .text_size(12.)
                 .text_color(crate::style::rgba(0xa0a0_a0ff)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_app_scheme_is_its_own_and_well_formed() {
+        assert!(is_app_scheme("myapp"));
+        assert!(is_app_scheme("zgui-ui.v2+x"));
+        for taken in ["https", "http", "file", "blob", "data", "about"] {
+            assert!(!is_app_scheme(taken), "{taken} is the web view's");
+        }
+        for malformed in ["", "MyApp", "2app", "my app", "my:app", "app/x"] {
+            assert!(!is_app_scheme(malformed), "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn a_policy_decides_and_none_allows() {
+        let runtime = crate::reactive::Runtime::new();
+        let web = WebView::new(&runtime, WebViewOptions::default());
+        let request = |url: &str| NavigationRequest {
+            url: url.into(),
+            main_frame: true,
+            kind: NavigationKind::Link,
+            source_url: String::new(),
+        };
+        assert!(web.allows(&request("https://a.test/")));
+        web.set_navigation_policy(|r| !r.url.starts_with("file:"));
+        assert!(web.allows(&request("https://a.test/")));
+        assert!(!web.allows(&request("file:///etc/passwd")));
+    }
 }

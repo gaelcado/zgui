@@ -44,7 +44,7 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 zgui-ghostty-sys = { path = "../zgui-ghostty-sys", optional = true }
 libc = { version = "0.2", optional = true }
 # Native views over zgui (src/native_host): web pages, clipping masks, backdrops.
-objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKBackForwardList", "WKBackForwardListItem", "WKNavigationDelegate", "WKNavigation", "WKNavigationAction", "WKNavigationResponse", "WKWebsiteDataStore", "WKUserContentController", "WKUserScript", "WKScriptMessageHandler", "WKScriptMessage", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKPreferences", "WKURLSchemeHandler", "WKURLSchemeTask"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKBackForwardList", "WKBackForwardListItem", "WKNavigationDelegate", "WKNavigation", "WKNavigationAction", "WKNavigationResponse", "WKWebsiteDataStore", "WKUserContentController", "WKUserScript", "WKScriptMessageHandler", "WKScriptMessage", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKSecurityOrigin", "WKPreferences", "WKURLSchemeHandler", "WKURLSchemeTask"] }
 # Answers custom-scheme requests on the main queue, from whatever thread served them.
 dispatch2 = "0.3"
 block2 = "0.6"
