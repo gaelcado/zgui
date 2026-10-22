@@ -94,7 +94,10 @@ impl AppMenu {
 /// answer those actions, so there the item is disabled, and a disabled item
 /// still swallows its shortcut; while zgui's view has the keyboard, its
 /// shortcut goes straight to the view instead (see `edit_keys`), for zgui's
-/// editors to handle.
+/// editors to handle. Its shortcut (⌘C for Copy) and its action
+/// (`standard:copy`) are its own: no other item may have them. Elsewhere
+/// it is an ordinary item in zgui's menu bar, whose choosing reaches the
+/// app as that action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StandardItem {
     Undo,
@@ -113,6 +116,17 @@ impl StandardItem {
             Self::Copy => "Copy",
             Self::Paste => "Paste",
             Self::SelectAll => "Select All",
+        }
+    }
+    /// Its shortcut, as [`MenuAccelerator`] names one (macOS's).
+    fn shortcut_name(self) -> &'static str {
+        match self {
+            Self::Undo => "Super+Z",
+            Self::Redo => "Super+Shift+Z",
+            Self::Cut => "Super+X",
+            Self::Copy => "Super+C",
+            Self::Paste => "Super+V",
+            Self::SelectAll => "Super+A",
         }
     }
     /// The action a rendered menu bar dispatches for it.
@@ -220,7 +234,21 @@ pub(crate) fn validate(menus: &[AppMenu]) -> Result<(), AppMenuError> {
                     AppMenuEntry::Submenu(menu) => {
                         visit(std::slice::from_ref(menu), ids, shortcuts)?
                     }
-                    AppMenuEntry::Separator | AppMenuEntry::Standard(_) => {}
+                    AppMenuEntry::Standard(item) => {
+                        if !shortcuts.insert(item.shortcut_name().to_owned()) {
+                            return Err(AppMenuError(format!(
+                                "the standard {} item's shortcut is another item's",
+                                item.label()
+                            )));
+                        }
+                        if !ids.insert(item.action().0) {
+                            return Err(AppMenuError(format!(
+                                "the standard {} item appears twice, or its action is another item's",
+                                item.label()
+                            )));
+                        }
+                    }
+                    AppMenuEntry::Separator => {}
                 }
             }
         }
@@ -477,6 +505,8 @@ pub(crate) fn show_context_menu(
 ) -> Result<(), AppMenuError> {
     use muda::ContextMenu;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    // As the menu bar's are: unique actions and shortcuts, valid labels.
+    validate(&[AppMenu::new("Menu", entries.iter().cloned())])?;
     let menu = native_submenu(&AppMenu::new("", entries.iter().cloned()))?;
     let handle = window
         .window_handle()
@@ -583,12 +613,26 @@ mod edit_keys {
             return false;
         }
         let shift = flags.contains(NSEventModifierFlags::Shift);
-        let Some(key) = event
+        let Some(mut key) = event
             .charactersIgnoringModifiers()
             .map(|k| k.to_string().to_lowercase())
         else {
             return false;
         };
+        // A layout that types no Latin letters (Cyrillic, Greek): the key in
+        // the ANSI position, as AppKit matches menu shortcuts then. A Latin
+        // layout (Dvorak) keeps its letters.
+        if !key.is_ascii() {
+            key = match event.keyCode() {
+                0 => "a",
+                6 => "z",
+                7 => "x",
+                8 => "c",
+                9 => "v",
+                _ => return false,
+            }
+            .to_owned();
+        }
         SHORTCUTS.with(|keys| keys.borrow().iter().any(|(k, s)| *k == key && *s == shift))
     }
 
@@ -678,9 +722,12 @@ mod edit_keys {
         use objc2_foundation::{NSPoint, NSString};
 
         fn key(characters: &str, flags: NSEventModifierFlags) -> Retained<NSEvent> {
+            key_at(characters, flags, 0)
+        }
+        fn key_at(characters: &str, flags: NSEventModifierFlags, code: u16) -> Retained<NSEvent> {
             let text = NSString::from_str(characters);
             NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-                NSEventType::KeyDown, NSPoint::new(0., 0.), flags, 0., 0, None, &text, &text, false, 0,
+                NSEventType::KeyDown, NSPoint::new(0., 0.), flags, 0., 0, None, &text, &text, false, code,
             )
             .unwrap()
         }
@@ -721,6 +768,12 @@ mod edit_keys {
                 !is_edit_shortcut(&key("t", command)),
                 "an app shortcut stays with the menu bar"
             );
+            // A Russian layout's ⌘C types "с": the key in C's place.
+            assert!(is_edit_shortcut(&key_at("с", command, 8)), "⌘C on Cyrillic");
+            assert!(
+                !is_edit_shortcut(&key_at("щ", command, 31)),
+                "a key in no edit shortcut's place"
+            );
         }
     }
 }
@@ -735,6 +788,41 @@ impl Drop for NativeMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_standard_items_shortcut_and_action_are_its_own() {
+        use zgui::input::{Key, Modifiers};
+        let command = |shift| Modifiers {
+            meta: true,
+            shift,
+            ..Default::default()
+        };
+        let c = |shift| MenuAccelerator::new(Key::Character("c".into()), command(shift));
+        let clash = [AppMenu::new(
+            "Edit",
+            [
+                AppMenuEntry::Standard(StandardItem::Copy),
+                AppMenuEntry::item("Copy Path", "copy-path").accelerator(c(false)),
+            ],
+        )];
+        assert!(validate(&clash).is_err(), "⌘C is Copy's");
+        let taken = [AppMenu::new(
+            "Edit",
+            [
+                AppMenuEntry::Standard(StandardItem::Paste),
+                AppMenuEntry::item("Paste", "standard:paste"),
+            ],
+        )];
+        assert!(validate(&taken).is_err(), "so is its action");
+        let fine = [AppMenu::new(
+            "Edit",
+            [
+                AppMenuEntry::Standard(StandardItem::Copy),
+                AppMenuEntry::Standard(StandardItem::Paste),
+                AppMenuEntry::item("Copy Path", "copy-path").accelerator(c(true)),
+            ],
+        )];
+        assert_eq!(validate(&fine), Ok(()));
+    }
     #[test]
     fn rendered_menu_keyboard_dispatches_shared_identifier_and_skips_disabled() {
         use zgui::{
