@@ -4470,6 +4470,7 @@ dependencies = [
  "cosmic-text",
  "dbus",
  "dbus-crossroads",
+ "dispatch2",
  "fontdue",
  "libc",
  "muda",
