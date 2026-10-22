@@ -193,8 +193,13 @@ pub(crate) struct RareStyles {
     /// `Styled::shader_uniforms`.
     pub(crate) shader_uniforms: Option<crate::decoration::ShaderUniforms>,
     pub(crate) shadows: Option<Option<std::sync::Arc<[BoxShadow]>>>,
+    /// `Styled::inset_shadows`.
+    pub(crate) inset_shadows: Option<Option<std::sync::Arc<[BoxShadow]>>>,
     pub(crate) shadow: Option<Option<BoxShadow>>,
     pub(crate) letter_spacing: Option<crate::text_layout::LetterSpacing>,
+    /// `Styled::text_underline`, `underline_offset`.
+    pub(crate) underline: Option<bool>,
+    pub(crate) underline_offset: Option<f32>,
     pub(crate) text_overflow: Option<crate::text_layout::TextOverflow>,
     pub(crate) line_clamp: Option<Option<std::num::NonZeroU32>>,
     pub(crate) font_features: Option<crate::text_layout::FontFeatures>,
@@ -224,8 +229,11 @@ impl RareStyles {
         outline_offset: None,
         shader_uniforms: None,
         shadows: None,
+        inset_shadows: None,
         shadow: None,
         letter_spacing: None,
+        underline: None,
+        underline_offset: None,
         text_overflow: None,
         line_clamp: None,
         font_features: None,
@@ -283,11 +291,20 @@ impl RareStyles {
         if other.shadows.is_some() {
             self.shadows = other.shadows.clone();
         }
+        if other.inset_shadows.is_some() {
+            self.inset_shadows = other.inset_shadows.clone();
+        }
         if other.shadow.is_some() {
             self.shadow = other.shadow;
         }
         if other.letter_spacing.is_some() {
             self.letter_spacing = other.letter_spacing;
+        }
+        if other.underline.is_some() {
+            self.underline = other.underline;
+        }
+        if other.underline_offset.is_some() {
+            self.underline_offset = other.underline_offset;
         }
         if other.text_overflow.is_some() {
             self.text_overflow = other.text_overflow;
@@ -332,6 +349,8 @@ impl Styles {
             || self.italic.is_some()
             || self.line_height.is_some()
             || self.rare().letter_spacing.is_some()
+            || self.rare().underline.is_some()
+            || self.rare().underline_offset.is_some()
     }
     pub(crate) fn layout_options_mut(&mut self) -> &mut crate::layout::LayoutOptions {
         std::sync::Arc::make_mut(self.layout_options.get_or_insert_with(Default::default))
@@ -633,6 +652,19 @@ pub trait Styled: Sized {
         token: impl Into<crate::theme::TokenId>,
     ) -> Self {
         crate::theme::bind_in(self.styles_mut(), field, token.into());
+        self
+    }
+    /// Set the colour `field` to `t` of the way from the token `from` to
+    /// `to` (a colour or a token), both read from the node's theme: an
+    /// animation between theme colours that follows theme changes.
+    fn token_mix(
+        mut self,
+        field: crate::theme::Field,
+        from: impl Into<crate::theme::TokenId>,
+        to: impl Into<crate::theme::Themed<Color>>,
+        t: f32,
+    ) -> Self {
+        crate::theme::bind_mix(self.styles_mut(), field, from.into(), to.into(), t);
         self
     }
     /// Restore flex display after `hidden` or `grid`, preserving its direction.
@@ -1107,6 +1139,27 @@ pub trait Styled: Sized {
         self.styles_mut().rare_mut().outline = Some(Some((width, color)));
         self
     }
+    /// The outline's colour, a value or a theme token, keeping its width
+    /// (1 point if none was set).
+    fn outline_color(mut self, value: impl Into<crate::theme::Themed<Color>>) -> Self {
+        value_or_token!(self, value, crate::theme::Field::OutlineColor);
+        let width = match self.styles_mut().rare_mut().outline {
+            Some(Some((width, _))) => width,
+            _ => 1.,
+        };
+        self.styles_mut().rare_mut().outline = Some(Some((width, value)));
+        self
+    }
+    /// The outline's width, keeping its colour (the text colour's default
+    /// black if none was set).
+    fn outline_width(mut self, width: f32) -> Self {
+        let color = match self.styles_mut().rare_mut().outline {
+            Some(Some((_, color))) => color,
+            _ => Color(0, 0, 0, 255),
+        };
+        self.styles_mut().rare_mut().outline = Some(Some((width.max(0.), color)));
+        self
+    }
     /// How far outside the box the outline starts (CSS `outline-offset`);
     /// negative draws it over the box's edge.
     fn outline_offset(mut self, offset: f32) -> Self {
@@ -1134,6 +1187,11 @@ pub trait Styled: Sized {
     }
     fn shadows(mut self, shadows: impl Into<std::sync::Arc<[BoxShadow]>>) -> Self {
         self.styles_mut().rare_mut().shadows = Some(Some(shadows.into()));
+        self
+    }
+    /// Shadows inside the box (CSS's `inset`): see `Decoration::inset_shadows`.
+    fn inset_shadows(mut self, shadows: impl Into<std::sync::Arc<[BoxShadow]>>) -> Self {
+        self.styles_mut().rare_mut().inset_shadows = Some(Some(shadows.into()));
         self
     }
     fn cursor(mut self, cursor: crate::cursor::Cursor) -> Self {
@@ -1224,6 +1282,19 @@ pub trait Styled: Sized {
         value_or_token!(self, pixels, crate::theme::Field::LetterSpacing);
         self.styles_mut().rare_mut().letter_spacing =
             Some(crate::text_layout::LetterSpacing::px(pixels));
+        self
+    }
+
+    /// Underlined text, or not; inherited, like CSS's `text-decoration`
+    /// (a hover style can underline a link's label).
+    fn text_underline(mut self, on: bool) -> Self {
+        self.styles_mut().rare_mut().underline = Some(on);
+        self
+    }
+    /// How far below the baseline an underline sits (CSS's
+    /// `text-underline-offset`; unset, a tenth of the font size). Inherited.
+    fn underline_offset(mut self, px: f32) -> Self {
+        self.styles_mut().rare_mut().underline_offset = px.is_finite().then_some(px);
         self
     }
 

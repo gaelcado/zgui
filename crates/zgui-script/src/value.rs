@@ -317,9 +317,49 @@ impl From<bool> for Value {
 /// A script value as a state value. Where `old` has an equal part (a
 /// string, a subtree), the result shares it, so the new state compares
 /// cheaply with the old and keeps one copy of what did not change.
+/// `ui.null`: a value that is nil to Rust (JSON's null) but, unlike nil,
+/// keeps its key in a table: `{ caps = ui.null }` sends `{"caps": null}`.
+static NULL: u8 = 0;
+pub(crate) fn null() -> mlua::Value {
+    mlua::Value::LightUserData(mlua::LightUserData(
+        &NULL as *const u8 as *mut std::ffi::c_void,
+    ))
+}
+/// `ui.object(t?)`: `t` (or a new table) marked a JSON object, so that
+/// empty it sends `{}`, not `[]` (a Lua table can't tell). An empty object
+/// from Rust comes to a script marked, so it goes back as one.
+pub(crate) fn object(lua: &Lua, table: Option<Table>) -> mlua::Result<Table> {
+    let table = match table {
+        Some(table) => table,
+        None => lua.create_table()?,
+    };
+    table.set_metatable(Some(object_marker(lua)?))?;
+    Ok(table)
+}
+/// The metatable that marks a table a JSON object (`ui.object`).
+fn object_marker(lua: &Lua) -> mlua::Result<Table> {
+    const KEY: &str = "zgui.json_object";
+    if let Ok(marker) = lua.named_registry_value::<Table>(KEY) {
+        return Ok(marker);
+    }
+    let marker = lua.create_table()?;
+    marker.raw_set("__json", "object")?;
+    lua.set_named_registry_value(KEY, &marker)?;
+    Ok(marker)
+}
+fn is_object(t: &Table) -> bool {
+    t.metatable()
+        .and_then(|m| {
+            m.raw_get::<Option<mlua::LuaString>>("__json")
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|kind| kind.as_bytes() == &b"object"[..])
+}
 pub(crate) fn convert(value: mlua::Value, old: Option<&Value>) -> mlua::Result<Value> {
     Ok(match value {
         mlua::Value::Nil => Value::Nil,
+        mlua::Value::LightUserData(p) if std::ptr::eq(p.0 as *const u8, &NULL) => Value::Nil,
         mlua::Value::Boolean(b) => Value::Bool(b),
         mlua::Value::Integer(n) => Value::Num(n as f64),
         mlua::Value::Number(n) => Value::Num(n),
@@ -329,6 +369,10 @@ pub(crate) fn convert(value: mlua::Value, old: Option<&Value>) -> mlua::Result<V
         },
         mlua::Value::Table(t) => table(&t, old)?,
         mlua::Value::UserData(ud) if ud.is::<State>() => ud.borrow::<State>()?.0.get(),
+        // `ui.raw(value, reason)` is its value; only the design lint looks.
+        mlua::Value::UserData(ud) if ud.is::<crate::design::RawUd>() => {
+            ud.borrow::<crate::design::RawUd>()?.0.clone()
+        }
         mlua::Value::UserData(ud) if ud.is::<crate::element::ElementUd>() => Value::Element(
             ElementHandle(ud.borrow::<crate::element::ElementUd>()?.0.clone()),
         ),
@@ -392,6 +436,13 @@ fn table(t: &Table, old: Option<&Value>) -> mlua::Result<Value> {
             _ => fresh,
         });
     }
+    // Empty, but an object (`ui.object`).
+    if len == 0 && is_object(t) {
+        return Ok(match old {
+            Some(old @ Value::Map(f)) if f.is_empty() => old.clone(),
+            _ => Value::Map(Rc::from([])),
+        });
+    }
     let was = old.map_or(&[][..], Value::list);
     let mut items = Vec::with_capacity(len);
     for (i, item) in t.sequence_values::<mlua::Value>().enumerate() {
@@ -428,6 +479,10 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
             for (key, value) in fields.iter() {
                 table.raw_set(&**key, to_lua(value, lua, frozen)?)?;
             }
+            // Empty, it stays an object going back (`ui.object`).
+            if fields.is_empty() {
+                table.set_metatable(Some(object_marker(lua)?))?;
+            }
             table.set_readonly(frozen);
             Ok(mlua::Value::Table(table))
         }
@@ -438,7 +493,108 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
 }
 impl IntoLua for Value {
     fn into_lua(self, lua: &Lua) -> mlua::Result<mlua::Value> {
-        to_lua(&self, lua, true)
+        if large(&self) {
+            cached(&self, lua)
+        } else {
+            to_lua(&self, lua, true)
+        }
+    }
+}
+
+/// Values this large (items and fields, counted all the way down) are
+/// converted once and the read-only table reused while the value stays the
+/// same: a large list read by every computed that needs it costs one
+/// conversion, not one per read. Nested counts too: a small record holding
+/// a long list (a transcript's `{ rows, loading, … }`) is as costly as the
+/// list.
+const CACHED_FROM: usize = 16;
+fn large(value: &Value) -> bool {
+    // Counts down from CACHED_FROM, stopping as soon as it gets there.
+    fn count(value: &Value, left: &mut usize) -> bool {
+        let children: &mut dyn Iterator<Item = &Value> = match value {
+            Value::List(items) => &mut items.iter(),
+            Value::Map(fields) => &mut fields.iter().map(|(_, v)| v),
+            _ => return false,
+        };
+        for child in children {
+            *left -= 1;
+            if *left == 0 || count(child, left) {
+                return true;
+            }
+        }
+        false
+    }
+    matches!(value, Value::List(_) | Value::Map(_)) && count(value, &mut CACHED_FROM.clone())
+}
+/// How many converted values a VM keeps (oldest first out).
+const CACHED_MAX: usize = 64;
+/// A VM's converted values: by the identity of their contents, which the
+/// entry keeps alive (so an address is never reused while cached).
+/// Give a new VM its cache of converted values.
+pub(crate) fn install_cache(lua: &Lua) {
+    lua.set_app_data(Converted::default());
+}
+#[derive(Default)]
+struct Converted {
+    entries: std::cell::RefCell<std::collections::VecDeque<(usize, Value, mlua::RegistryKey)>>,
+}
+fn identity(value: &Value) -> usize {
+    match value {
+        Value::List(items) => Rc::as_ptr(items) as *const u8 as usize,
+        Value::Map(fields) => Rc::as_ptr(fields) as *const u8 as usize,
+        _ => 0,
+    }
+}
+fn cached(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
+    let id = identity(value);
+    // (The VM registers its cache when it starts: `install_cache`.)
+    if lua.app_data_ref::<Converted>().is_none() {
+        return to_lua(value, lua, true);
+    }
+    let hit = lua.app_data_ref::<Converted>().and_then(|cache| {
+        let entries = cache.entries.borrow();
+        entries
+            .iter()
+            .find(|(entry, _, _)| *entry == id)
+            .map(|(_, _, key)| lua.registry_value::<mlua::Value>(key))
+    });
+    if let Some(table) = hit {
+        return table;
+    }
+    let table = to_lua(value, lua, true)?;
+    let key = lua.create_registry_value(table.clone())?;
+    let evicted: Vec<mlua::RegistryKey> = {
+        let cache = lua.app_data_ref::<Converted>().expect("made above");
+        let mut entries = cache.entries.borrow_mut();
+        // A value only the cache still holds was replaced (a state set
+        // anew): nothing can look it up again, so its table goes now
+        // rather than when 64 newer ones push it out. A list of every
+        // process, replaced each sample, would otherwise keep 64 copies.
+        let mut evicted = Vec::new();
+        for entry in std::mem::take(&mut *entries) {
+            if only_cached(&entry.1) {
+                evicted.push(entry.2);
+            } else {
+                entries.push_back(entry);
+            }
+        }
+        entries.push_back((id, value.clone(), key));
+        if entries.len() > CACHED_MAX {
+            evicted.extend(entries.pop_front().map(|(_, _, key)| key));
+        }
+        evicted
+    };
+    for key in evicted {
+        lua.remove_registry_value(key)?;
+    }
+    Ok(table)
+}
+/// Whether the cache holds the only reference to `value`'s contents.
+fn only_cached(value: &Value) -> bool {
+    match value {
+        Value::List(items) => Rc::strong_count(items) == 1,
+        Value::Map(fields) => Rc::strong_count(fields) == 1,
+        _ => false,
     }
 }
 

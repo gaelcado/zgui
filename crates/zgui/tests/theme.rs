@@ -484,3 +484,51 @@ fn vscode_themes_import_onto_tokens() {
     };
     assert!(Theme::from_vscode_with(&text, read).is_ok());
 }
+
+#[test]
+fn interaction_styles_that_change_swap_and_follow_the_theme() {
+    use zgui::style::Styles;
+    let mut ui = Ui::new(200., 200.);
+    let raised = ui.signal(false);
+    let (read, mut last) = (raised.clone(), None);
+    let handle = ui.mount(
+        column().child(
+            div()
+                .id("tab")
+                .size(40., 40.)
+                .bg(GREEN)
+                .reactive_interaction(move || {
+                    let now = read.get();
+                    if last.replace(now) == Some(now) {
+                        return None;
+                    }
+                    let hover = if now {
+                        Styles::new().bg(tok::SURFACE_RAISED)
+                    } else {
+                        Styles::new().bg(RED)
+                    };
+                    Some([Some(hover), None, None, None])
+                }),
+        ),
+    );
+    ui.scene.borrow_mut().flush();
+    let node = handle.find("tab").unwrap();
+    assert_eq!(fill(&ui, node), GREEN);
+    ui.dispatch(InputEvent::PointerMove { x: 10., y: 10. });
+    assert_eq!(fill(&ui, node), RED, "the first hover style");
+    // Swapped while hovered: the new one shows, its token resolved.
+    raised.set(true);
+    assert_eq!(fill(&ui, node), Color(35, 46, 64, 255));
+    ui.theme().set(LIGHT).unwrap();
+    assert_eq!(
+        fill(&ui, node),
+        Color(255, 255, 255, 255),
+        "follows the theme"
+    );
+    assert_eq!(ui.scene.borrow_mut().flush().layout_nodes, 0, "paint only");
+    ui.dispatch(InputEvent::PointerLeave);
+    assert_eq!(fill(&ui, node), GREEN);
+    raised.set(false);
+    ui.dispatch(InputEvent::PointerMove { x: 10., y: 10. });
+    assert_eq!(fill(&ui, node), RED, "swapped while not in effect");
+}

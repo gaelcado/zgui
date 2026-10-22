@@ -1,5 +1,5 @@
 -- What runs in the panes: terminals (Ghostty surfaces attached to the
--- host's session server) and web pages. The host keeps both across reloads;
+-- host's session server), web pages and plugins' panels. The host keeps both across reloads;
 -- this run asks for them by pane id.
 local state = require("./state")
 local names = require("@lib/names")
@@ -19,6 +19,27 @@ M.close_pane = function(_pane: string, _force: boolean?) end
 function M.is_browser(pane: string?): boolean
 	return pane ~= nil and (state.kinds:peek())[pane] == "browser"
 end
+-- A terminal: what a pane is unless it was made something else.
+function M.is_terminal(pane: string?): boolean
+	return pane ~= nil and (state.kinds:peek())[pane] == nil
+end
+-- A plugin panel's plugin and panel ids ("panel:<plugin>/<panel>").
+function M.panel_of(pane: string?): (string?, string?)
+	local kind = if pane then (state.kinds:peek())[pane] else nil
+	if kind then
+		return kind:match("^panel:([^/]+)/(.+)$")
+	end
+	return nil, nil
+end
+-- The plugin `id` as the host last found it.
+function M.plugin(id: string?): state.PluginInfo?
+	for _, plugin in state.plugins:get() do
+		if plugin.id == id then
+			return plugin
+		end
+	end
+	return nil
+end
 
 -- A browser pane's page: the host keeps it across reloads, as it does
 -- shells.
@@ -33,7 +54,7 @@ end
 -- A terminal pane's session, made the first time; every call gives it this
 -- run's handlers.
 function M.session(pane: string): Term?
-	if M.is_browser(pane) then
+	if not M.is_terminal(pane) then
 		return nil
 	end
 	M.made[pane] = true
@@ -53,8 +74,20 @@ function M.describe(pane: string?): names.Description
 	if not pane then
 		return { name = "", icon = "terminal", busy = false }
 	end
-	if (state.kinds:get())[pane] == "browser" then
+	local kind = (state.kinds:get())[pane]
+	if kind == "browser" then
 		return names.describe_page(M.page(pane))
+	elseif kind == "plugins" then
+		return { name = "Plugins", icon = "plugin", busy = false }
+	elseif kind then
+		local plugin_id, panel_id = M.panel_of(pane)
+		local plugin = M.plugin(plugin_id)
+		for _, panel in if plugin then plugin.panels else {} do
+			if panel.id == panel_id then
+				return { name = panel.title, icon = "plugin", busy = false }
+			end
+		end
+		return { name = panel_id or "Panel", icon = "plugin", busy = false }
 	end
 	return names.describe(ui.term(pane), state.home)
 end
@@ -68,7 +101,7 @@ end
 
 -- The directory a pane's shell is in, for what opens next to it.
 function M.cwd_of(pane: string?): string
-	local pwd = if pane and not M.is_browser(pane) then names.path_of(ui.term(pane).pwd) else nil
+	local pwd = if M.is_terminal(pane) then names.path_of(ui.term(pane :: string).pwd) else nil
 	return M.start_dir(pwd)
 end
 
@@ -76,14 +109,16 @@ end
 function M.focus_view(pane: string)
 	if M.is_browser(pane) then
 		M.page(pane):focus()
-	else
+	elseif M.is_terminal(pane) then
 		ui.term(pane):focus()
+	else
+		state.panel_focus:set(pane)
 	end
 end
 
 -- Whether closing the pane would end something running.
 function M.needs_confirm(pane: string): boolean
-	return not M.is_browser(pane) and ui.term(pane):needs_confirm()
+	return M.is_terminal(pane) and ui.term(pane):needs_confirm()
 end
 
 return M

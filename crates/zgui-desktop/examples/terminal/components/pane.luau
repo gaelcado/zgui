@@ -1,5 +1,5 @@
--- A pane: a card placed where frames.luau puts it, holding a terminal or a
--- browser, with a grip at the top to drag it by.
+-- A pane: a card placed where frames.luau puts it, holding a terminal, a
+-- browser or a panel (panel.luau), with a grip at the top to drag it by.
 local theme = require("../theme")
 local state = require("../state")
 local sessions = require("../sessions")
@@ -8,6 +8,8 @@ local frames = require("../frames")
 local controls = require("./controls")
 local menu = require("./menu")
 local browser = require("./browser")
+local panel = require("./panel")
+local palette = require("./palette")
 local tabs = require("./tabs")
 local layout = require("@lib/layout")
 
@@ -54,6 +56,7 @@ local function terminal_view(term: Term, pane: string, tab: string, inner: () ->
 					menu.entry("Open Browser Beside", function()
 						actions.split("row", "browser")
 					end),
+					menu.entry("Open Panel…", palette.open),
 				}
 				if several() or zoomed then
 					table.insert(
@@ -81,7 +84,8 @@ export type Props = { pane: string }
 
 return ui.component(function(props: Props)
 	local pane = props.pane
-	local tab = state.active:peek()
+	-- Its own tab: a panel stays mounted while another tab shows.
+	local tab = actions.tab_of(pane) or state.active:peek()
 	local term = sessions.session(pane)
 	local element: Element? = nil
 	local function box(): layout.Box?
@@ -96,8 +100,10 @@ return ui.component(function(props: Props)
 		return root ~= nil and root.kind == "split"
 	end
 	local is_browser = sessions.is_browser(pane)
-	-- A browser pane's bar: whether the pointer is near the top (zgui hears
-	-- it there).
+	-- Not a terminal: zgui draws its bar (a page's, a panel's) and hears
+	-- the pointer there.
+	local by_zgui = not sessions.is_terminal(pane)
+	-- A browser's or panel's bar: whether the pointer is near the top.
 	local bar_near = ui.use_state(false)
 	local function moving()
 		local d = drop:get()
@@ -117,7 +123,7 @@ return ui.component(function(props: Props)
 	local grip = ui.use_state(0)
 	ui.effect(function()
 		local near = false
-		if is_browser then
+		if by_zgui then
 			near = bar_near:get() and not hooks.editing:get()
 		elseif term then
 			local p = term.pointer
@@ -135,8 +141,12 @@ return ui.component(function(props: Props)
 		return frames.radius() - 1
 	end
 	return ui.column {
-		-- Placed by zgui at its frame's insets, at every size of the area.
+		-- Placed by zgui at its frame's insets, at every size of the area;
+		-- hidden while it has no frame (a panel in a tab not shown).
 		absolute = true,
+		hidden = function()
+			return box() == nil
+		end,
 		-- Its edges on whole points: crisp borders at any ratio.
 		snap = true,
 		left = function()
@@ -181,9 +191,9 @@ return ui.component(function(props: Props)
 			end
 			return if several() and focused() then theme.ring else theme.line
 		end,
-		-- Over a browser's bar, zgui hears the pointer: the top 32 points
-		-- show the grip, as over a terminal.
-		on_pointer_move = if is_browser
+		-- Over a browser's or a panel's bar, zgui hears the pointer: the top
+		-- 32 points show the grip, as over a terminal.
+		on_pointer_move = if by_zgui
 			then function(e)
 				local near = e.local_y < 32
 				if bar_near:peek() ~= near then
@@ -191,7 +201,7 @@ return ui.component(function(props: Props)
 				end
 			end
 			else nil,
-		on_hover = if is_browser
+		on_hover = if by_zgui
 			then function(inside)
 				if not inside and bar_near:peek() then
 					bar_near:set(false)
@@ -201,7 +211,7 @@ return ui.component(function(props: Props)
 		if is_browser
 			then browser.Body(pane, tab, inner, hooks)
 			elseif term then terminal_view(term, pane, tab, inner, several)
-			else nil,
+			else panel.Body(pane, tab, inner),
 		-- The grip, centred at the top.
 		ui.row {
 			absolute = true,
@@ -209,6 +219,9 @@ return ui.component(function(props: Props)
 			left = 0,
 			w_full = true,
 			justify = "center",
+			-- Only the grip takes the pointer: the bar under the rest of the
+			-- row keeps its clicks.
+			pointer_events = "none",
 			hidden = function()
 				return grip:get() == 0
 			end,

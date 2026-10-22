@@ -18,7 +18,8 @@ A PNG or JPEG, decoded once per `src` and kept across reloads.
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
-| `src` | `Reactive<string>` | required | a path (from the script's directory) or an absolute one; a state or function swaps the image |
+| `src` | `Reactive<string>` | required | a path (from the script's directory) or an absolute one; `"host:<name>"`, an image the app made (`ScriptHost::image`), following each one it replaces it with; a state or function swaps the image |
+| `fallback` | `Node` | none | shown in the image's place while a remote one (`https://…`) loads, and if it fails (a failed picture is logged, not a script error): an avatar's initials |
 | `fit` | `"fill" \| "contain" \| "cover" \| "none" \| "scale_down"` | `"fill"` | how the pixels fill the box (CSS `object-fit`) |
 | `label` | `string` | `""` | its accessible name |
 | `w`, `h` | `Length` | the image's size in pixels, as points | |
@@ -31,7 +32,7 @@ An SVG, from a file or from markup, drawn as vectors at every scale; `tint` reco
 | --- | --- | --- | --- |
 | `src` | `Reactive<string>` | `src` or `code` | a path; a state or function swaps it, and may return `"code:" .. markup` |
 | `code` | `string` | | SVG markup |
-| `tint` | `Reactive<Color>` | none | every painted pixel in this color, keeping its alpha (a state or function re-tints) |
+| `tint` | `Reactive<Color>` | none | every painted pixel in this color, keeping its alpha (a state or function re-tints); `"currentColor"` takes the text color the node inherits, as CSS's does, so an icon follows its button's `color` and `hover` color |
 | `label` | `string` | `""` | its accessible name |
 | `w`, `h` | `Length` | the SVG's size | |
 

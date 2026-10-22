@@ -341,3 +341,46 @@ fn the_sidebar_closes_and_opens_and_the_keys_still_browse() {
     app.run("toggle_sidebar");
     assert_eq!(app.panels()[0].0, open, "back where it was");
 }
+
+/// A machine's worth of processes, sampled for a while: each sample
+/// replaces the list, so the script holds about as much at the end as after
+/// the first (it once kept the last 64 lists and ran out of memory).
+#[test]
+fn sampling_many_processes_holds_steady_memory() {
+    let app = App::new();
+    let many = |tick: f64| {
+        Value::List(
+            (0..700)
+                .map(|i| {
+                    let cpu = (i as f64 * 7. + tick * 13.) % 50.;
+                    map(&[
+                        ("pid", num(100. + i as f64)),
+                        ("name", Value::Str(format!("proc{i}").into())),
+                        ("cpu", num(cpu)),
+                        ("gpu", num(0.)),
+                        ("mem", num(50. + i as f64)),
+                        ("smooth", num(cpu)),
+                    ])
+                })
+                .collect(),
+        )
+    };
+    let sample = |tick: f64| {
+        app.h.host.shared("procs", Value::Nil).set(many(tick));
+        app.h.settle();
+        app.h.frames(30);
+    };
+    sample(0.);
+    let first = app.h.host.script_memory();
+    for tick in 1..200 {
+        sample(tick as f64);
+    }
+    assert_eq!(app.h.host.error().get(), None);
+    let last = app.h.host.script_memory();
+    assert!(
+        last < first + (2 << 20),
+        "{} KB after one sample, {} KB after 200",
+        first / 1024,
+        last / 1024
+    );
+}

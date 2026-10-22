@@ -79,3 +79,14 @@ pub mod native_view;
 pub mod platform;
 pub mod terminal;
 pub mod web_view;
+
+/// Gives a map's room back once it is mostly empty (a page of thousands of
+/// nodes gone): maps keep their peak capacity otherwise. Only past 1024
+/// slots and under a quarter used, so rehashing is rare.
+pub(crate) fn shrink_sparse<K: std::hash::Hash + Eq, V, S: std::hash::BuildHasher>(
+    map: &mut std::collections::HashMap<K, V, S>,
+) {
+    if map.capacity() > 1024 && map.len() * 4 < map.capacity() {
+        map.shrink_to(map.len() * 2);
+    }
+}

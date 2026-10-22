@@ -505,6 +505,10 @@ fn element_options_are_typed_on_their_constructors() {
                 // draws `code`.
                 keys.retain(|k| k != "code");
             }
+            if name == "svg" {
+                // Likewise, only an image has a `fallback`.
+                keys.retain(|k| k != "fallback");
+            }
             let (line, tables) = options_of(name)
                 .unwrap_or_else(|| panic!("ui.{name} reads {keys:?} but takes no table type"));
             let gaps: Vec<_> = keys

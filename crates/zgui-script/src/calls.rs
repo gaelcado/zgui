@@ -373,6 +373,10 @@ pub(crate) fn install(
     ui.set(
         "call",
         lua.create_function(move |lua, (name, arg): (String, Option<Value>)| {
+            {
+                let env = env(lua)?;
+                env.permits(&env.exposed_actions, &name, "ui.call")?;
+            }
             let arg = arg.unwrap_or(Value::Nil);
             let promise = pending(lua, name.clone())?;
             let action = actions.borrow().get(&name).cloned();

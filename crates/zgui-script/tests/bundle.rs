@@ -64,18 +64,17 @@ return ui.column { ui.text { greet(shared), id = "label" } }"#,
             .any(|name| name == "bundled"),
         "the theme file came from the bundle"
     );
-    // A bundle never changes: there is nothing to watch.
+    // A bundle never changes: watching it reloads nothing (it waits for
+    // plugins on the disk, at no cost).
     let watching = h.host.watch(std::time::Duration::from_millis(1));
-    let done = Rc::new(std::cell::Cell::new(false));
-    {
-        let done = done.clone();
-        h.executor.borrow_mut().spawn(async move {
-            watching.await;
-            done.set(true);
-        });
+    h.executor.borrow_mut().spawn(watching);
+    let calls = h.host.script_calls();
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        h.settle();
     }
-    h.settle();
-    assert!(done.get(), "watch returns at once");
+    assert_eq!(h.host.script_calls(), calls, "nothing reloaded");
+    assert_eq!(h.text("label"), "Hello, bundle");
 }
 
 #[test]

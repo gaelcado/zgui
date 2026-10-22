@@ -690,6 +690,10 @@ fn sleep_until(at: std::time::Instant) {
         std::thread::sleep(at - now);
     }
 }
+/// How long after a resize frames skip the refresh-point wait (the renderer
+/// presents on the plain layer for as long: `zgui_gpu`'s `RESIZE_SETTLE`).
+#[cfg(target_os = "macos")]
+const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 /// The refresh point steady frames present at (see `Host::refresh_grid`),
 /// and when they render before it.
 #[cfg(target_os = "macos")]
@@ -933,6 +937,12 @@ struct Host {
     /// (see `Host::refresh_grid`).
     #[cfg(target_os = "macos")]
     presented_at: Option<std::time::Instant>,
+    /// When the window last changed size: live-resize frames are drawn
+    /// inside AppKit's resize transaction, which shows them with the new
+    /// frame, so they skip the refresh-point wait (`refresh_grid`) that
+    /// would hold the next resize step back.
+    #[cfg(target_os = "macos")]
+    resized_at: Option<std::time::Instant>,
     #[cfg(target_os = "macos")]
     latch: Latch,
     frame_timer: crate::frame_source::FrameTimer,
@@ -1100,6 +1110,8 @@ impl Host {
             link_paced: false,
             #[cfg(target_os = "macos")]
             presented_at: None,
+            #[cfg(target_os = "macos")]
+            resized_at: None,
             #[cfg(target_os = "macos")]
             latch: Latch::default(),
             frame_arrived: false,
@@ -1982,6 +1994,10 @@ impl Host {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.resize(size.width, size.height);
                     }
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.resized_at = Some(std::time::Instant::now());
+                    }
                     self.force = true;
                     // AppKit delivers live resizes synchronously and commits the
                     // new window frame when this callback returns. Paint now so
@@ -2149,6 +2165,16 @@ impl Host {
                 if let Some(key) = key
                     && !self.ime_active
                 {
+                    // The physical key, as the DOM's `KeyboardEvent.code`.
+                    self.context
+                        .ui
+                        .input
+                        .set_key_code(match event.physical_key {
+                            PhysicalKey::Code(KeyCode::SuperLeft) => Some("MetaLeft".into()),
+                            PhysicalKey::Code(KeyCode::SuperRight) => Some("MetaRight".into()),
+                            PhysicalKey::Code(code) => Some(format!("{code:?}").into()),
+                            PhysicalKey::Unidentified(_) => None,
+                        });
                     if event.state == ElementState::Pressed {
                         prevented = self.dispatch_prevented(InputEvent::KeyDown {
                             key: key.clone(),
@@ -2164,6 +2190,7 @@ impl Host {
                             modifiers: self.modifiers,
                         })?;
                     }
+                    self.context.ui.input.set_key_code(None);
                 }
                 if event.state == ElementState::Pressed
                     && (!prevented || self.context.ui.input.has_pending_keys())
@@ -2320,6 +2347,13 @@ impl Host {
     #[cfg(target_os = "macos")]
     fn refresh_grid(&mut self) -> Option<(std::time::Instant, std::time::Duration)> {
         let now = std::time::Instant::now();
+        if self
+            .resized_at
+            .is_some_and(|at| now.duration_since(at) < RESIZE_SETTLE)
+        {
+            self.latch = Latch::default();
+            return None;
+        }
         let steady = self
             .presented_at
             .is_some_and(|at| now.duration_since(at) < STEADY_GAP);

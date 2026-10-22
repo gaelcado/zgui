@@ -27,6 +27,19 @@
 		// Frosted glass under the active tab and agent, clearer than the
 		// wash; a faint one under the pointer.
 		"terminal.glass": "#ffffff1c",
-		"terminal.glass_hover": "#ffffff0d"
+		"terminal.glass_hover": "#ffffff0d",
+		// A tab's icon tiles, and the strip's drop and slot highlights.
+		"terminal.tile_bg": "#ffffff17",
+		"terminal.tile_dim": "#ffffff0d",
+		"terminal.tile_line": "#ffffff0f",
+		"terminal.drop": "#ffffff1f",
+		"terminal.slot": "#ffffff0f",
+		"terminal.slot_line": "#ffffff29",
+		// Context menus: a darker frost than the window's.
+		"terminal.menu.bg": "#24252a99",
+		"terminal.menu.line": "#ffffff14",
+		"terminal.menu.hover": "#ffffff12",
+		"terminal.menu.separator": "#ffffff0f",
+		"terminal.menu.shadow": "0 6 18 0 #00000040"
 	}
 }

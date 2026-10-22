@@ -11,6 +11,8 @@
 //! panes it had, attaches them again (see `terminal/session.rs`).
 #[path = "terminal/activity.rs"]
 mod activity;
+#[path = "terminal/plugins.rs"]
+mod plugins;
 #[path = "terminal/program_status.rs"]
 mod program_status;
 #[path = "support/script_menus.rs"]
@@ -20,7 +22,7 @@ mod session;
 
 use std::{path::Path, time::Duration};
 use zgui_desktop::{Application, FontData, Glass, Titlebar, WindowOptions};
-use zgui_script::{ScriptHost, Value};
+use zgui_script::{Capability, ScriptHost, Value};
 
 const TITLE: &str = "Terminal";
 const WIDTH: f64 = 1180.;
@@ -76,6 +78,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 bundled(&cx.ui.runtime)
             };
+            // What scripts save (`ui.persist`: a plugin's notes, an
+            // editor's last file) beside the layout.
+            let host = host.storage(session::dir().join("script-state"));
             host.on_error(|message| eprintln!("zterm: {message}"));
             // The script's view of the window: its corner radius (panes
             // stay concentric with it) and where the app was started.
@@ -188,6 +193,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             host.action("set_title", move |title| {
                 if let Value::Str(title) = title {
                     window.set_title(title.to_string());
+                }
+            });
+
+            // Plugins (terminal/plugins.rs): found in the plugins directory
+            // when the app starts and when ⌘K opens, and run once the user
+            // allows what they ask for. The interface lists them
+            // (`plugins`); a change to the ones that run reloads it.
+            let listed = host.shared("plugins", Value::Nil);
+            host.shared(
+                "plugins_dir",
+                plugins::dir().to_string_lossy().into_owned().as_str(),
+            );
+            let found = plugins::find();
+            listed.set(plugins::published(&found));
+            let running = plugins::enabled(&found);
+            host.set_plugins(running.clone());
+            let (rescan, mut rescans) = zgui::task::latest::<()>();
+            {
+                let host = host.clone();
+                cx.tasks.spawn(async move {
+                    let mut running = running;
+                    while rescans.recv().await.is_some() {
+                        let found = plugins::find();
+                        listed.set(plugins::published(&found));
+                        let now = plugins::enabled(&found);
+                        if now != running {
+                            running = now;
+                            host.set_plugins(running.clone());
+                            let _ = host.reload();
+                        }
+                    }
+                });
+            }
+            let again = rescan.clone();
+            host.action("plugins_rescan", move |_| {
+                again.send(());
+            });
+            host.action("plugin_decide", move |answer| {
+                if let (Some(Value::Str(id)), Some(Value::Bool(allowed))) =
+                    (answer.field("id"), answer.field("allowed"))
+                {
+                    plugins::decide(id, *allowed);
+                    rescan.send(());
+                }
+            });
+            host.action("open_plugins_folder", |_| {
+                let _ = std::process::Command::new("open")
+                    .arg(plugins::dir())
+                    .spawn();
+            });
+            // What plugins reach: the agents list with `terminals` (as
+            // `ui.term` is), the network with `network`; nothing else of
+            // the app's.
+            host.expose_shared("agents", Some(Capability::Terminals));
+            host.fetcher(|request| {
+                let (answer, mut answered) = zgui::task::latest();
+                std::thread::spawn(move || answer.send(plugins::fetch(&request)));
+                async move {
+                    answered
+                        .recv()
+                        .await
+                        .unwrap_or_else(|| Err("the request was dropped".into()))
                 }
             });
 

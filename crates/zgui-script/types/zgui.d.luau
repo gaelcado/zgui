@@ -65,6 +65,68 @@ type function Item(t)
 	return types.never
 end
 
+-- What a `ui.variants` definition's axes accept, the choosing table its
+-- recipe is called with: each axis its options' names (a boolean for an
+-- on-off axis, `[true]` / `[false]`), or `extra` (a state or a function
+-- choosing it). Closed, as props tables are: an unknown axis is an error.
+type function VariantChoice(definition, extra)
+	local out = types.newtable()
+	if not definition:is("table") then
+		return out
+	end
+	local variants = definition:readproperty(types.singleton("variants"))
+	if not variants or not variants:is("table") then
+		return out
+	end
+	for axis, property in variants:properties() do
+		local options = property.read
+		local names: { type } = {}
+		local boolean = false
+		if options and options:is("table") then
+			for option in options:properties() do
+				local name = option:value()
+				if name == "true" or name == "false" then
+					boolean = true
+				else
+					names[#names + 1] = option
+				end
+			end
+			local indexer = options:indexer()
+			if indexer and indexer.index:is("boolean") then
+				boolean = true
+			end
+		end
+		if boolean then
+			names[#names + 1] = types.boolean
+		end
+		names[#names + 1] = extra
+		local choice = if #names == 1 then names[1] else types.unionof(table.unpack(names))
+		out:setproperty(axis, types.optional(choice))
+	end
+	out:setindexer(types.number, types.never)
+	return out
+end
+
+-- A recipe's variant props, for a component's own props type:
+-- `Merge<ContainerProps, VariantProps<typeof(button)>>` (the axes alone,
+-- so the props keep their children).
+export type function VariantProps(recipe)
+	local out = types.newtable()
+	if not recipe:is("function") then
+		return out
+	end
+	local head: { type } = recipe:parameters().head or {}
+	local choice: type? = head[1]
+	if choice and choice:is("table") then
+		for key, property in choice:properties() do
+			if property.read then
+				out:setproperty(key, property.read)
+			end
+		end
+	end
+	return out
+end
+
 -- A table's fields, each optional: what `state:patch` takes.
 type function Partial(t)
 	if t:is("any") then
@@ -364,6 +426,10 @@ end
 -- `ui.tween`, `ui.spring`, `ui.loop`: a property eased in Rust.
 declare extern type Binding with
 end
+-- Variants chosen from a `ui.variants` recipe: give it to an element as
+-- `variants = …`.
+declare extern type Variants with
+end
 declare extern type Bitmap with
 	w: number
 	h: number
@@ -656,8 +722,37 @@ export type Child = Node | string | (() -> TextValue) | { read [number]: Child }
 
 -- Event handlers: a function, or an action Rust runs.
 export type Handler = () -> ...unknown
-export type PointerEvent = { x: number, y: number, local_x: number, local_y: number }
-export type KeyEvent = { key: string, shift: boolean, ctrl: boolean, alt: boolean, meta: boolean, ["repeat"]: boolean }
+-- `clicks` (on_press): the press's count, 2 for a double click's second.
+-- `shift`, `ctrl`, `alt`, `meta`: the keys held.
+export type PointerEvent = {
+	x: number,
+	y: number,
+	local_x: number,
+	local_y: number,
+	clicks: number?,
+	shift: boolean,
+	ctrl: boolean,
+	alt: boolean,
+	meta: boolean,
+}
+-- What `on_click` is told: the keys held as it was clicked (a ⌘-click).
+export type ClickEvent = { shift: boolean, ctrl: boolean, alt: boolean, meta: boolean }
+-- A node's click: told the keys held, which it may ignore.
+export type ClickHandler = (e: ClickEvent) -> ...unknown
+-- `code`: the physical key, as the DOM's `KeyboardEvent.code` (`"KeyA"`,
+-- `"Digit1"`, `"BracketLeft"`), whatever the layout and modifiers typed;
+-- nil when the platform doesn't say.
+export type KeyEvent = {
+	key: string,
+	code: string?,
+	-- A text field holds focus: a bare-key shortcut gives way to typing.
+	editing: boolean,
+	shift: boolean,
+	ctrl: boolean,
+	alt: boolean,
+	meta: boolean,
+	["repeat"]: boolean,
+}
 export type WheelEvent = { dx: number, dy: number }
 export type Size = { w: number, h: number }
 export type DragPoint = { x: number, y: number, local_x: number, local_y: number, w: number, h: number }
@@ -742,7 +837,15 @@ export type Styles = {
 	border_color: Color?,
 	border_over: boolean?,
 	border_dash: Pair?,
+	-- An outline around the box (CSS's): its width, colour, and how far
+	-- outside it starts (negative: over the box's edge, an inset ring).
+	outline: Num?,
+	outline_color: Color?,
+	outline_offset: Num?,
 	shadow: Shadow?,
+	-- Shadows inside the box (CSS's inset): a ring as wide on each side as
+	-- the offset pushes it, plus the spread; drawn sharp (no blur).
+	inset_shadow: Shadow?,
 	opacity: Num?,
 	brightness: number?,
 	contrast: number?,
@@ -775,6 +878,10 @@ export type Styles = {
 	letter_spacing: Num?,
 	-- Tabular figures: every digit the same width.
 	tabular: boolean?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: boolean?,
+	underline_offset: Num?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: number?,
 	y: number?,
@@ -869,7 +976,11 @@ export type StyleProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -900,6 +1011,10 @@ export type StyleProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -923,6 +1038,10 @@ export type NodeProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -932,6 +1051,14 @@ export type NodeProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -955,7 +1082,7 @@ export type NodeProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -970,6 +1097,10 @@ export type NodeProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -1075,7 +1206,11 @@ export type Props = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -1106,6 +1241,10 @@ export type Props = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -1124,6 +1263,10 @@ export type Props = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -1133,6 +1276,14 @@ export type Props = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -1156,7 +1307,7 @@ export type Props = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -1171,6 +1322,10 @@ export type Props = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -1274,7 +1429,11 @@ export type ContainerProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -1305,6 +1464,10 @@ export type ContainerProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -1323,6 +1486,10 @@ export type ContainerProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -1332,6 +1499,14 @@ export type ContainerProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -1355,7 +1530,7 @@ export type ContainerProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -1370,6 +1545,10 @@ export type ContainerProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -1472,7 +1651,11 @@ export type ScrollProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -1503,6 +1686,10 @@ export type ScrollProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -1521,6 +1708,10 @@ export type ScrollProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -1530,6 +1721,14 @@ export type ScrollProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -1553,7 +1752,7 @@ export type ScrollProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -1568,6 +1767,10 @@ export type ScrollProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -1675,7 +1878,11 @@ export type TextProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -1706,6 +1913,10 @@ export type TextProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -1724,6 +1935,10 @@ export type TextProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -1733,6 +1948,14 @@ export type TextProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -1756,7 +1979,7 @@ export type TextProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -1771,6 +1994,10 @@ export type TextProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -1794,6 +2021,9 @@ export type TextProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 	[number]: Text,
+	-- Show a string as it is, braces and all, not as a template: for data
+	-- (code, titles, messages) that might hold `{name}`.
+	literal: boolean?,
 }
 -- `ui.span`'s options are plain values.
 export type SpanProps = {
@@ -1806,11 +2036,37 @@ export type SpanProps = {
 	bold: boolean?,
 	italic: boolean?,
 	underline: boolean?,
+	-- How far below the baseline the underline sits (CSS's
+	-- `text-underline-offset`).
+	underline_offset: number?,
 	strike: boolean?,
 	font: "mono"?,
+	-- A link (`on_click`) under the pointer: underlined, recoloured. With
+	-- it, the link isn't underlined at rest unless `underline` says so.
+	hover: { underline: boolean?, color: Color? }?,
+	-- An icon before the text, in the line (a file chip's file type):
+	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
+	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,
+	-- or `"currentColor"` for the span's.
+	icon: {
+		src: string?,
+		code: string?,
+		size: number?,
+		gap: number?,
+		tint: Color?,
+	}?,
 	on_click: (Handler | Action)?,
+	-- Its text as it is, not a template (see TextProps).
+	literal: boolean?,
+	-- Room around it: across (before and after it, taking space in the
+	-- line), or `{ across, down }`; with `bg`, the background hugs the text
+	-- plus this (an inline code chip) instead of filling the line.
+	padding: (number | { number })?,
+	-- The background's corner radius.
+	radius: number?,
 }
--- Runs: spans, strings, functions, or span options.
+-- Runs: spans, strings, functions, or span options. `literal`: the runs'
+-- strings as they are (a span's own `literal` wins).
 export type RichProps = {
 	-- Size and position.
 	w: Reactive<Length>?,
@@ -1889,7 +2145,11 @@ export type RichProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -1920,6 +2180,10 @@ export type RichProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -1938,6 +2202,10 @@ export type RichProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -1947,6 +2215,14 @@ export type RichProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -1970,7 +2246,7 @@ export type RichProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -1985,6 +2261,10 @@ export type RichProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -2008,6 +2288,7 @@ export type RichProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 	[number]: Span | Text | SpanProps,
+	literal: boolean?,
 }
 export type ImageProps = {
 	-- Size and position.
@@ -2087,7 +2368,11 @@ export type ImageProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -2118,6 +2403,10 @@ export type ImageProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2136,6 +2425,10 @@ export type ImageProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -2145,6 +2438,14 @@ export type ImageProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -2168,7 +2469,7 @@ export type ImageProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2183,6 +2484,10 @@ export type ImageProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -2206,10 +2511,14 @@ export type ImageProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 	[number]: never,
-	-- PNG or JPEG, relative to the script.
+	-- PNG or JPEG, relative to the script; `https://…` (through the
+	-- host's fetcher); `host:<name>` (an image the app made).
 	src: Reactive<string>,
 	-- For accessibility.
 	label: string?,
+	-- Shown in its place while a remote picture loads and if it fails (an
+	-- avatar's initials).
+	fallback: Node?,
 }
 -- One of `src` (a file) and `code` (SVG markup) is required.
 export type SvgProps = {
@@ -2290,7 +2599,11 @@ export type SvgProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -2321,6 +2634,10 @@ export type SvgProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2339,6 +2656,10 @@ export type SvgProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -2348,6 +2669,14 @@ export type SvgProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -2371,7 +2700,7 @@ export type SvgProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2386,6 +2715,10 @@ export type SvgProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -2491,7 +2824,11 @@ export type CanvasProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -2522,6 +2859,10 @@ export type CanvasProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2540,6 +2881,10 @@ export type CanvasProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -2549,6 +2894,14 @@ export type CanvasProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -2572,7 +2925,7 @@ export type CanvasProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2587,6 +2940,10 @@ export type CanvasProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -2691,7 +3048,11 @@ export type CheckboxProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -2722,6 +3083,10 @@ export type CheckboxProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2740,6 +3105,10 @@ export type CheckboxProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -2749,6 +3118,14 @@ export type CheckboxProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -2772,7 +3149,7 @@ export type CheckboxProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2787,6 +3164,10 @@ export type CheckboxProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -2891,7 +3272,11 @@ export type InputProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -2922,6 +3307,10 @@ export type InputProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -2940,6 +3329,10 @@ export type InputProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -2949,6 +3342,14 @@ export type InputProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -2972,7 +3373,7 @@ export type InputProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2987,6 +3388,10 @@ export type InputProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -3020,6 +3425,11 @@ export type InputProps = {
 	placeholder_color: Reactive<Color>?,
 	-- Focusing it selects all its text (an address bar).
 	select_on_focus: boolean?,
+	-- A password field: its text shows as a bullet per character, and
+	-- copying or cutting it gives nothing.
+	secure: boolean?,
+	-- Several lines only: numbered in a gutter at the left (a code editor).
+	line_numbers: boolean?,
 }
 export type ProgressProps = {
 	-- Size and position.
@@ -3099,7 +3509,11 @@ export type ProgressProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -3130,6 +3544,10 @@ export type ProgressProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -3148,6 +3566,10 @@ export type ProgressProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -3157,6 +3579,14 @@ export type ProgressProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -3180,7 +3610,7 @@ export type ProgressProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -3195,6 +3625,10 @@ export type ProgressProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -3299,7 +3733,11 @@ export type SliderProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -3330,6 +3768,10 @@ export type SliderProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -3348,6 +3790,10 @@ export type SliderProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -3357,6 +3803,14 @@ export type SliderProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -3380,7 +3834,7 @@ export type SliderProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -3395,6 +3849,10 @@ export type SliderProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -3503,7 +3961,11 @@ export type ListProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -3534,6 +3996,10 @@ export type ListProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -3552,6 +4018,10 @@ export type ListProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -3561,6 +4031,14 @@ export type ListProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -3584,7 +4062,7 @@ export type ListProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -3599,6 +4077,10 @@ export type ListProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -3622,14 +4104,258 @@ export type ListProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 	[number]: never,
-	count: Reactive<number>,
+	-- The row count (with `heights`, their length).
+	count: Reactive<number>?,
 	-- Builds row `index` (from 1).
 	row: (index: number) -> Node,
 	-- Every row's height in points (28 by default).
 	height: number?,
+	-- Each row's own height instead, in order: a list, a state holding one
+	-- (a host's shared value costs the script nothing), or a function
+	-- returning one (tracked). The row count is its length.
+	heights: ({ number } | Readable<{ number }> | (() -> { number }))?,
+	-- Rows (from 1, in order) that stick to the top while their section
+	-- scrolls past, each pushed up by the next: section headers. With
+	-- `heights`.
+	sticky: ({ number } | Readable<{ number }> | (() -> { number }))?,
+	-- How far below the top the sticky rows stick (CSS's sticky `top`).
+	sticky_top: number?,
 	-- Rows built beyond each edge (2 by default).
 	overscan: number?,
 	offset: State<number>?,
+}
+-- Where a modal's panel sits in the window: lined up with its start,
+-- centre or end across (`x`) and down (`y`), `inset` points from the edges
+-- (a number, or { top, right, bottom, left }). Centred unless set.
+export type ModalPlacement = {
+	x: ("start" | "center" | "end")?,
+	y: ("start" | "center" | "end")?,
+	inset: (number | { number })?,
+}
+export type LayerProps = {
+	-- Size and position.
+	w: Reactive<Length>?,
+	h: Reactive<Length>?,
+	size: Reactive<Pair>?,
+	min_w: Reactive<Length>?,
+	max_w: Reactive<Length>?,
+	min_h: Reactive<Length>?,
+	max_h: Reactive<Length>?,
+	w_full: Reactive<boolean>?,
+	h_full: Reactive<boolean>?,
+	aspect: Reactive<number>?,
+	absolute: Reactive<boolean>?,
+	relative: Reactive<boolean>?,
+	top: Reactive<Length>?,
+	left: Reactive<Length>?,
+	right: Reactive<Length>?,
+	bottom: Reactive<Length>?,
+	-- Spacing.
+	p: Reactive<Length>?,
+	px: Reactive<Length>?,
+	py: Reactive<Length>?,
+	pt: Reactive<Length>?,
+	pr: Reactive<Length>?,
+	pb: Reactive<Length>?,
+	pl: Reactive<Length>?,
+	m: Reactive<Length>?,
+	mx: Reactive<Length>?,
+	my: Reactive<Length>?,
+	mt: Reactive<Length>?,
+	mr: Reactive<Length>?,
+	mb: Reactive<Length>?,
+	ml: Reactive<Length>?,
+	gap: Reactive<Num>?,
+	gap_x: Reactive<Length>?,
+	gap_y: Reactive<Length>?,
+	-- Flex and grid.
+	direction: Reactive<Direction>?,
+	grow: Reactive<number>?,
+	shrink: Reactive<number>?,
+	basis: Reactive<Length>?,
+	flex_wrap: Reactive<boolean>?,
+	wrap_reverse: Reactive<boolean>?,
+	items: Reactive<Align>?,
+	justify: Reactive<Justify>?,
+	self: Reactive<Align>?,
+	content: Reactive<AlignContent>?,
+	grid: Reactive<boolean>?,
+	cols: Reactive<number>?,
+	rows: Reactive<number>?,
+	col_start: Reactive<number>?,
+	row_start: Reactive<number>?,
+	col_span: Reactive<number>?,
+	row_span: Reactive<number>?,
+	col_span_full: Reactive<boolean>?,
+	row_span_full: Reactive<boolean>?,
+	overflow: Reactive<Overflow>?,
+	overflow_x: Reactive<Overflow>?,
+	overflow_y: Reactive<Overflow>?,
+	hidden: Reactive<boolean>?,
+	invisible: Reactive<boolean>?,
+	-- Paint.
+	bg: Reactive<Color>?,
+	gradient: Reactive<Gradient>?,
+	color: Reactive<Color>?,
+	bg_image: Reactive<string>?,
+	bg_fit: Reactive<Fit>?,
+	rounded: Reactive<Num>?,
+	corners: Reactive<Corners>?,
+	rounded_tl: Reactive<number>?,
+	rounded_tr: Reactive<number>?,
+	rounded_br: Reactive<number>?,
+	rounded_bl: Reactive<number>?,
+	border: Reactive<Num>?,
+	border_sides: Reactive<Sides>?,
+	border_color: Reactive<Color>?,
+	border_over: Reactive<boolean>?,
+	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
+	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
+	opacity: Reactive<Num>?,
+	brightness: Reactive<number>?,
+	contrast: Reactive<number>?,
+	saturate: Reactive<number>?,
+	blur: Reactive<number>?,
+	backdrop_blur: Reactive<Num>?,
+	fade: Reactive<Pair>?,
+	fade_x: Reactive<Pair>?,
+	fade_sides: Reactive<Sides>?,
+	fade_overflow: Reactive<boolean>?,
+	snap: Reactive<boolean>?,
+	clip_inset: Reactive<Sides>?,
+	layer: Reactive<boolean>?,
+	fit: Reactive<Fit>?,
+	tint: Reactive<Color>?,
+	cursor: Reactive<Cursor>?,
+	-- Text.
+	text_size: Reactive<Num>?,
+	weight: Reactive<Num>?,
+	bold: Reactive<boolean>?,
+	italic: Reactive<boolean>?,
+	align: Reactive<TextAlign>?,
+	font: Reactive<Font>?,
+	wrap: Reactive<boolean>?,
+	truncate: Reactive<boolean>?,
+	lines: Reactive<number>?,
+	line_height: Reactive<Num>?,
+	letter_spacing: Reactive<Num>?,
+	-- Tabular figures: every digit the same width.
+	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
+	-- Transforms: after layout, about `origin` (fractions of the node).
+	x: Reactive<number>?,
+	y: Reactive<number>?,
+	scale: Reactive<number>?,
+	scale_x: Reactive<number>?,
+	scale_y: Reactive<number>?,
+	rotate: Reactive<number>?,
+	skew: Reactive<number>?,
+	skew_x: Reactive<number>?,
+	skew_y: Reactive<number>?,
+	origin: Reactive<Pair>?,
+	-- The subtree's theme: a theme's name (`"zgui-light"`), or tokens to
+	-- override (`{ accent = "#e5484d" }`, with `theme = name` to start from).
+	theme: Reactive<ThemeSpec>?,
+	-- Identity, for selectors, refs and animations.
+	id: string?,
+	-- Space-separated class names.
+	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
+	ref: (Ref | { Ref })?,
+	focusable: boolean?,
+	-- A press on it (or on what inside takes no input) moves the window; a
+	-- double click zooms it. Buttons and inputs inside keep their clicks.
+	-- CSS pointer-events: "none" (or false) lets the pointer through to what
+	-- is under the node (presses, hover, the wheel, drops, a native view);
+	-- descendants with handlers still take it. A state or function follows.
+	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
+	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
+	-- A condition (true disables), or the styles it shows while disabled.
+	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
+	hover: Styles?,
+	active: Styles?,
+	focus: Styles?,
+	-- Size animation ("height", "width", "size"; `true` is "height") or
+	-- position animation ("position"). A `layout_id` node mounting as
+	-- another with the same id unmounts (or while it is mounted) moves and
+	-- scales from that one's box.
+	layout: ("height" | "width" | "size" | "position" | boolean)?,
+	layout_id: string?,
+	layout_ease: Easing?,
+	-- Milliseconds.
+	layout_duration: number?,
+	layout_enter: boolean?,
+	layout_clip: boolean?,
+	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
+	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	mask: (Bitmap | MaskOptions)?,
+	bg_shader: Shader?,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	shader_params: { read [number]: Color | { number } }?,
+	-- Events.
+	on_click: (ClickHandler | Handler | Action)?,
+	-- Primary pointer down and up.
+	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
+	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
+	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
+	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- Return true to consume the key.
+	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
+	on_key_up: (((key: string) -> ...unknown) | Action)?,
+	on_focus: (Handler | Action)?,
+	on_blur: (Handler | Action)?,
+	on_wheel: (((e: WheelEvent) -> ...unknown) | Action)?,
+	on_mount: ((element: Element) -> ...unknown)?,
+	-- When layout gives it a new size, and at its first layout.
+	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
+	-- Drag and drop within the window. Payloads are what `on_drag`
+	-- returns: the script's own plain values, so they are `any` here.
+	-- A source: `on_drag` returns the payload once the pointer moves 4
+	-- points; `drag_preview` builds what follows the pointer.
+	on_drag: (() -> any)?,
+	drag_preview: ((payload: any) -> Node)?,
+	on_drag_end: ((payload: any, accepted: boolean) -> ...unknown)?,
+	-- A destination: `drop_when` filters payloads (default: all).
+	drop_when: ((payload: any) -> unknown)?,
+	on_drag_over: ((payload: any, e: DragPoint) -> ...unknown)?,
+	on_drag_leave: ((payload: any) -> ...unknown)?,
+	on_drop: ((payload: any, e: DragPoint) -> ...unknown)?,
+	-- A secondary click (control-click on macOS) shows the returned
+	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
+	-- returning nil (or nothing) shows none.
+	context_menu: ((e: PointerEvent) -> ...{ Node }?)?,
+	-- The context menu panel's look: bg, rounded, p, gap, backdrop_blur,
+	-- border, shadow, w, …
+	context_menu_style: Styles?,
+	-- Open the context menu under the node, from its left edge (a tab's),
+	-- rather than at the pointer.
+	context_menu_below: boolean?,
+	[number]: Child,
+	open: State<boolean>?,
+	label: string?,
+	placement: ModalPlacement?,
 }
 export type ModalProps = {
 	-- Size and position.
@@ -3709,7 +4435,11 @@ export type ModalProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -3740,6 +4470,10 @@ export type ModalProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -3758,6 +4492,10 @@ export type ModalProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -3767,6 +4505,14 @@ export type ModalProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -3790,7 +4536,7 @@ export type ModalProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -3805,6 +4551,10 @@ export type ModalProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -3830,6 +4580,16 @@ export type ModalProps = {
 	[number]: Child,
 	open: State<boolean>,
 	label: string?,
+	placement: ModalPlacement?,
+	autofocus: boolean?,
+}
+-- Where an anchored popover or menu opens: on `side` of its trigger
+-- (flipping when that side lacks room), lined up with its start, centre
+-- or end, `offset` points away (bottom, start, 4 by default).
+export type Placement = {
+	side: ("bottom" | "top" | "left" | "right")?,
+	align: ("start" | "center" | "end")?,
+	offset: number?,
 }
 export type PopoverProps = {
 	-- Size and position.
@@ -3909,7 +4669,11 @@ export type PopoverProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -3940,6 +4704,10 @@ export type PopoverProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -3958,6 +4726,10 @@ export type PopoverProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -3967,6 +4739,14 @@ export type PopoverProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -3990,7 +4770,7 @@ export type PopoverProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -4005,6 +4785,10 @@ export type PopoverProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4032,8 +4816,14 @@ export type PopoverProps = {
 	-- The trigger, shown where the popover is written.
 	anchor: Node,
 	label: string?,
+	placement: Placement?,
+	-- Focus its first control as it opens (true); false keeps the panel
+	-- itself focused (a menu whose search field waits to be clicked).
+	autofocus: boolean?,
 }
 -- `ui.menu_item { "Copy", on_click = … }`: the label first.
+-- The label (`{ "Copy" }`), or `label` with content of its own after it
+-- (an icon, the label, a shortcut).
 export type MenuItemProps = {
 	-- Size and position.
 	w: Reactive<Length>?,
@@ -4112,7 +4902,11 @@ export type MenuItemProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -4143,6 +4937,10 @@ export type MenuItemProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -4161,6 +4959,10 @@ export type MenuItemProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -4170,6 +4972,14 @@ export type MenuItemProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -4193,7 +5003,7 @@ export type MenuItemProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -4208,6 +5018,10 @@ export type MenuItemProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4230,8 +5044,10 @@ export type MenuItemProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
-	[number]: string,
+	[number]: Child,
 	label: string?,
+	-- Chosen, it leaves the menu open (a toggle, a pin).
+	keep_open: boolean?,
 }
 export type SubmenuProps = {
 	-- Size and position.
@@ -4311,7 +5127,11 @@ export type SubmenuProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -4342,6 +5162,10 @@ export type SubmenuProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -4360,6 +5184,10 @@ export type SubmenuProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -4369,6 +5197,14 @@ export type SubmenuProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -4392,7 +5228,7 @@ export type SubmenuProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -4407,6 +5243,10 @@ export type SubmenuProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4432,6 +5272,10 @@ export type SubmenuProps = {
 	[number]: Child,
 	open: State<boolean>,
 	label: string?,
+	-- Its trigger row, drawn by the app (a `ui.menu_item` with an icon, the
+	-- label, a value, a chevron); the label and a "›" otherwise. It opens
+	-- when the pointer moves onto it.
+	trigger: Node?,
 }
 export type WebViewProps = {
 	-- Size and position.
@@ -4511,7 +5355,11 @@ export type WebViewProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -4542,6 +5390,10 @@ export type WebViewProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -4560,6 +5412,10 @@ export type WebViewProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -4569,6 +5425,14 @@ export type WebViewProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -4592,7 +5456,7 @@ export type WebViewProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -4607,6 +5471,10 @@ export type WebViewProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4733,7 +5601,11 @@ export type TerminalProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -4764,6 +5636,10 @@ export type TerminalProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -4782,6 +5658,10 @@ export type TerminalProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -4791,6 +5671,14 @@ export type TerminalProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -4814,7 +5702,7 @@ export type TerminalProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -4829,6 +5717,10 @@ export type TerminalProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4853,6 +5745,231 @@ export type TerminalProps = {
 	context_menu_below: boolean?,
 	[number]: never,
 	term: Term,
+}
+-- `from`: only what that plugin (by name) contributes.
+export type SlotProps = {
+	-- Size and position.
+	w: Reactive<Length>?,
+	h: Reactive<Length>?,
+	size: Reactive<Pair>?,
+	min_w: Reactive<Length>?,
+	max_w: Reactive<Length>?,
+	min_h: Reactive<Length>?,
+	max_h: Reactive<Length>?,
+	w_full: Reactive<boolean>?,
+	h_full: Reactive<boolean>?,
+	aspect: Reactive<number>?,
+	absolute: Reactive<boolean>?,
+	relative: Reactive<boolean>?,
+	top: Reactive<Length>?,
+	left: Reactive<Length>?,
+	right: Reactive<Length>?,
+	bottom: Reactive<Length>?,
+	-- Spacing.
+	p: Reactive<Length>?,
+	px: Reactive<Length>?,
+	py: Reactive<Length>?,
+	pt: Reactive<Length>?,
+	pr: Reactive<Length>?,
+	pb: Reactive<Length>?,
+	pl: Reactive<Length>?,
+	m: Reactive<Length>?,
+	mx: Reactive<Length>?,
+	my: Reactive<Length>?,
+	mt: Reactive<Length>?,
+	mr: Reactive<Length>?,
+	mb: Reactive<Length>?,
+	ml: Reactive<Length>?,
+	gap: Reactive<Num>?,
+	gap_x: Reactive<Length>?,
+	gap_y: Reactive<Length>?,
+	-- Flex and grid.
+	direction: Reactive<Direction>?,
+	grow: Reactive<number>?,
+	shrink: Reactive<number>?,
+	basis: Reactive<Length>?,
+	flex_wrap: Reactive<boolean>?,
+	wrap_reverse: Reactive<boolean>?,
+	items: Reactive<Align>?,
+	justify: Reactive<Justify>?,
+	self: Reactive<Align>?,
+	content: Reactive<AlignContent>?,
+	grid: Reactive<boolean>?,
+	cols: Reactive<number>?,
+	rows: Reactive<number>?,
+	col_start: Reactive<number>?,
+	row_start: Reactive<number>?,
+	col_span: Reactive<number>?,
+	row_span: Reactive<number>?,
+	col_span_full: Reactive<boolean>?,
+	row_span_full: Reactive<boolean>?,
+	overflow: Reactive<Overflow>?,
+	overflow_x: Reactive<Overflow>?,
+	overflow_y: Reactive<Overflow>?,
+	hidden: Reactive<boolean>?,
+	invisible: Reactive<boolean>?,
+	-- Paint.
+	bg: Reactive<Color>?,
+	gradient: Reactive<Gradient>?,
+	color: Reactive<Color>?,
+	bg_image: Reactive<string>?,
+	bg_fit: Reactive<Fit>?,
+	rounded: Reactive<Num>?,
+	corners: Reactive<Corners>?,
+	rounded_tl: Reactive<number>?,
+	rounded_tr: Reactive<number>?,
+	rounded_br: Reactive<number>?,
+	rounded_bl: Reactive<number>?,
+	border: Reactive<Num>?,
+	border_sides: Reactive<Sides>?,
+	border_color: Reactive<Color>?,
+	border_over: Reactive<boolean>?,
+	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
+	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
+	opacity: Reactive<Num>?,
+	brightness: Reactive<number>?,
+	contrast: Reactive<number>?,
+	saturate: Reactive<number>?,
+	blur: Reactive<number>?,
+	backdrop_blur: Reactive<Num>?,
+	fade: Reactive<Pair>?,
+	fade_x: Reactive<Pair>?,
+	fade_sides: Reactive<Sides>?,
+	fade_overflow: Reactive<boolean>?,
+	snap: Reactive<boolean>?,
+	clip_inset: Reactive<Sides>?,
+	layer: Reactive<boolean>?,
+	fit: Reactive<Fit>?,
+	tint: Reactive<Color>?,
+	cursor: Reactive<Cursor>?,
+	-- Text.
+	text_size: Reactive<Num>?,
+	weight: Reactive<Num>?,
+	bold: Reactive<boolean>?,
+	italic: Reactive<boolean>?,
+	align: Reactive<TextAlign>?,
+	font: Reactive<Font>?,
+	wrap: Reactive<boolean>?,
+	truncate: Reactive<boolean>?,
+	lines: Reactive<number>?,
+	line_height: Reactive<Num>?,
+	letter_spacing: Reactive<Num>?,
+	-- Tabular figures: every digit the same width.
+	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
+	-- Transforms: after layout, about `origin` (fractions of the node).
+	x: Reactive<number>?,
+	y: Reactive<number>?,
+	scale: Reactive<number>?,
+	scale_x: Reactive<number>?,
+	scale_y: Reactive<number>?,
+	rotate: Reactive<number>?,
+	skew: Reactive<number>?,
+	skew_x: Reactive<number>?,
+	skew_y: Reactive<number>?,
+	origin: Reactive<Pair>?,
+	-- The subtree's theme: a theme's name (`"zgui-light"`), or tokens to
+	-- override (`{ accent = "#e5484d" }`, with `theme = name` to start from).
+	theme: Reactive<ThemeSpec>?,
+	-- Identity, for selectors, refs and animations.
+	id: string?,
+	-- Space-separated class names.
+	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
+	ref: (Ref | { Ref })?,
+	focusable: boolean?,
+	-- A press on it (or on what inside takes no input) moves the window; a
+	-- double click zooms it. Buttons and inputs inside keep their clicks.
+	-- CSS pointer-events: "none" (or false) lets the pointer through to what
+	-- is under the node (presses, hover, the wheel, drops, a native view);
+	-- descendants with handlers still take it. A state or function follows.
+	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
+	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
+	-- A condition (true disables), or the styles it shows while disabled.
+	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
+	hover: Styles?,
+	active: Styles?,
+	focus: Styles?,
+	-- Size animation ("height", "width", "size"; `true` is "height") or
+	-- position animation ("position"). A `layout_id` node mounting as
+	-- another with the same id unmounts (or while it is mounted) moves and
+	-- scales from that one's box.
+	layout: ("height" | "width" | "size" | "position" | boolean)?,
+	layout_id: string?,
+	layout_ease: Easing?,
+	-- Milliseconds.
+	layout_duration: number?,
+	layout_enter: boolean?,
+	layout_clip: boolean?,
+	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
+	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	mask: (Bitmap | MaskOptions)?,
+	bg_shader: Shader?,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	shader_params: { read [number]: Color | { number } }?,
+	-- Events.
+	on_click: (ClickHandler | Handler | Action)?,
+	-- Primary pointer down and up.
+	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
+	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
+	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
+	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- Return true to consume the key.
+	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
+	on_key_up: (((key: string) -> ...unknown) | Action)?,
+	on_focus: (Handler | Action)?,
+	on_blur: (Handler | Action)?,
+	on_wheel: (((e: WheelEvent) -> ...unknown) | Action)?,
+	on_mount: ((element: Element) -> ...unknown)?,
+	-- When layout gives it a new size, and at its first layout.
+	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
+	-- Drag and drop within the window. Payloads are what `on_drag`
+	-- returns: the script's own plain values, so they are `any` here.
+	-- A source: `on_drag` returns the payload once the pointer moves 4
+	-- points; `drag_preview` builds what follows the pointer.
+	on_drag: (() -> any)?,
+	drag_preview: ((payload: any) -> Node)?,
+	on_drag_end: ((payload: any, accepted: boolean) -> ...unknown)?,
+	-- A destination: `drop_when` filters payloads (default: all).
+	drop_when: ((payload: any) -> unknown)?,
+	on_drag_over: ((payload: any, e: DragPoint) -> ...unknown)?,
+	on_drag_leave: ((payload: any) -> ...unknown)?,
+	on_drop: ((payload: any, e: DragPoint) -> ...unknown)?,
+	-- A secondary click (control-click on macOS) shows the returned
+	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
+	-- returning nil (or nothing) shows none.
+	context_menu: ((e: PointerEvent) -> ...{ Node }?)?,
+	-- The context menu panel's look: bg, rounded, p, gap, backdrop_blur,
+	-- border, shadow, w, …
+	context_menu_style: Styles?,
+	-- Open the context menu under the node, from its left edge (a tab's),
+	-- rather than at the pointer.
+	context_menu_below: boolean?,
+	[number]: never,
+	context: unknown?,
+	from: string?,
 }
 -- How `ui.each` rows slide when the list moves them: `true` (a spring,
 -- bounce .1 over 400 ms), an ease, `{ duration, ease }`, `{ bounce,
@@ -4937,7 +6054,11 @@ export type EachOptions = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -4968,6 +6089,10 @@ export type EachOptions = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -4986,6 +6111,10 @@ export type EachOptions = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -4995,6 +6124,14 @@ export type EachOptions = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -5018,7 +6155,7 @@ export type EachOptions = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -5033,6 +6170,10 @@ export type EachOptions = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -5145,7 +6286,11 @@ export type PresenceOptions = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -5176,6 +6321,10 @@ export type PresenceOptions = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -5194,6 +6343,10 @@ export type PresenceOptions = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -5203,6 +6356,14 @@ export type PresenceOptions = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -5226,7 +6387,7 @@ export type PresenceOptions = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -5241,6 +6402,10 @@ export type PresenceOptions = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -5319,6 +6484,10 @@ export type ThemeApi = {
 	-- A token's value (tracked): colours as "#rrggbbaa", numbers, font names.
 	get: (name: TokenName | string) -> any,
 	follow_system: (themes: { dark: string, light: string } | false) -> (),
+	-- The design lint: styles that hard-code a colour, spacing, radius,
+	-- type size, weight, font or shadow warn ("warn", true) or fail
+	-- ("error"), naming the token to use. `ZGUI_DESIGN_LINT` overrides it.
+	strict: (mode: "warn" | "error" | "off" | boolean) -> (),
 }
 
 declare ui: {
@@ -5360,6 +6529,11 @@ declare ui: {
 	progress: (props: ProgressProps) -> Node,
 	slider: (props: SliderProps) -> Node,
 	modal: (props: ModalProps) -> Node,
+	-- Over the window and non-modal (toasts): no focus, no backdrop; the
+	-- pointer passes through but for what it holds, which stays live while
+	-- a dialog holds focus. Raised over everything as it opens (`open`, a
+	-- state; open unless given).
+	layer: (props: LayerProps) -> Node,
 	popover: (props: PopoverProps) -> Node,
 	menu: (props: PopoverProps) -> Node,
 	menu_item: (props: MenuItemProps) -> Node,
@@ -5377,7 +6551,10 @@ declare ui: {
 	-- nil shows nothing. The value is `any`, as `each`'s item is.
 	presence: (value: string | Readable<unknown> | (() -> unknown), build: (value: any) -> Node, opts: PresenceOptions?) -> Node,
 	-- Where plugins' contributions to `name` go.
-	slot: (name: string, props: Props?) -> Node,
+	-- A plugin extension point. `context` reaches what is contributed to
+	-- it: a contributed component gets it as `props.slot` (one component,
+	-- an instance per slot: a panel per pane).
+	slot: (name: string, props: SlotProps?) -> Node,
 	contribute: (name: string, node: Node) -> (),
 	-- The script's (or module's) state for `key`, kept across reloads.
 	state: <T>(key: string, initial: T) -> State<T>,
@@ -5388,6 +6565,15 @@ declare ui: {
 	-- A component instance's own state.
 	use_state: <T>(initial: T) -> State<T>,
 	computed: <T>(f: () -> T) -> State<T>,
+	-- A component's styles by variant (shadcn's `cva`): `base`, then the
+	-- chosen option of each axis in `variants` (by name), then the matching
+	-- `compound` rules, then the element's own properties; each replaces
+	-- what it covers (`p` an earlier `px`). Returns a recipe: call it with
+	-- the options (names, or states or functions choosing them) and give
+	-- the result to an element as `variants = …`.
+	variants: <D>(definition: D) -> (choice: VariantChoice<D, Readable<any> | (() -> any)>) -> Variants,
+	-- A style value the design lint lets through, with the reason.
+	raw: <T>(value: T, reason: string) -> T,
 	effect: (f: () -> ...unknown) -> (),
 	-- One update for many writes; returns what `f` returns.
 	batch: <R...>(f: () -> R...) -> R...,
@@ -5404,6 +6590,22 @@ declare ui: {
 	action: (name: string, arg: unknown?) -> Action,
 	-- Call a host action now.
 	invoke: (name: string, arg: unknown?) -> (),
+	-- JSON's null, as a value that keeps its key in a table (nil drops it):
+	-- `{ caps = ui.null }` reaches Rust as `{"caps": null}`.
+	null: any,
+	-- Runs `f` when what is being built goes away: a component unmounting,
+	-- an effect running again, the script reloading.
+	on_cleanup: (f: () -> ()) -> (),
+	-- Milliseconds since the epoch, to the microsecond (`os.time` counts
+	-- whole seconds). Not tracked.
+	now: () -> number,
+	-- `t` (or a new table) marked a JSON object: empty, it sends `{}`, not
+	-- `[]` (a Lua table can't tell). An empty object from the host comes
+	-- marked, so it goes back as one.
+	object: <T>(t: T?) -> T,
+	-- A host function's value, now (`ScriptHost::function`): a read of data the
+	-- host keeps, so large data is never copied into the script whole.
+	call_sync: (name: string, arg: unknown?) -> any,
 	-- Call a host action for its result (`ScriptHost::async_action`; a
 	-- plain action settles at once with nil): a promise of what it returns.
 	call: (name: string, arg: unknown?) -> Promise,

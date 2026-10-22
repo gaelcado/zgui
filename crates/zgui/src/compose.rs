@@ -269,6 +269,18 @@ type EventListener = Box<dyn FnMut(&mut EventContext)>;
 
 /// A mount description, consumed into owned retained nodes and subscriptions.
 /// `.child`/`.children` compose views; `.style` and fluent methods apply to their root.
+/// A view's overlay options (`View::placement`, `modal_placement`,
+/// `trigger`).
+#[derive(Default)]
+struct PortalOptions {
+    placement: Option<crate::compose_popover::Placement>,
+    /// `layer`: a non-modal layer (toasts).
+    layer: bool,
+    /// `View::autofocus`.
+    autofocus: Option<bool>,
+    modal_placement: Option<crate::compose_modal::ModalPlacement>,
+    trigger: Option<View>,
+}
 pub struct View {
     kind: Kind,
     styles: Styles,
@@ -277,7 +289,7 @@ pub struct View {
     reactive_style: Option<Box<dyn FnMut() -> Styles>>,
     disabled: Option<Box<dyn FnMut() -> bool>>,
     read_only: Option<Box<dyn FnMut() -> bool>>,
-    click: Option<Box<dyn FnMut()>>,
+    click: Option<Box<dyn FnMut(crate::input::Modifiers)>>,
     events: Vec<EventListener>,
     keymap: crate::actions::Keymap,
     pub(crate) drag_preview: Option<crate::compose_drag::PreviewBuilder>,
@@ -293,15 +305,22 @@ pub struct View {
     animation: Option<animation::Animated>,
     keyboard_navigation: Option<bool>,
     dismiss_backdrop: Option<bool>,
+    /// Where an overlay opens and a submenu's own trigger row: boxed, as
+    /// few views have them (views are moved through the mount recursion).
+    portal: Option<Box<PortalOptions>>,
     layout_target: Option<Signal<Option<NodeId>>>,
     trigger_id: Option<String>,
     menu_trigger: Option<Signal<bool>>,
     menu_checked: Option<bool>,
+    /// A menu item that leaves its menu open (a toggle, a pin).
+    menu_keep_open: bool,
     contents: bool,
     mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
     placeholder: Option<Box<dyn FnMut() -> String>>,
     placeholder_color: Option<Box<dyn FnMut() -> crate::scene::Color>>,
     select_on_focus: Option<bool>,
+    secure: Option<bool>,
+    line_numbers: Option<bool>,
     window_drag: bool,
     /// Conditional children (`child_when`), mounted after the others.
     conditional: Vec<RegionBuilder>,
@@ -319,6 +338,16 @@ impl View {
             "menu_checked requires a menu item"
         );
         self.menu_checked = Some(checked);
+        self
+    }
+    /// A menu item that leaves its menu open when chosen (a toggle, a pin):
+    /// the click still runs, keyboard and pointer alike.
+    pub fn keep_open(mut self) -> Self {
+        assert!(
+            matches!(self.kind, Kind::MenuItem(_)),
+            "keep_open requires a menu item"
+        );
+        self.menu_keep_open = true;
         self
     }
     /// Transform decoded image/SVG painting around its allocated center without
@@ -387,15 +416,19 @@ impl View {
             animation: None,
             keyboard_navigation: None,
             dismiss_backdrop: None,
+            portal: None,
             layout_target: None,
             trigger_id: None,
             menu_trigger: None,
             menu_checked: None,
+            menu_keep_open: false,
             contents: false,
             mounted: Vec::new(),
             placeholder: None,
             placeholder_color: None,
             select_on_focus: None,
+            secure: None,
+            line_numbers: None,
             window_drag: false,
             conditional: Vec::new(),
         }
@@ -431,6 +464,39 @@ impl View {
     /// Configure whether clicking outside a modal or popover panel dismisses it.
     pub fn dismiss_on_backdrop(mut self, enabled: bool) -> Self {
         self.dismiss_backdrop = Some(enabled);
+        self
+    }
+    /// Where an anchored popover or menu opens against its trigger (below
+    /// it, start-aligned, 4 points away unless set).
+    pub fn placement(mut self, placement: crate::compose_popover::Placement) -> Self {
+        self.portal.get_or_insert_default().placement = Some(placement);
+        self
+    }
+    /// A non-modal layer over the window (toasts, a heads-up): a modal view
+    /// made a layer takes no focus and has no backdrop, the pointer passes
+    /// through it but for what it holds, which stays live while a dialog
+    /// holds focus; it is raised over everything as it opens.
+    pub fn layer(mut self) -> Self {
+        self.portal.get_or_insert_default().layer = true;
+        self
+    }
+    /// Whether a modal, popover or menu focuses its first control as it
+    /// opens (it does unless set false; then the panel holds focus).
+    pub fn autofocus(mut self, autofocus: bool) -> Self {
+        self.portal.get_or_insert_default().autofocus = Some(autofocus);
+        self
+    }
+    /// A submenu's trigger, drawn by the app: a `menu_item` with content of
+    /// its own (an icon, the label, a value, a chevron) instead of the
+    /// label and the engine's chevron.
+    pub fn trigger(mut self, trigger: View) -> Self {
+        self.portal.get_or_insert_default().trigger = Some(trigger);
+        self
+    }
+    /// Where a modal's panel sits in the window (centred unless set): a
+    /// side sheet against an edge, a command menu near the top.
+    pub fn modal_placement(mut self, placement: crate::compose_modal::ModalPlacement) -> Self {
+        self.portal.get_or_insert_default().modal_placement = Some(placement);
         self
     }
     /// Assign an ID to a submenu's internally owned menu-item trigger.
@@ -501,7 +567,15 @@ impl View {
         self.id = Some(id.into());
         self
     }
-    pub fn on_click(mut self, callback: impl FnMut() + 'static) -> Self {
+    pub fn on_click(self, mut callback: impl FnMut() + 'static) -> Self {
+        self.on_click_with(move |_| callback())
+    }
+    /// `on_click`, told the modifier keys held as it was clicked (a
+    /// ⌘-click opening in full, a ⇧-click selecting a range).
+    pub fn on_click_with(
+        mut self,
+        callback: impl FnMut(crate::input::Modifiers) + 'static,
+    ) -> Self {
         self.click = Some(Box::new(callback));
         self
     }
@@ -568,6 +642,19 @@ impl View {
         self.variants.disabled = Some(Box::new(style(Styles::new())));
         self
     }
+    /// Hover, active, focus and disabled styles that change. `styles` runs
+    /// in the node's style effect, so it follows what it reads, and returns
+    /// the four when they changed since its last call (`None` keeps them);
+    /// they replace those `hover` and the others set. A view whose styles
+    /// follow state (a tab, a component's variant) swaps them without
+    /// mounting again.
+    pub fn reactive_interaction(
+        mut self,
+        styles: impl FnMut() -> Option<[Option<Styles>; 4]> + 'static,
+    ) -> Self {
+        self.variants.reactive = Some(Box::new(styles));
+        self
+    }
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = Some(Box::new(move || disabled));
         self
@@ -632,6 +719,19 @@ impl View {
         self.select_on_focus = Some(select);
         self
     }
+    /// A password field: its text shows masked and can't be copied (see
+    /// `EditorHandle::set_secure`). Only editor views take it.
+    pub fn secure(mut self, secure: bool) -> Self {
+        self.secure = Some(secure);
+        self
+    }
+    /// Number a multiline editor's lines in a gutter at its left, as a code
+    /// editor does (see `EditorHandle::set_line_numbers`). Only editor roots
+    /// accept this.
+    pub fn line_numbers(mut self, numbered: bool) -> Self {
+        self.line_numbers = Some(numbered);
+        self
+    }
     /// Make the view a window drag region, like CSS's
     /// `-webkit-app-region: drag`: a primary press on it, or on anything
     /// inside it that does not take input itself, moves the window, and a
@@ -650,6 +750,9 @@ impl View {
         }
         if self.dismiss_backdrop.is_some() {
             inner.dismiss_backdrop = self.dismiss_backdrop;
+        }
+        if self.portal.is_some() {
+            inner.portal = self.portal;
         }
         if self.keyboard_navigation.is_some() {
             inner.keyboard_navigation = self.keyboard_navigation;
@@ -695,6 +798,37 @@ impl View {
         merge_variant(&mut inner.variants.active, self.variants.active);
         merge_variant(&mut inner.variants.focus, self.variants.focus);
         merge_variant(&mut inner.variants.disabled, self.variants.disabled);
+        if let Some(outer) = self.variants.reactive {
+            inner.variants.reactive = Some(match inner.variants.reactive.take() {
+                // Both change: each's latest, the outer's over the inner's.
+                Some(original) => {
+                    let (mut original, mut outer) = (original, outer);
+                    let mut last: [[Option<Styles>; 4]; 2] = Default::default();
+                    Box::new(move || {
+                        let a = original();
+                        let b = outer();
+                        if a.is_none() && b.is_none() {
+                            return None;
+                        }
+                        if let Some(a) = a {
+                            last[0] = a;
+                        }
+                        if let Some(b) = b {
+                            last[1] = b;
+                        }
+                        Some(std::array::from_fn(|i| match (&last[0][i], &last[1][i]) {
+                            (Some(a), Some(b)) => {
+                                let mut merged = a.clone();
+                                merged.merge(b);
+                                Some(merged)
+                            }
+                            (a, b) => b.clone().or_else(|| a.clone()),
+                        }))
+                    })
+                }
+                None => outer,
+            });
+        }
         if let Some(mut outer) = self.reactive_style {
             inner.reactive_style = Some(match inner.reactive_style.take() {
                 Some(mut original) => Box::new(move || {
@@ -725,6 +859,12 @@ impl View {
         }
         if self.select_on_focus.is_some() {
             inner.select_on_focus = self.select_on_focus;
+        }
+        if self.secure.is_some() {
+            inner.secure = self.secure;
+        }
+        if self.line_numbers.is_some() {
+            inner.line_numbers = self.line_numbers;
         }
         inner.window_drag |= self.window_drag;
         inner.mounted.extend(self.mounted);
@@ -809,7 +949,10 @@ pub fn text_signal(compute: impl FnMut() -> String + 'static) -> View {
     View::new(Kind::BoundText(Box::new(compute)))
 }
 pub use crate::compose_context_menu::ContextMenuEvent;
-pub use crate::compose_rich::{RichTextView, TextSpan, rich_text, text_span};
+/// Where anchored popovers and menus open (`View::placement`).
+pub use crate::compose_modal::ModalPlacement;
+pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
+pub use crate::compose_rich::{RichTextView, SpanHover, SpanIcon, TextSpan, rich_text, text_span};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
     View::new(Kind::RichText(Box::new(compute)))
@@ -977,6 +1120,7 @@ pub fn submenu(label: impl Into<String>, open: Signal<bool>) -> View {
     })
 }
 /// A menu action. Activation closes its menu before running `.on_click`.
+/// It shows `label`, or the children given it (`label` then names it).
 pub fn menu_item(label: impl Into<String>) -> View {
     View::new(Kind::MenuItem(label.into()))
 }
@@ -1541,9 +1685,16 @@ pub(crate) fn mount(
             false,
         ),
         Kind::Submenu { label, open } => {
-            let mut anchor = menu_item(label.clone());
+            // The app's own trigger row (a menu item with content), or the
+            // label with a chevron.
+            let mut anchor = match view.portal.as_mut().and_then(|p| p.trigger.take()) {
+                Some(trigger) => trigger,
+                None => menu_item(label.clone()),
+            };
             anchor.menu_trigger = Some(open.clone());
-            anchor.id = view.trigger_id.take();
+            if let Some(id) = view.trigger_id.take() {
+                anchor.id = Some(id);
+            }
             mount_portal(
                 ui,
                 parent,
@@ -1636,16 +1787,22 @@ fn mount_portal(
         environment.menu = Some(menu.clone());
     }
 
-    let mut defaults = Styles::new()
-        .w(if anchored { 240. } else { 360. })
-        .p(16.)
-        .bg(if is_menu {
-            tok::MENU_BG
-        } else {
-            tok::SURFACE_OVERLAY
-        })
-        .rounded(tok::RADIUS_MD)
-        .overflow_hidden();
+    let is_layer = view.portal.as_ref().is_some_and(|p| p.layer);
+    // A layer's panel is only what it holds; a dialog's or menu's is a card.
+    let mut defaults = if is_layer {
+        Styles::new()
+    } else {
+        Styles::new()
+            .w(if anchored { 240. } else { 360. })
+            .p(16.)
+            .bg(if is_menu {
+                tok::MENU_BG
+            } else {
+                tok::SURFACE_OVERLAY
+            })
+            .rounded(tok::RADIUS_MD)
+            .overflow_hidden()
+    };
     if is_menu {
         defaults = defaults.items_stretch();
     }
@@ -1669,7 +1826,14 @@ fn mount_portal(
         }
         styles
     }));
-    let dismiss_backdrop = view.dismiss_backdrop.take().unwrap_or(true);
+    // A submenu leaves the pointer to its parent menu (moving over its other
+    // items closes it); the parent's backdrop dismisses both.
+    let dismiss_backdrop = view.dismiss_backdrop.take().unwrap_or(!is_submenu);
+    let (placement, modal_placement, autofocus) =
+        view.portal.take().map_or((None, None, None), |p| {
+            (p.placement, p.modal_placement, p.autofocus)
+        });
+    let placement = placement.unwrap_or_default();
     let panel_focusable = view.focusable.unwrap_or(true);
     let layout_target = is_menu.then(|| ui.signal(None));
     view.layout_target = layout_target.clone();
@@ -1738,10 +1902,14 @@ fn mount_portal(
                 portal.overlay,
                 portal.position,
                 panel,
+                placement,
             );
         }
     } else {
-        crate::compose_modal::center(ui, owner, portal.position);
+        match modal_placement {
+            Some(at) => crate::compose_modal::place(ui, owner, portal.position, at),
+            None => crate::compose_modal::center(ui, owner, portal.position),
+        }
     }
     crate::compose_modal::activate(
         ui,
@@ -1759,7 +1927,16 @@ fn mount_portal(
             .and_then(|parent| parent.panel.get()),
         if is_submenu { anchor } else { None },
         panel_focusable,
+        is_submenu,
+        autofocus.unwrap_or(true),
+        is_layer,
     );
+    // A submenu's layer lets the pointer through to its parent menu.
+    if is_submenu {
+        let mut options = ui.input.options(portal.overlay).unwrap_or_default();
+        options.pass_through = true;
+        ui.input.set_options(portal.overlay, options);
+    }
     owner
 }
 /// The built-in widgets' default styles, built once per thread and cloned
@@ -1868,7 +2045,8 @@ fn mount_element(
             || view.variants.hover.is_some()
             || view.variants.active.is_some()
             || view.variants.focus.is_some()
-            || view.variants.disabled.is_some();
+            || view.variants.disabled.is_some()
+            || view.variants.reactive.is_some();
         if boxed {
             let label = View::new(kind);
             view.children.push(label);
@@ -1892,6 +2070,8 @@ fn mount_element(
     let mut image_intrinsic = None;
     let is_menu_item = matches!(kind, Kind::MenuItem(_));
     let is_submenu_trigger = is_menu_item && view.menu_trigger.is_some();
+    // A trigger drawn by the app (`View::trigger`) shows its own chevron.
+    let submenu_indicator = is_submenu_trigger && view.children.is_empty();
     // Outside a menu (a popover's list) an item is a plain action.
     let item_menu = is_menu_item.then(|| environment.menu.clone()).flatten();
     let is_editor = matches!(kind, Kind::Editor { .. });
@@ -1906,6 +2086,10 @@ fn mount_element(
     assert!(
         view.select_on_focus.is_none() || is_editor,
         "select_on_focus is only supported on editor views"
+    );
+    assert!(
+        view.line_numbers.is_none() || is_editor,
+        "line_numbers is only supported on editor views"
     );
     if is_editor {
         assert!(
@@ -2010,7 +2194,9 @@ fn mount_element(
         }
         Kind::Container(layout) => ui.container(parent, layout, Default::default()),
         Kind::MenuItem(label) => {
-            assert!(view.children.is_empty(), "menu items own their label");
+            // An item draws its label, unless it brings content of its own
+            // (an icon, the label, a shortcut): the label stays its
+            // accessible name and what typing finds it by.
             let mut defaults = widget_style(|w| &w.menu_item);
             defaults.merge(&view.styles);
             view.styles = defaults;
@@ -2024,10 +2210,12 @@ fn mount_element(
             let mut semantic = SemanticNode::new(Role::MenuItem, label.clone());
             semantic.checked = view.menu_checked;
             ui.semantics.borrow_mut().set(root, semantic);
-            if is_submenu_trigger {
-                view.children.push(text(label).flex_grow(1.));
-            } else {
-                view.children.push(text(label));
+            if view.children.is_empty() {
+                if is_submenu_trigger {
+                    view.children.push(text(label).flex_grow(1.));
+                } else {
+                    view.children.push(text(label));
+                }
             }
             root
         }
@@ -2219,7 +2407,30 @@ fn mount_element(
         }
         let mut click = view.click.take();
         let menu_trigger = view.menu_trigger.take();
+        let keep_open = view.menu_keep_open;
         ui.on_event(root, true, move |cx| {
+            // Over a menu's item (or pressing it): a submenu trigger opens
+            // its submenu, and any other submenu of that menu closes.
+            if cx.phase != EventPhase::Capture
+                && matches!(
+                    cx.event,
+                    InputEvent::PointerEnter
+                        | InputEvent::PointerDown {
+                            button: PointerButton::Primary,
+                            ..
+                        }
+                )
+                && (cx.target == root || matches!(cx.event, InputEvent::PointerDown { .. }))
+                && let Some(menu) = &item_menu
+            {
+                menu.close_children(menu_trigger.as_ref());
+                // (A press opens it on activation, as a click always has.)
+                if let Some(open) = &menu_trigger
+                    && matches!(cx.event, InputEvent::PointerEnter)
+                {
+                    open.set(true);
+                }
+            }
             if cx.phase != EventPhase::Capture
                 && matches!(cx.event, InputEvent::Activate)
                 && !cx.default_prevented()
@@ -2232,11 +2443,13 @@ fn mount_element(
                 }
                 if let Some(open) = &menu_trigger {
                     open.set(true);
-                } else if let Some(menu) = &item_menu {
+                } else if let Some(menu) = &item_menu
+                    && !keep_open
+                {
                     menu.close_chain();
                 }
                 if let Some(click) = &mut click {
-                    click();
+                    click(cx.pointer_modifiers());
                 }
             }
         });
@@ -2265,31 +2478,66 @@ fn mount_element(
         let content_state = ui.signal(crate::compose_rich::Content {
             rich: std::sync::Arc::new(crate::rich_text::RichText::new("", Vec::new()).unwrap()),
             links: Vec::new(),
+            icons: Vec::new(),
         });
-        crate::compose_rich::mount_links(ui, root, paragraph, content_state.clone());
+        // The link under the pointer, restyled if it has a hover style.
+        let hovered = ui.signal(None::<usize>);
+        crate::compose_rich::mount_links(
+            ui,
+            root,
+            paragraph,
+            content_state.clone(),
+            hovered.clone(),
+        );
+        crate::compose_rich::mount_icons(ui, root, paragraph, content_state.clone());
         let weak = ui.downgrade();
         let typography = environment.typography.clone();
         let theme = environment.theme.clone();
         ui.bind(root, move || {
             let base = typography.get();
             let spans = compute();
+            let hovered = hovered.get();
             let mut content = String::new();
             let mut runs = Vec::new();
             let mut links = Vec::new();
+            let mut icons = Vec::new();
             for mut span in spans {
                 if span.text.is_empty() {
                     continue;
+                }
+                if span.action.is_some() && span.hover.is_none() {
+                    span.underline.get_or_insert_with(Default::default);
+                }
+                if let Some(hover) = span
+                    .hover
+                    .as_ref()
+                    .filter(|_| span.action.is_some() && hovered == Some(links.len()))
+                {
+                    if let Some(underline) = hover.underline {
+                        span.underline = Some(underline);
+                    }
+                    if let Some(color) = hover.text_color {
+                        span.styles = std::mem::take(&mut span.styles).text_color(color);
+                    }
                 }
                 if span.styles.has_tokens() {
                     crate::theme::resolve(&mut span.styles, &theme);
                     span.background = span.background.or(span.styles.background);
                 }
+                // An icon keeps its room before the text: a padded
+                // placeholder run of its own.
+                let icon_at = span.icon.is_some().then(|| {
+                    let at = content.len();
+                    content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                    at..content.len()
+                });
                 let start = content.len();
                 content.push_str(&span.text);
                 if let Some(action) = span.action {
                     links.push(crate::compose_rich::Link {
                         range: start..content.len(),
                         action,
+                        styled_hover: span.hover.is_some(),
                     });
                 }
                 let mut font = base.font_in(Some(&theme));
@@ -2320,30 +2568,102 @@ fn mount_element(
                 if let Some(value) = spacing {
                     font.letter_spacing = value;
                 }
+                // An underlined paragraph underlines its runs (CSS's
+                // `text-decoration` reaches inline children).
+                let inherited = font.underline.map(|u| {
+                    let line = crate::rich_text::Decoration::default();
+                    u.offset().map_or(line, |offset| line.offset(offset))
+                });
+                let font_size = span
+                    .styles
+                    .text_size
+                    .unwrap_or_else(|| base.size_in(Some(&theme)));
+                let color = span
+                    .styles
+                    .text_color
+                    .unwrap_or_else(|| base.color_in(Some(&theme)));
+                // With an icon, the span's padding goes around both: its
+                // room takes the padding before, a placeholder after the
+                // text the padding after.
+                let lead = if span.icon.is_some() {
+                    span.padding[0]
+                } else {
+                    0.
+                };
+                if let (Some(range), Some(icon)) = (icon_at, span.icon.take()) {
+                    runs.push(crate::rich_text::TextRun {
+                        background: span.background,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [(lead + icon.size + icon.gap) / 2., span.padding[1]],
+                        radius: span.radius,
+                        range: range.clone(),
+                        font: font.clone(),
+                        font_size,
+                        color,
+                    });
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                ),
+                            ),
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead,
+                    });
+                }
+                let text_end = content.len();
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
-                    underline: span.underline,
+                    underline: span.underline.or(inherited),
                     strikethrough: span.strikethrough,
-                    range: start..content.len(),
-                    font,
-                    font_size: span
-                        .styles
-                        .text_size
-                        .unwrap_or_else(|| base.size_in(Some(&theme))),
-                    color: span
-                        .styles
-                        .text_color
-                        .unwrap_or_else(|| base.color_in(Some(&theme))),
+                    padding: if lead > 0. {
+                        [0., span.padding[1]]
+                    } else {
+                        span.padding
+                    },
+                    radius: span.radius,
+                    range: start..text_end,
+                    font: font.clone(),
+                    font_size,
+                    color,
                 });
+                if lead > 0. {
+                    content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                    runs.push(crate::rich_text::TextRun {
+                        background: span.background,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [lead / 2., span.padding[1]],
+                        radius: span.radius,
+                        range: text_end..content.len(),
+                        font,
+                        font_size,
+                        color,
+                    });
+                }
             }
             let rich = crate::rich_text::RichText::new(content.as_str(), runs)
                 .expect("normalized inline spans")
                 .with_options(base.display);
             // Recomputed but unchanged (its inputs animate for a sibling):
             // nothing to lay out, paint, describe or relabel.
-            if content_state
-                .with_untracked(|current| *current.rich == rich && current.links == links)
-            {
+            if content_state.with_untracked(|current| {
+                *current.rich == rich && current.links == links && current.icons == icons
+            }) {
                 return;
             }
             let Some(ui) = weak.upgrade() else {
@@ -2360,7 +2680,13 @@ fn mount_element(
                 scene.set_style(paragraph, style);
                 scene.set_kind(paragraph, NodeKind::RichText { text: rich.clone() });
             }
-            content_state.set(crate::compose_rich::Content { rich, links });
+            // Icons' placeholders aren't text to read out.
+            let content = if icons.is_empty() {
+                content
+            } else {
+                content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
+            };
+            content_state.set(crate::compose_rich::Content { rich, links, icons });
             ui.semantics.borrow_mut().update(paragraph, |node| {
                 node.label = content.clone();
                 node.value = Some(content);
@@ -2379,8 +2705,13 @@ fn mount_element(
         );
         let size = ui.observe_content_size(root);
         let scene = ui.scene.clone();
+        let (typography, theme) = (environment.typography.clone(), environment.theme.clone());
         ui.bind(root, move || {
-            let data = source();
+            let mut data = source();
+            // `currentColor`: the text colour here, as it changes.
+            if data.follows_text_color() {
+                data = std::sync::Arc::new(data.tinted(typography.get().color_in(Some(&theme))));
+            }
             let (width, height) = size.get();
             let mut scene = scene.borrow_mut();
             scene.set_kind(child, NodeKind::Svg(data));
@@ -2455,6 +2786,12 @@ fn mount_element(
         if let Some(select) = view.select_on_focus {
             editor.set_select_on_focus(select);
         }
+        if let Some(secure) = view.secure {
+            editor.set_secure(secure);
+        }
+        if let Some(numbered) = view.line_numbers {
+            editor.set_line_numbers(numbered);
+        }
         let (mut text, mut color) = (view.placeholder.take(), view.placeholder_color.take());
         if text.is_some() {
             let editor = editor.clone();
@@ -2515,7 +2852,7 @@ fn mount_element(
     for conditional in view.conditional {
         conditional(ui, child_parent, environment.clone());
     }
-    if is_submenu_trigger {
+    if submenu_indicator {
         let indicator = mount(ui, root, text("›"), environment.clone());
         ui.semantics.borrow_mut().remove(indicator);
     }
@@ -3258,6 +3595,15 @@ impl NodeHandle {
     pub fn node(&self) -> NodeId {
         self.node
     }
+    /// Whether a text field holds keyboard focus (anywhere in this UI): a
+    /// bare-key shortcut (`j`, `k`) gives way to typing then.
+    pub fn editing(&self) -> bool {
+        self.ui.upgrade().is_some_and(|ui| {
+            ui.input
+                .focused()
+                .is_some_and(|focused| ui.is_editor(focused))
+        })
+    }
     /// The scene, while the UI exists.
     pub fn scene(&self) -> Option<Rc<RefCell<crate::scene::Scene>>> {
         self.ui.upgrade().map(|ui| ui.scene.clone())
@@ -3275,6 +3621,16 @@ impl NodeHandle {
             .borrow()
             .contains(self.node)
             .then(|| ui.observe_bounds(self.node))
+    }
+    /// Whether any of the node shows (inside every clip and viewport above
+    /// it), republished after each frame's layout: for building what only
+    /// matters on screen.
+    pub fn observe_visibility(&self) -> Option<Signal<bool>> {
+        let ui = self.ui.upgrade()?;
+        ui.scene
+            .borrow()
+            .contains(self.node)
+            .then(|| ui.observe_visibility(self.node))
     }
     /// Run `f` once after the next frame's layout, before that frame is
     /// drawn, whether or not anything moved: for reading where a change just

@@ -27,12 +27,17 @@ The content fills the viewport's width (`scroll`) or height (`scroll_x`) and is 
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
-| `count` | `Reactive<number>` | required | how many rows |
+| `count` | `Reactive<number>` | required without `heights` | how many rows |
 | `row` | `(index: number) -> Node` | required | builds row `index`, from 1 |
 | `height` | `number` | `28` | every row's height, in points (positive) |
+| `heights` | `{ number }`, a state of one, or a function returning one | none | each row's own height instead, in order; the count is its length |
+| `sticky` | `{ number }`, a state of one, or a function returning one | none | with `heights`: rows (from 1) that stick to the top while the rows after them scroll past, each pushed up by the next (section headers, a diff's file headers); the one in charge is built again over the list, as any row is |
+| `sticky_top` | `number` | `0` | how far below the top the sticky rows stick (CSS's sticky `top`): what scrolls above them still shows, so cover it if it shouldn't |
 | `overscan` | `number` | `2` | rows built beyond each edge of the view |
 | `offset` | `State<number>` | its own | the scroll position in points, as `scroll`'s |
 | `w`, `h` | `Length` | `320`, `240` | |
+
+With `heights`, rows differ in height but are still never measured: the list knows where each starts, so a changed list (a section folded, rows inserted) re-lays out without building anything offscreen. A host can publish the heights as a shared value (`ScriptHost::shared`), and the script never copies them.
 
 A row is built when it scrolls into view and dropped when it leaves; it owns what it makes, as a [component](state.md#components) does: its `ui.use_state`, effects and computed values end with it.
 

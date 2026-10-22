@@ -10,6 +10,8 @@ bg: Reactive<Color>?
 hover: Styles?
 ```
 
+`focus` is CSS's `:focus-visible`: it applies when focus came from the keyboard (or a script, before any click), on a text field however it got focus, and once a key goes to the focused node; a clicked button takes focus without it.
+
 The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba(…)"`, `"hsl(…)"`, a few names, or a number `0xrrggbb`. `Length` is points or a string: `"50%"` (of the containing block), `"12px"`, and `"auto"` for margins. `Pair` is `{ a, b }` or one number for both. Unless a row says otherwise a property has no default: the node has none of it.
 
 ## Size and position
@@ -72,6 +74,8 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | `border_over` | `boolean` | `false` | paint the border over the children, taking no room (a ring) |
 | `border_dash` | `Pair` | solid | `{ length, gap }` |
 | `shadow` | `Shadow` | none | `{ x, y, blur, spread, color }` (CSS `box-shadow`; `color` `#0000005a` by default), a list of them, or `false` |
+| `outline`, `outline_color`, `outline_offset` | `number`, `Color`, `number` | none, black, `0` | an outline around the box (CSS's): its width, colour, and where it starts outside the box; a negative offset puts it over the edge (an inset focus ring is `outline = 1, outline_offset = -1`) |
+| `inset_shadow` | `Shadow` | none | shadows inside the box (CSS's `inset`), over its fill and under its border and children: the box less itself moved by `x`, `y` and shrunk by `spread`, cut to its corners; drawn sharp (`blur` is not applied). A 1-point top highlight is `{ x = 0, y = 1, color = "#ffffff1f" }` |
 | `opacity` | `number` | `1` | 0 to 1 |
 | `brightness`, `contrast`, `saturate` | `number` | `1` | CSS filter functions over the node and its subtree |
 | `blur` | `number` | `0` | blurs the node's content (CSS `filter: blur()`) |
@@ -123,6 +127,8 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | `line_height` | `number` | the font's | points |
 | `letter_spacing` | `number` | `0` | points |
 | `tabular` | `boolean` | `false` | tabular figures: every digit one width, so a changing number holds still |
+| `underline` | `boolean` | `false` | underlined text, inherited (CSS's `text-decoration`): `hover = { underline = true }` underlines a link button's label |
+| `underline_offset` | `number` | a tenth of the text size | points below the baseline the underline sits; inherited |
 
 ## Transforms
 
@@ -135,6 +141,9 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | `hover`, `active`, `focus` | `Styles` | (controls: a hover color and an accent focus ring) | styles while the pointer is over it, while it is pressed, while it has keyboard focus; `focus = { border = 0 }` turns a control's ring off |
 | `disabled` | `boolean \| state \| function \| Styles` | `false` | a condition disables the node (and what is inside); a table is the styles it shows while disabled |
 | `window_drag` | `boolean` | `false` | a press on it, or on what inside takes no input, moves the window; a double click zooms it (CSS `-webkit-app-region: drag`) |
+| `tooltip` | `string` or a node | none | shown over it while the pointer rests on it: after 300 ms, at once within a second of another tooltip; gone when the pointer leaves or presses. Text takes the theme's look (an overlay card, small text); a node is the app's own content. It fades in over 140 ms and out over 100 ms, at once when it takes over from another; one shows at a time. It takes no focus and lets the pointer through |
+| `tooltip_placement` | `Placement` | above, centred, 6 points off | where the tooltip sits (as a popover's `placement`) |
+| `tooltip_interactive` | `boolean` | `false` | a hover card the pointer can move into and click in: it stays while the pointer is over the node or the card (a moment's grace to cross between them) |
 | `id` | `string` | | for selectors (`"#id"`) and the inspector |
 | `class` | `string` | | space-separated, for selectors (`".name"`) |
 | `ref` | `Ref \| { Ref }` | | see [State](state.md#refs) |

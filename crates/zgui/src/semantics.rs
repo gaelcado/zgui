@@ -217,6 +217,7 @@ impl Semantics {
     pub fn remove(&mut self, id: NodeId) {
         if self.nodes.remove(&id).is_some() {
             self.revision = self.revision.wrapping_add(1);
+            crate::shrink_sparse(&mut self.nodes);
         }
     }
     pub fn retain_mounted(&mut self, scene: &Scene) {

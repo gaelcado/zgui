@@ -26,34 +26,54 @@ impl App {
     }
     /// The app as a launch finds it, with the layout a run saved.
     fn with_saved(layout: Value) -> Self {
+        Self::with_host(layout, |_| {})
+    }
+    /// The app with what `setup` adds to its host (plugins).
+    fn with_host(layout: Value, setup: impl FnOnce(&ScriptHost) + 'static) -> Self {
+        Self::with_window(layout, setup, |view| view)
+    }
+    /// And with what `wrap` provides around it, as a window does (a fake
+    /// platform for file dialogs).
+    fn with_window(
+        layout: Value,
+        setup: impl FnOnce(&ScriptHost) + 'static,
+        wrap: impl FnOnce(zgui::compose::View) -> zgui::compose::View,
+    ) -> Self {
         let actions: Rc<RefCell<Vec<String>>> = Rc::default();
         let saved: Rc<RefCell<Value>> = Rc::default();
         let (log, keep) = (actions.clone(), saved.clone());
-        let h = Harness::new(move |runtime| {
-            let host = ScriptHost::new(runtime, APP);
-            for name in [
-                "zoom_window",
-                "close_window",
-                "set_title",
-                "end_session",
-                "keep_sessions",
-            ] {
-                let log = log.clone();
-                host.action(name, move |value| {
-                    let arg = match value {
-                        Value::Str(s) => format!(" {s}"),
-                        Value::List(ids) => format!(" {ids:?}"),
-                        _ => String::new(),
-                    };
-                    log.borrow_mut().push(format!("{name}{arg}"));
-                });
-            }
-            host.action("save_layout", move |layout| *keep.borrow_mut() = layout);
-            host.shared("launch_dir", "/tmp");
-            host.shared("home", "/Users/someone");
-            host.shared("saved_layout", layout);
-            host
-        });
+        let h = Harness::wrapped(
+            move |runtime| {
+                let host = ScriptHost::new(runtime, APP);
+                for name in [
+                    "zoom_window",
+                    "close_window",
+                    "set_title",
+                    "end_session",
+                    "keep_sessions",
+                    "plugins_rescan",
+                    "plugin_decide",
+                ] {
+                    let log = log.clone();
+                    host.action(name, move |value| {
+                        let arg = match value {
+                            Value::Str(s) => format!(" {s}"),
+                            Value::List(ids) => format!(" {ids:?}"),
+                            Value::Map(_) => format!(" {}", value.to_json()),
+                            _ => String::new(),
+                        };
+                        log.borrow_mut().push(format!("{name}{arg}"));
+                    });
+                }
+                host.action("save_layout", move |layout| *keep.borrow_mut() = layout);
+                host.shared("launch_dir", "/tmp");
+                host.shared("home", "/Users/someone");
+                host.shared("saved_layout", layout);
+                setup(&host);
+                host
+            },
+            wrap,
+        );
         assert_eq!(h.host.error().get(), None);
         let mut app = Self {
             h,
@@ -64,6 +84,37 @@ impl App {
         // The test window is 400 points wide: panes get all of it.
         app.run("toggle_sidebar");
         app
+    }
+    /// ⌘K, then the palette's row for `kind`, chosen by its title as typed
+    /// and Return.
+    fn open_panel(&mut self, kind: &str) {
+        self.open_panel_with(kind, Default::default());
+    }
+    /// The same in a tab of its own (⇧Return): the whole window.
+    fn open_panel_in_tab(&mut self, kind: &str) {
+        self.open_panel_with(
+            kind,
+            zgui::input::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+    }
+    fn open_panel_with(&mut self, kind: &str, modifiers: zgui::input::Modifiers) {
+        self.run("open_panel");
+        let title = match kind {
+            "panel:notes/notes" => "Notes",
+            "panel:hacker-news/front-page" => "Hacker News",
+            "panel:editor/editor" => "Editor",
+            other => other,
+        };
+        self.h
+            .ui
+            .dispatch(zgui::input::InputEvent::Text(title.into()));
+        self.settle();
+        assert!(self.h.find(&format!("open:{kind}")).is_some(), "no {kind}");
+        self.h.key_with(zgui::input::Key::Enter, modifiers);
+        self.settle();
     }
     fn run(&mut self, id: &str) {
         assert!(self.h.host.run_command(id), "no command `{id}`");
@@ -787,4 +838,560 @@ fn any_theme_styles_it_the_light_theme_too() {
     app.settle();
     assert_eq!(colors(&app.h.ui).len(), glass.len());
     assert!(colors(&app.h.ui).contains(&Color(0x0a, 0x0b, 0x0e, 0x4d)));
+}
+
+/// A plugin with a panel, as terminal.rs would find it and load it.
+fn notes_plugin(status: &str) -> (Value, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("zterm-notes-{}-{status}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("init.luau");
+    std::fs::write(
+        &entry,
+        r#"
+local Notes = ui.component(function(props)
+    return ui.text { id = `notes-{props.slot.pane}`, `notes for {props.slot.pane}` }
+end)
+ui.contribute("panel:notes", Notes {})
+"#,
+    )
+    .unwrap();
+    let listed = Value::from_json(&format!(
+        r#"[{{ "id": "notes", "name": "Notes", "version": "1.0", "author": "Ada", "description": "A notepad per pane",
+             "status": "{status}", "error": null,
+             "permissions": [{{ "id": "clipboard", "text": "Read and change your clipboard" }}],
+             "panels": [{{ "id": "notes", "kind": "panel:notes/notes", "title": "Notes", "description": "A notepad" }}] }}]"#
+    ))
+    .unwrap();
+    (listed, entry)
+}
+fn with_notes(status: &'static str) -> App {
+    let (listed, entry) = notes_plugin(status);
+    App::with_host(Value::Nil, move |host| {
+        host.shared("plugins", listed);
+        if status == "enabled" {
+            host.set_plugins(vec![zgui_script::Plugin {
+                name: "notes".into(),
+                entry,
+                grants: vec![zgui_script::Capability::Clipboard],
+            }]);
+        }
+    })
+}
+
+#[test]
+fn command_k_opens_terminals_browsers_and_plugin_panels_beside() {
+    use zgui::input::Key;
+    let mut app = with_notes("enabled");
+    let keys: Vec<_> = app
+        .h
+        .host
+        .commands()
+        .get()
+        .into_iter()
+        .filter(|c| c.id == "open_panel" || c.id == "clear")
+        .map(|c| (c.id, c.key))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("open_panel".to_string(), Some("cmd+k".to_string())),
+            ("clear".to_string(), Some("cmd+shift+k".to_string()))
+        ]
+    );
+    app.run("open_panel");
+    assert!(
+        app.actions.borrow().iter().any(|a| a == "plugins_rescan"),
+        "opening looks for new plugins"
+    );
+    for kind in ["terminal", "browser", "panel:notes/notes", "plugins"] {
+        assert!(app.h.find(&format!("open:{kind}")).is_some(), "{kind}");
+    }
+    // The search field has the keyboard: typing filters.
+    let focused = app.h.ui.input.focused().expect("something focused");
+    assert_eq!(Some(focused), app.h.find("palette-query"));
+    app.h
+        .ui
+        .dispatch(zgui::input::InputEvent::Text("note".into()));
+    app.settle();
+    assert!(app.h.find("open:browser").is_none());
+    app.h.key(Key::Enter);
+    app.settle();
+    assert!(app.h.find("palette-query").is_none(), "it closes");
+    // The panel opened beside the terminal, its pane in props.slot.
+    let panes = app.panes();
+    assert_eq!(panes.len(), 1, "one terminal: {panes:?}");
+    let notes = app
+        .h
+        .texts()
+        .into_iter()
+        .find(|t| t.starts_with("notes for p"));
+    assert!(notes.is_some(), "{:?}", app.h.texts());
+    assert!(panes[0].width < 250., "it split: {panes:?}");
+    assert_eq!(app.h.host.error().get(), None);
+    // A second, in a tab of its own (⇧Return), is another instance.
+    app.run("open_panel");
+    app.h
+        .ui
+        .dispatch(zgui::input::InputEvent::Text("notes".into()));
+    app.settle();
+    app.h.key_with(
+        Key::Enter,
+        zgui::input::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    app.settle();
+    let tabs = match app.saved.borrow().field("tabs") {
+        Some(Value::List(tabs)) => tabs.len(),
+        _ => 0,
+    };
+    assert_eq!(tabs, 2);
+    // Closing a panel ends nothing.
+    app.run("close_pane");
+    assert!(
+        !app.actions
+            .borrow()
+            .iter()
+            .any(|a| a.starts_with("end_session")),
+        "{:?}",
+        app.actions.borrow()
+    );
+    assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
+fn escape_puts_the_palette_away_and_the_browser_button_is_gone() {
+    use zgui::input::Key;
+    let mut app = App::new();
+    app.run("open_panel");
+    assert!(app.h.find("palette-query").is_some());
+    app.h.key(Key::Escape);
+    app.settle();
+    assert!(app.h.find("palette-query").is_none());
+    // Opening a browser is ⌘K's (or ⇧⌘B's) now: the titlebar has the two
+    // splits and the new tab, no browser.
+    let tools = app.h.texts();
+    assert!(!tools.iter().any(|t| t == "Browser"), "{tools:?}");
+    app.run("open_panel");
+    app.h.click("open:browser");
+    let focused = app.h.ui.input.focused().expect("something focused");
+    assert!(
+        !app.h.natives.contains(focused),
+        "the address bar has focus"
+    );
+}
+
+#[test]
+fn a_plugin_found_asks_first_and_only_a_click_answers() {
+    use zgui::input::Key;
+    let mut app = with_notes("pending");
+    assert!(app.h.find("consent-allow").is_some(), "the sheet is up");
+    let texts = app.h.texts();
+    assert!(
+        texts.iter().any(|t| t == "Allow “Notes” to run?"),
+        "{texts:?}"
+    );
+    assert!(texts.iter().any(|t| t == "Read and change your clipboard"));
+    // Return (meant for a terminal) answers nothing.
+    app.h.key(Key::Enter);
+    app.settle();
+    assert!(
+        !app.actions
+            .borrow()
+            .iter()
+            .any(|a| a.starts_with("plugin_decide"))
+    );
+    app.h.click("consent-allow");
+    assert!(
+        app.actions
+            .borrow()
+            .iter()
+            .any(|a| a == r#"plugin_decide {"allowed":true,"id":"notes"}"#),
+        "{:?}",
+        app.actions.borrow()
+    );
+    // Not Now puts it off for this run.
+    let mut app = with_notes("pending");
+    app.h.click("consent-later");
+    assert!(app.h.find("consent-allow").is_none());
+    // A pending plugin's panel is not offered.
+    app.run("open_panel");
+    assert!(app.h.find("open:panel:notes/notes").is_none());
+}
+
+#[test]
+fn a_saved_panel_pane_opens_again_without_a_shell() {
+    let mut app = with_notes("enabled");
+    app.open_panel("panel:notes/notes");
+    let saved = app.saved.borrow().clone();
+    let (listed, entry) = notes_plugin("enabled");
+    let mut again = App::with_host(saved, move |host| {
+        host.shared("plugins", listed);
+        host.set_plugins(vec![zgui_script::Plugin {
+            name: "notes".into(),
+            entry,
+            grants: vec![],
+        }]);
+    });
+    assert_eq!(again.panes().len(), 1, "one terminal, one panel");
+    let panel = again
+        .h
+        .texts()
+        .into_iter()
+        .find_map(|t| t.strip_prefix("notes for ").map(str::to_owned))
+        .expect("the panel again");
+    let kept = again
+        .actions
+        .borrow()
+        .iter()
+        .find(|a| a.starts_with("keep_sessions"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(kept.contains("p"), "{kept}");
+    assert!(
+        !kept.contains(&format!("\"{panel}\"")),
+        "no shell for the panel: {kept}"
+    );
+}
+
+/// The example plugins zterm ships (examples/terminal-plugins), as the
+/// user would allow them.
+fn example_plugin(name: &str, grants: Vec<zgui_script::Capability>) -> zgui_script::Plugin {
+    zgui_script::Plugin {
+        name: name.into(),
+        entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zgui-desktop/examples/terminal-plugins")
+            .join(name)
+            .join("init.luau"),
+        grants,
+    }
+}
+fn listed(id: &str, panel: &str, title: &str) -> String {
+    format!(
+        r#"{{ "id": "{id}", "name": "{title}", "version": "1", "author": "", "description": "", "status": "enabled",
+             "error": null, "permissions": [], "panels": [{{ "id": "{panel}", "kind": "panel:{id}/{panel}", "title": "{title}", "description": "" }}] }}"#
+    )
+}
+
+/// What the example plugins fetch, answered from here.
+async fn hn_fetch(request: zgui_script::Request) -> Result<zgui_script::Response, String> {
+    {
+        let url = request.url;
+        let body = if url.ends_with("/topstories.json") {
+            "[7, 8]".to_string()
+        } else if url.contains("/v0/item/") {
+            let id = if url.contains("/7.") { 7 } else { 8 };
+            format!(
+                r#"{{ "id": {id}, "title": "Story {id}", "url": "https://example.com/{id}", "by": "ada", "score": 10, "descendants": 2, "time": 0, "kids": [81, 82] }}"#
+            )
+        } else if url.contains("/api/v1/items/8") {
+            r#"{ "id": 8, "children": [
+                { "id": 82, "author": "bob", "text": "<p>Second, <i>said</i> bob", "created_at_i": 0, "children": [] },
+                { "id": 81, "author": "cy", "text": "First &amp; best<p>See <a href=\"https://x.org\">x.org</a>", "created_at_i": 0,
+                  "children": [{ "id": 83, "author": "ada", "text": "A reply", "created_at_i": 0, "children": [] }] }
+            ] }"#
+                .to_string()
+        } else if url.contains("/user/") {
+            r#"{ "id": "ada", "karma": 1234, "created": 0, "about": "Hello" }"#.to_string()
+        } else {
+            return Err(format!("unexpected {url}"));
+        };
+        Ok(zgui_script::Response {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: body.into_bytes(),
+        })
+    }
+}
+
+#[test]
+fn the_hacker_news_plugin_navigates_within_its_pane() {
+    use zgui_script::Capability;
+    let mut app = App::with_host(Value::Nil, |host| {
+        host.shared(
+            "plugins",
+            Value::from_json(&format!(
+                "[{}]",
+                listed("hacker-news", "front-page", "Hacker News")
+            ))
+            .unwrap(),
+        );
+        host.set_plugins(vec![example_plugin(
+            "hacker-news",
+            vec![Capability::Fetch, Capability::Web],
+        )]);
+        host.fetcher(hn_fetch);
+    });
+    app.open_panel_in_tab("panel:hacker-news/front-page");
+    assert!(
+        app.h.wait_until(|h| h.find("story-8").is_some()),
+        "{:?}",
+        app.h.texts()
+    );
+    assert_eq!(app.h.host.error().get(), None);
+    // A story: its discussion, in HN's order, threaded.
+    app.h.click("story-8");
+    assert!(
+        app.h
+            .wait_until(|h| h.texts().iter().any(|t| t == "A reply")),
+        "{:?}",
+        app.h.texts()
+    );
+    let texts = app.h.texts();
+    let first = texts.iter().position(|t| t.starts_with("First & best"));
+    let second = texts.iter().position(|t| t.starts_with("Second, said bob"));
+    assert!(first < second && first.is_some(), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "See x.org"), "{texts:?}");
+    // The article, in the pane; back closes it.
+    // The story has eased in.
+    app.settle();
+    app.h.click("hn-primary");
+    app.settle();
+    let pages = |app: &mut App| {
+        app.h.ui.prepare_frame();
+        app.h
+            .natives
+            .nodes()
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    app.h.natives.content(*n),
+                    Some(zgui::native_view::NativeContent::Web(_))
+                )
+            })
+            .count()
+    };
+    assert_eq!(pages(&mut app), 1, "the article shows");
+    app.h.click("hn-back");
+    app.settle();
+    assert_eq!(pages(&mut app), 0);
+    assert!(
+        app.h.texts().iter().any(|t| t == "A reply"),
+        "back at the story"
+    );
+    app.h.click("hn-back");
+    app.settle();
+    assert!(app.h.find("story-7").is_some(), "back at the feed");
+    assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
+fn the_editor_plugin_opens_edits_and_saves_a_picked_file() {
+    use zgui::input::{Key, Modifiers};
+    use zgui::platform::{FilePicker, Pending, Platform, PlatformService};
+    use zgui_script::Capability;
+    struct Fake(std::path::PathBuf);
+    impl Platform for Fake {
+        fn clipboard_text(&self) -> Option<String> {
+            None
+        }
+        fn set_clipboard_text(&self, _: String) -> bool {
+            false
+        }
+        fn open_files(&self, _: FilePicker) -> Pending<Result<Vec<std::path::PathBuf>, String>> {
+            let path = self.0.clone();
+            Box::pin(async move { Ok(vec![path]) })
+        }
+        fn save_file(&self, _: FilePicker) -> Pending<Result<Option<std::path::PathBuf>, String>> {
+            let path = self.0.clone();
+            Box::pin(async move { Ok(Some(path)) })
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("zterm-editor-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("hello.rs");
+    std::fs::write(&file, "fn main() {\n}\n").unwrap();
+    let fake = std::rc::Rc::new(Fake(file.clone()));
+    let mut app = App::with_window(
+        Value::Nil,
+        |host| {
+            host.shared(
+                "plugins",
+                Value::from_json(&format!("[{}]", listed("editor", "editor", "Editor"))).unwrap(),
+            );
+            host.set_plugins(vec![example_plugin("editor", vec![Capability::Files])]);
+        },
+        move |view| zgui::compose::provide(PlatformService(fake), view),
+    );
+    app.open_panel("panel:editor/editor");
+    app.h.click("editor-open");
+    assert!(
+        app.h
+            .wait_until(|h| h.texts().iter().any(|t| t == "hello.rs")),
+        "{:?}",
+        app.h.texts()
+    );
+    let texts = app.h.texts();
+    assert!(texts.iter().any(|t| t == "Rust"), "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "\u{2007}1"),
+        "its lines are numbered: {texts:?}"
+    );
+    // Typed into, it is edited; ⌘S saves it.
+    app.h
+        .ui
+        .dispatch(zgui::input::InputEvent::Text("// hi\n".into()));
+    app.settle();
+    assert!(app.h.texts().iter().any(|t| t == "Edited"));
+    app.h.key_with(
+        Key::Character("s".into()),
+        Modifiers {
+            meta: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        app.h
+            .wait_until(|h| h.texts().iter().any(|t| t == "Saved hello.rs")),
+        "{:?}",
+        app.h.texts()
+    );
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        saved.contains("// hi") && saved.contains("fn main()"),
+        "{saved}"
+    );
+    // A reload (the plugin edited, the pane rebuilt) keeps the file open.
+    app.h.host.reload().unwrap();
+    app.settle();
+    assert!(
+        app.h.texts().iter().any(|t| t == "hello.rs"),
+        "{:?}",
+        app.h.texts()
+    );
+    assert_eq!(app.h.host.error().get(), None);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_example_plugins_run_in_their_panels() {
+    use zgui_script::Capability;
+    let run = |grants: Vec<Capability>| {
+        App::with_host(Value::Nil, move |host| {
+            host.shared(
+                "plugins",
+                Value::from_json(&format!(
+                    "[{}, {}]",
+                    listed("notes", "notes", "Notes"),
+                    listed("hacker-news", "front-page", "Hacker News")
+                ))
+                .unwrap(),
+            );
+            host.set_plugins(vec![
+                example_plugin("notes", vec![]),
+                example_plugin("hacker-news", grants),
+            ]);
+            host.fetcher(hn_fetch);
+        })
+    };
+    let mut app = run(vec![Capability::Fetch, Capability::Web]);
+    app.open_panel("panel:notes/notes");
+    assert_eq!(app.h.host.error().get(), None);
+    assert!(app.h.texts().iter().any(|t| t == "Notes for this pane"));
+    app.open_panel("panel:hacker-news/front-page");
+    assert!(
+        app.h.wait_until(|h| h.find("story-8").is_some()),
+        "{:?}",
+        app.h.texts()
+    );
+    assert_eq!(app.h.host.error().get(), None);
+
+    // Not allowed the network, it cannot fetch.
+    let mut app = run(vec![Capability::Web]);
+    app.open_panel("panel:hacker-news/front-page");
+    app.settle();
+    let texts = app.h.texts();
+    assert!(
+        texts.iter().any(|t| t.starts_with("Could not load")),
+        "{texts:?}"
+    );
+    assert!(!texts.iter().any(|t| t.contains("Story")));
+}
+
+#[test]
+fn a_panel_is_where_it_was_left_after_another_tab_shows() {
+    use zgui_script::Capability;
+    let fetches = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = fetches.clone();
+    let mut app = App::with_host(Value::Nil, move |host| {
+        host.shared(
+            "plugins",
+            Value::from_json(&format!(
+                "[{}]",
+                listed("hacker-news", "front-page", "Hacker News")
+            ))
+            .unwrap(),
+        );
+        host.set_plugins(vec![example_plugin(
+            "hacker-news",
+            vec![Capability::Fetch, Capability::Web],
+        )]);
+        host.fetcher(move |request| {
+            counted.set(counted.get() + 1);
+            hn_fetch(request)
+        });
+    });
+    app.open_panel_in_tab("panel:hacker-news/front-page");
+    assert!(app.h.wait_until(|h| h.find("story-8").is_some()));
+    app.settle();
+    app.h.click("story-8");
+    assert!(
+        app.h
+            .wait_until(|h| h.texts().iter().any(|t| t == "A reply"))
+    );
+    app.settle();
+    let back = app.h.find("hn-back").expect("the story's back button");
+    let fetched = fetches.get();
+    // Another tab, then this one again.
+    app.run("previous_tab");
+    assert!(
+        !app.h.ui.scene.borrow().layout_visible(back),
+        "hidden while another tab shows"
+    );
+    app.run("next_tab");
+    assert_eq!(
+        app.h.find("hn-back"),
+        Some(back),
+        "the same panel, not one built again"
+    );
+    assert!(app.h.texts().iter().any(|t| t == "A reply"));
+    assert_eq!(fetches.get(), fetched, "nothing fetched again");
+    assert_eq!(app.h.host.error().get(), None);
+}
+
+#[test]
+fn a_panels_bar_keeps_its_clicks_while_the_grip_shows() {
+    use zgui_script::Capability;
+    let mut app = App::with_host(Value::Nil, |host| {
+        host.shared(
+            "plugins",
+            Value::from_json(&format!(
+                "[{}]",
+                listed("hacker-news", "front-page", "Hacker News")
+            ))
+            .unwrap(),
+        );
+        host.set_plugins(vec![example_plugin(
+            "hacker-news",
+            vec![Capability::Fetch, Capability::Web],
+        )]);
+        host.fetcher(hn_fetch);
+    });
+    app.open_panel_in_tab("panel:hacker-news/front-page");
+    assert!(app.h.wait_until(|h| h.find("story-8").is_some()));
+    app.settle();
+    app.h.click("story-8");
+    app.settle();
+    // The pointer at the top of the pane: the grip shows, across from the
+    // bar's back button.
+    let back = app.h.bounds("hn-back");
+    app.h.ui.dispatch(zgui::input::InputEvent::PointerMove {
+        x: back.x + back.width / 2.,
+        y: back.y + back.height / 2.,
+    });
+    app.settle();
+    app.h.click("hn-back");
+    app.settle();
+    assert!(app.h.find("story-7").is_some(), "back at the feed");
 }

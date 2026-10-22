@@ -254,3 +254,60 @@ fn a_clipping_layout_box_clips_to_the_space() {
         "the unshown part is cut: {bottom}"
     );
 }
+
+#[test]
+fn a_presence_box_showing_nothing_lets_the_pointer_through() {
+    use zgui::input::{InputEvent, PointerButton};
+    let mut h = Harness::inline(
+        r#"
+local open = ui.state("open", false)
+local dropped = ui.state("dropped", "")
+return ui.row {
+    w_full = true,
+    h_full = true,
+    items = "stretch",
+    -- Window keys: the root listens, under the box.
+    on_key = function() return false end,
+    ui.column {
+        grow = 1,
+        items = "stretch",
+        ui.div { id = "source", h = 40, on_drag = function() return "card" end },
+        ui.div {
+            id = "target",
+            grow = 1,
+            drop_when = function() return true end,
+            on_drop = function(payload) dropped:set(payload) end,
+        },
+        ui.text { "{dropped}", id = "dropped" },
+    },
+    -- A sheet over everything, put away.
+    ui.presence(function() return if open:get() then "sheet" else nil end, function()
+        return ui.div { w_full = true, h_full = true }
+    end, { absolute = true, top = 0, left = 0, right = 0, bottom = 0 }),
+}
+"#,
+    );
+    let (from, to) = (h.bounds("source"), h.bounds("target"));
+    let (x, y) = (from.x + from.width / 2., from.y + from.height / 2.);
+    let (tx, ty) = (to.x + to.width / 2., to.y + to.height / 2.);
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    for step in 1..=8 {
+        let t = step as f32 / 8.;
+        h.ui.dispatch(InputEvent::PointerMove {
+            x: x + (tx - x) * t,
+            y: y + (ty - y) * t,
+        });
+    }
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: tx,
+        y: ty,
+        button: PointerButton::Primary,
+    });
+    h.settle();
+    assert_eq!(h.text("dropped"), "card", "the empty box is not in the way");
+}

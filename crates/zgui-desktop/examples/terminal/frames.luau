@@ -95,6 +95,29 @@ end)
 M.pane_ids = ui.computed(function()
 	return (M.frames:get()).order
 end)
+-- The panes kept mounted: the active tab's shown ones, and every plugin
+-- panel wherever it is (hidden while its tab is not shown, or another pane
+-- is zoomed), so a panel is where it was left when its tab comes back, as a
+-- terminal's shell is. A hidden one costs no layout or drawing.
+M.mounted_ids = ui.computed(function(): { string }
+	local out: { string } = {}
+	local seen: { [string]: boolean } = {}
+	for _, id in (M.frames:get()).order do
+		table.insert(out, id)
+		seen[id] = true
+	end
+	local kinds = state.kinds:get()
+	for _, tab in state.tabs:get() do
+		for _, id in layout.leaves(tab.root) do
+			local kind = kinds[id]
+			if kind and kind ~= "browser" and not seen[id] then
+				table.insert(out, id)
+				seen[id] = true
+			end
+		end
+	end
+	return out
+end)
 M.divider_ids = ui.computed(function()
 	local ids: { string } = {}
 	for _, d in (M.frames:get()).dividers do

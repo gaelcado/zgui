@@ -13,29 +13,75 @@ local layout = require("@lib/layout")
 local tabs, active, focus = state.tabs, state.active, state.focus
 local dragging, tab_drop, tab_slot = state.dragging, state.tab_drop, state.tab_slot
 
+-- A tab's shape, shared by the tab, the chip that follows the pointer while
+-- one is dragged, and the ghost of the tab a dragged pane would open as.
+local tab_style = ui.variants {
+	base = {
+		h = 28,
+		max_w = 210,
+		items = "center",
+		pl = "$terminal.tab.inset",
+		pr = "$terminal.tab.end",
+		gap = "$terminal.tab.gap",
+		rounded = "$terminal.tab.radius",
+		shrink = 1,
+		cursor = "default",
+	},
+	variants = {
+		kind = {
+			tab = {},
+			-- A tab a dragged tab would drop on: it lights.
+			target = { bg = "$terminal.drop" },
+			-- Blurred behind, as the strip's glass is, so it reads over a terminal.
+			chip = { font = theme.font, bg = theme.wash, backdrop_blur = 24, border = 1, border_color = theme.line },
+			slot = {
+				w = 132,
+				shrink = 0,
+				overflow = "hidden",
+				bg = "$terminal.slot",
+				border = 1,
+				border_color = "$terminal.slot_line",
+			},
+		},
+	},
+	defaults = { kind = "tab" },
+}
+
+-- A tile under a tab's icon, dimmer while the tab is not active.
+local tile = ui.variants {
+	base = {
+		h = 20,
+		min_w = 20,
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		rounded = "$terminal.tab.tile_radius",
+		border = 1,
+		border_color = "$terminal.tile_line",
+	},
+	variants = { dim = { [true] = { bg = "$terminal.tile_dim" }, [false] = { bg = "$terminal.tile_bg" } } },
+	defaults = { dim = false },
+}
+
 -- A pane's icon in a tab: on a little tile of its own, tinted for agents.
 local function badge(pane: string, dim: () -> boolean): Node
 	local desc = function()
 		return sessions.describe(pane)
 	end
 	return ui.row {
+		variants = tile { dim = dim },
 		w = 20,
-		h = 20,
-		shrink = 0,
-		rounded = 5,
-		items = "center",
-		justify = "center",
+		-- An agent's tile takes its own colour, from its session.
 		bg = function()
 			local tint = desc().tint
 			if tint then
-				return tint .. (if dim() then "1f" else "2e")
+				return ui.raw(tint .. (if dim() then "1f" else "2e"), "an agent's own colour")
 			end
-			return if dim() then "#ffffff0d" else "#ffffff17"
+			return if dim() then "$terminal.tile_dim" else "$terminal.tile_bg"
 		end,
-		border = 1,
 		border_color = function()
 			local tint = desc().tint
-			return if tint then tint .. "33" else "#ffffff0f"
+			return if tint then ui.raw(tint .. "33", "an agent's own colour") else "$terminal.tile_line"
 		end,
 		controls.glyph(desc, 12, dim),
 	}
@@ -44,22 +90,12 @@ end
 -- More panes than fit: "+3" on a tile like the icons'.
 local function more_badge(count: number, dim: () -> boolean): Node
 	return ui.row {
-		h = 20,
-		min_w = 20,
-		px = 5,
-		shrink = 0,
-		rounded = 5,
-		items = "center",
-		justify = "center",
-		bg = function()
-			return if dim() then "#ffffff0d" else "#ffffff17"
-		end,
-		border = 1,
-		border_color = "#ffffff0f",
+		variants = tile { dim = dim },
+		px = "$terminal.tab.tile_pad",
 		ui.text {
 			`+{count}`,
-			text_size = 10.5,
-			weight = 600,
+			text_size = "$terminal.tab.tile_text",
+			weight = "$font.weight.semibold",
 			color = function()
 				return if dim() then theme.tertiary else theme.secondary
 			end,
@@ -119,36 +155,27 @@ end
 local M = {}
 
 -- What follows the pointer while dragging a tab or a pane: the tab as it
--- shows active in the strip (a pane alone, its own icon). Blurred behind,
--- as the strip's glass is, so it reads over a terminal.
+-- shows active in the strip (a pane alone, its own icon).
 function M.chip(pane: string?, tab: string?): Node
 	local shown = if tab then badges(tab, never) else (if pane then badge(pane, never) else nil)
 	return ui.row {
-		h = 28,
-		pl = 3,
-		pr = 10,
-		gap = 7,
-		items = "center",
-		rounded = 8,
-		max_w = 210,
-		font = theme.font,
-		bg = theme.wash,
-		backdrop_blur = 24,
-		border = 1,
-		border_color = theme.line,
-		ui.row { gap = 3, shrink = 0, items = "center", shown },
+		variants = tab_style { kind = "chip" },
+		ui.row { gap = "$terminal.tab.tile_gap", shrink = 0, items = "center", shown },
 		ui.text {
 			function()
 				return name_of(pane)
 			end,
 			shrink = 1,
 			min_w = 0,
-			text_size = 12.5,
+			text_size = "$terminal.text",
 			truncate = true,
 			color = theme.text,
 		},
 	}
 end
+
+-- A tab's padding, for the animations that fold it away and back.
+local INSET, END = ui.theme.get("terminal.tab.inset"), ui.theme.get("terminal.tab.end")
 
 local function tab_button(id: string): Node
 	local function pane(): string?
@@ -186,8 +213,8 @@ local function tab_button(id: string): Node
 			local d = dragging:peek()
 			anime.animate(el, {
 				width = width,
-				paddingLeft = 3,
-				paddingRight = 10,
+				paddingLeft = INSET,
+				paddingRight = END,
 				marginRight = 0,
 				opacity = if d.kind == "tab" and d.id == id then 0.35 else 1,
 				duration = 240,
@@ -200,29 +227,19 @@ local function tab_button(id: string): Node
 		end
 	end)
 	return ui.row {
-		h = 28,
+		variants = tab_style {
+			kind = function()
+				return if tab_drop:get() == id then "target" else "tab"
+			end,
+		},
 		relative = true,
 		on_mount = function(el: Element)
 			element = el
 		end,
-		-- The icons' tiles sit as far in from the tab's edge as from its
-		-- top; the name, without a tile, a little more.
-		pl = 3,
-		pr = 10,
-		gap = 7,
-		items = "center",
-		rounded = 8,
-		max_w = 210,
-		shrink = 1,
-		cursor = "default",
 		-- Where it was while dragged: a dim slot.
 		opacity = function()
 			local d = dragging:get()
 			return if d.kind == "tab" and d.id == id then 0.35 else 1
-		end,
-		-- A tab dropped here: its slot lights.
-		bg = function()
-			return if tab_drop:get() == id then "#ffffff1f" else theme.clear
 		end,
 		on_click = function()
 			actions.activate(id)
@@ -316,7 +333,7 @@ local function tab_button(id: string): Node
 		hover_layer,
 		controls.glass("tab-active", is_active, 8),
 		ui.row {
-			gap = 3,
+			gap = "$terminal.tab.tile_gap",
 			shrink = 0,
 			items = "center",
 			badges(id, function()
@@ -329,7 +346,7 @@ local function tab_button(id: string): Node
 			end,
 			shrink = 1,
 			min_w = 0,
-			text_size = 12.5,
+			text_size = "$terminal.text",
 			truncate = true,
 			color = function()
 				return if is_active() then theme.text else theme.secondary
@@ -339,11 +356,11 @@ local function tab_button(id: string): Node
 		ui.div {
 			hidden = function()
 				local p = pane()
-				return is_active() or p == nil or sessions.is_browser(p) or not ui.term(p).bell
+				return is_active() or p == nil or not sessions.is_terminal(p) or not ui.term(p).bell
 			end,
 			w = 6,
 			h = 6,
-			rounded = 3,
+			rounded = "$radius.full",
 			bg = theme.bell,
 			shrink = 0,
 		},
@@ -373,18 +390,7 @@ end)
 -- up so the tabs after it slide over.
 local function slot_tab(pane: string): Node
 	return ui.row {
-		h = 28,
-		w = 132,
-		pl = 3,
-		pr = 10,
-		gap = 7,
-		shrink = 0,
-		items = "center",
-		rounded = 8,
-		overflow = "hidden",
-		bg = "#ffffff0f",
-		border = 1,
-		border_color = "#ffffff29",
+		variants = tab_style { kind = "slot" },
 		on_mount = function(el)
 			anime.animate(el, { width = { 0, 132 }, opacity = { 0, 1 }, duration = 200, ease = "outQuint" })
 		end,
@@ -401,7 +407,7 @@ local function slot_tab(pane: string): Node
 			end,
 			shrink = 1,
 			min_w = 0,
-			text_size = 12.5,
+			text_size = "$terminal.text",
 			truncate = true,
 			color = theme.secondary,
 		},
@@ -431,8 +437,8 @@ function M.Titlebar(): Node
 				actions.commit_slot()
 			end
 		end,
-		gap = 3,
-		pr = 6,
+		gap = "$terminal.tab.strip_gap",
+		pr = "$terminal.inset",
 		-- Room for the traffic lights and the sidebar toggle (drawn over this,
 		-- app.luau) while the sidebar is closed; a little air after an open
 		-- one. It eases as the sidebar does, so the tabs slide clear of the
@@ -447,7 +453,7 @@ function M.Titlebar(): Node
 			shrink = 0,
 		},
 		ui.row {
-			gap = 3,
+			gap = "$terminal.tab.strip_gap",
 			items = "center",
 			shrink = 1,
 			min_w = 0,
@@ -486,9 +492,6 @@ function M.Titlebar(): Node
 		end),
 		controls.tool(icons.split_down, function()
 			actions.split("column")
-		end),
-		controls.tool(icons.browser, function()
-			actions.split("row", "browser")
 		end),
 	}
 end

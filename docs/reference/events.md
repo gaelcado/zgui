@@ -15,6 +15,7 @@ on_blur: (Handler | Action)?
 on_wheel: (((e: WheelEvent) -> ()) | Action)?
 on_mount: ((element: Element) -> ())?
 on_resize: ((size: Size, element: Element) -> ())?
+on_visible: ((visible: boolean, element: Element) -> ())?
 on_drag: (() -> any)?
 drag_preview: ((payload: any) -> Node)?
 on_drag_end: ((payload: any, accepted: boolean) -> ())?
@@ -28,17 +29,18 @@ on_drop: ((payload: any, e: DragPoint) -> ())?
 
 | Event | Called with | When |
 | --- | --- | --- |
-| `on_click` | nothing | the node is activated: a primary click on it (press and release), Space or Enter while it has focus, or an accessibility action. The innermost node with `on_click` takes it |
-| `on_press` | `{ x, y, local_x, local_y }` | the primary button goes down on the node or anything in it |
+| `on_click` | `{ shift, ctrl, alt, meta }`: the keys held | the node is activated: a primary click on it (press and release), Space or Enter while it has focus, or an accessibility action. The innermost node with `on_click` takes it |
+| `on_press` | `{ x, y, local_x, local_y, clicks, shift, ctrl, alt, meta }` | the primary button goes down on the node or anything in it; `clicks` counts presses in a row (2 for a double click's second) |
 | `on_release` | the same | the primary button comes up |
 | `on_hover` | `true`, then `false` | once when the pointer comes inside the node or anything in it, once when it is outside all of them (the DOM's `mouseenter` and `mouseleave`); leaving the window, the window going to the back, and the pointer moving onto a page or a terminal count as leaving |
 | `on_pointer_move` | `{ x, y, local_x, local_y }` | the pointer moves over it (or anywhere, while it holds the pointer) |
-| `on_key` | `{ key, shift, ctrl, alt, meta, repeat }` | a key goes down while it, or a node inside it, has focus. Return `true` to consume the key: the default action and the ancestors' handlers do not see it |
+| `on_key` | `{ key, code, shift, ctrl, alt, meta, repeat, editing }` (`code`: the physical key, as the DOM's `KeyboardEvent.code`, `"KeyA"`, `"Digit1"`; `editing`: a text field holds focus, so a bare-key shortcut gives way) | a key goes down while it, or a node inside it, has focus. Return `true` to consume the key: the default action and the ancestors' handlers do not see it |
 | `on_key_up` | the key's name | the key comes up |
 | `on_focus`, `on_blur` | nothing | it takes or loses keyboard focus |
 | `on_wheel` | `{ dx, dy }` | a wheel or trackpad scroll over it |
 | `on_mount` | its [element](#elements) | once, when it is mounted: start animations here |
 | `on_resize` | `{ w, h }`, its element | layout gives it a new size, and at its first layout (as a ResizeObserver reports) |
+| `on_visible` | whether any of it shows, its element | it comes into view or all of it leaves (inside every clip and scroll viewport above it), and at its first layout (as an IntersectionObserver reports): build what only matters on screen |
 | `on_drag` | nothing; returns the payload | the pointer moves 4 points from a press on it: a drag starts, carrying what it returns (any plain value) |
 | `drag_preview` | the payload; returns a node | what follows the pointer while it drags |
 | `on_drag_end` | the payload, whether it was dropped on a destination | the drag ends |
@@ -146,7 +148,7 @@ return ui.row {
 
 ## Elements
 
-An element is a mounted node as a script sees it: `on_mount` and `on_resize` receive one, a [ref](state.md#refs) holds the ones mounted with it, and [animation](anime.md) function values get their target as one. A node is reachable this way (and by selectors) when it has an `id`, a `class`, a `ref`, an `on_mount` or an `on_resize`.
+An element is a mounted node as a script sees it: `on_mount` and `on_resize` receive one, a [ref](state.md#refs) holds the ones mounted with it, and [animation](anime.md) function values get their target as one. A node is reachable this way (and by selectors) when it has an `id`, a `class`, a `ref`, an `on_mount`, an `on_resize` or an `on_visible`.
 
 ```luau
 declare extern type Element with
@@ -181,11 +183,11 @@ A ref (`ui.ref()`, given to nodes as `ref = r`) answers `r:get()` and `r.element
 
 ## Gotchas
 
-- `on_click` gets nothing; `on_press` and `on_release` get the pointer. `on_press` is for what must start before release (dragging a window, a divider); `on_click` is a completed click.
+- `on_click` gets the keys held; `on_press` and `on_release` get the pointer. `on_press` is for what must start before release (dragging a window, a divider); `on_click` is a completed click.
 - The innermost node with `on_click` takes a click: a button inside a clickable row runs its own handler, not the row's. An empty `on_click = function() end` keeps clicks on a panel from reaching a backdrop under it.
 - `on_press`, `on_release`, `on_pointer_move`, `on_key` and `on_wheel` hear their events over (or, for keys, from inside) the node, children included, before its ancestors do. A node with `on_press` and either `on_pointer_move` or `on_release` keeps the pointer from press to release, wherever it goes.
 - Keys go to the node with focus and then up its ancestors. A plain node takes focus with `focusable = true`; buttons and inputs take it themselves. Return `true` from `on_key` only for the keys you handle, or typing into an input inside stops working.
 - `on_hover` reports entering and leaving the node as a whole: moving between its children tells it nothing.
-- `on_resize` reports size changes only, not moves, and is called outside any tracking: reading state in it subscribes nothing.
+- `on_resize` reports size changes only, not moves, and `on_visible` changes only; both are called outside any tracking: reading state in them subscribes nothing.
 - Drag payloads are the script's own values (`any` to the types): annotate the parameters of `drag_preview`, `drop_when` and `on_drop` with your payload type. The nearest destination that accepts a payload gets the drag; `drop_when` returning nothing (or `false`) refuses it.
 - `on_mount` runs once, when the node mounts; a node that is rebuilt (a row with a new key, a `show` toggled back) mounts again.

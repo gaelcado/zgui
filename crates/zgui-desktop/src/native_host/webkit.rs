@@ -547,7 +547,19 @@ fn data_store(profile: &WebProfile, mtm: MainThreadMarker) -> Retained<WKWebsite
             .or_insert_with(|| unsafe {
                 match profile {
                     WebProfile::Named(name) if named_stores_supported() => {
-                        let identifier = NSUUID::from_bytes(identifier(name));
+                        // From its text: `from_bytes` passes a byte array
+                        // objc2's debug encoding check rejects (a crash).
+                        let bytes = identifier(name);
+                        let text: String = bytes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| {
+                                let dash = if matches!(i, 4 | 6 | 8 | 10) { "-" } else { "" };
+                                format!("{dash}{b:02X}")
+                            })
+                            .collect();
+                        let identifier = NSUUID::from_string(&NSString::from_str(&text))
+                            .unwrap_or_else(|| NSUUID::from_bytes(bytes));
                         WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm)
                     }
                     WebProfile::Named(_) => WKWebsiteDataStore::nonPersistentDataStore(mtm),

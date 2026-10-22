@@ -28,6 +28,9 @@ export type Name =
 	| "search"
 	| "browser"
 	| "drag_handle"
+	| "plugin"
+	| "clipboard"
+	| "folder"
 	| "plus"
 	| "close"
 	| "split_right"
@@ -64,6 +67,12 @@ local icons: { [Name]: string } = {
 	stop = icon('<path d="m6 6 12 12M6 18 18 6"/>'),
 	search = icon('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/>'),
 	browser = icon('<circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.5" ry="8"/><path d="M4 12h16"/>'),
+	clipboard = icon('<rect x="6" y="5" width="12" height="15" rx="2"/><path d="M9.5 3.5h5v3h-5z"/>'),
+	folder = icon('<path d="M4 7.5V18a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9.5a1 1 0 0 0-1-1h-7l-2-2.5H5a1 1 0 0 0-1 1z"/>'),
+	-- A puzzle piece: a plugin, or a panel one adds.
+	plugin = icon(
+		'<path d="M9.5 4.5a2 2 0 0 1 4 0V6H17a1 1 0 0 1 1 1v3.5h-1.5a2 2 0 0 0 0 4H18V18a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-3.5h1.5a2 2 0 0 0 0-4H5V7a1 1 0 0 1 1-1h3.5z"/>'
+	),
 	drag_handle = icon(
 		'<g fill="#fff" stroke="none"><circle cx="9" cy="6" r="1.1"/><circle cx="15" cy="6" r="1.1"/><circle cx="9" cy="12" r="1.1"/><circle cx="15" cy="12" r="1.1"/><circle cx="9" cy="18" r="1.1"/><circle cx="15" cy="18" r="1.1"/></g>'
 	),

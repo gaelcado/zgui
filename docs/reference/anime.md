@@ -93,7 +93,7 @@ Timelines also take `add(targets, params, position)` (or `add(timerParams, posit
 
 ## Bindings
 
-A property bound to `ui.tween(state, opts)` or `ui.spring(state, opts)` eases to its new value whenever the state changes, in Rust, with no script call per frame. Without `from` and `to` the scalar is the state's number (a boolean is 0 or 1); with both, it maps 0 to `from` and 1 to `to` (numbers, colors or pairs). `ui.loop(opts)` runs from 0 to 1 and back for as long as the node is mounted.
+A property bound to `ui.tween(state, opts)` or `ui.spring(state, opts)` eases to its new value whenever the state changes, in Rust, with no script call per frame. Without `from` and `to` the scalar is the state's number (a boolean is 0 or 1); with both, it maps 0 to `from` and 1 to `to` (numbers, colors or pairs). Colors may be theme tokens (`from = "$text.secondary", to = "$text.primary"`): the node blends them from its theme as it eases, and keeps following theme changes. `ui.loop(opts)` runs from 0 to 1 and back for as long as the node is mounted.
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |

@@ -31,6 +31,7 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `[1]` | `Text` | `""` | the text |
+| `literal` | `boolean` | `false` | show a string as written, braces and all: for data (code, titles, messages) that may hold `{name}` |
 | `text_size` | `number` | `16` | points |
 | `color` | `Color` | `"#e5edf7"` | |
 | `weight` | `number` | `400` | 100 to 900 |
@@ -64,7 +65,12 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `weight` | `number` | the paragraph's | `bold = true` is 700 |
 | `bold`, `italic`, `underline`, `strike` | `boolean` | `false` | |
 | `font` | `"mono"` | the paragraph's | |
-| `on_click` | `Handler \| Action` | none | a click on the run (a link) |
+| `padding` | `number` or `{ across, down }` | `0` | room around the run: across, before and after it (it takes space in the line); with `bg`, the background hugs the text plus this instead of filling the line, an inline code chip |
+| `radius` | `number` | `0` | the background's corner radius |
+| `underline_offset` | `number` | a tenth of the text size | how far below the baseline the underline sits (CSS's `text-underline-offset`) |
+| `on_click` | `Handler \| Action` | none | a click on the run (a link, underlined) |
+| `hover` | `{ underline: boolean?, color: Color? }` | none | a link's look under the pointer (CSS's `a:hover`); with it, the link isn't underlined at rest unless `underline` says so |
+| `icon` | `{ src?, code?, size?, gap?, tint? }` | none | an icon before the text, in the line (a file chip's file type): `src` (a file, `https://…`) or `code` (SVG markup), `size` square (12), `gap` from the text (4), centred on the line; `tint` a colour, or `"currentColor"` for the span's |
 
 ## Example
 
@@ -91,7 +97,7 @@ return ui.column {
 		"Press ",
 		ui.span { "Add", bold = true },
 		" or edit ",
-		ui.span { "app.luau", font = "mono", bg = "#ffffff14" },
+		ui.span { "app.luau", font = "mono", bg = "#ffffff14", padding = { 4, 0.5 }, radius = 3 },
 		" ",
 		ui.span { "({count} so far)", color = "#5ea5ff", underline = true, on_click = ui.add(count) },
 	},
@@ -100,6 +106,7 @@ return ui.column {
 
 ## Gotchas
 
+- Text from data is a template too: a commit message with `{id}` in it looks for state named `id` (an error if there is none), and `{{` shows as `{`. Pass `literal = true` (on `ui.text`, `ui.rich` or a span) for text the script didn't write.
 - A template names state by its key, not by its Luau variable: `"{count}"` shows `ui.state("count", …)` whatever the local is called. A name no state has is an error when the text is built.
 - Text does not wrap by default, and a row does not shrink it: `wrap = true` (in a box with a width), or `shrink = 1, min_w = 0, truncate = true` in a row.
 - Span options are plain values, read once: a state or function there is not followed (its value at build time is used). Only the run's text follows state. To restyle a run, build the paragraph in a function, or use two texts.

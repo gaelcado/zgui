@@ -171,6 +171,7 @@ pub struct EventContext {
     click_count: u8,
     drag_request: Option<DragRequest>,
     drag_accepted: Option<NodeId>,
+    key_code: Option<Rc<str>>,
 }
 impl EventContext {
     /// `event` at `target`, in the target phase, nothing decided yet.
@@ -189,6 +190,7 @@ impl EventContext {
             click_count: 0,
             drag_request: None,
             drag_accepted: None,
+            key_code: None,
         }
     }
     /// Request a typed drag from this listener during a pointer move.
@@ -226,6 +228,12 @@ impl EventContext {
     /// Primary or other button press count (1–3); zero for non-press events.
     pub fn click_count(&self) -> u8 {
         self.click_count
+    }
+    /// A key event's physical key, as the DOM's `KeyboardEvent.code`
+    /// (`"KeyA"`, `"Digit1"`, `"BracketLeft"`): the same key whatever the
+    /// layout or modifiers made it type. None when the platform didn't say.
+    pub fn key_code(&self) -> Option<&str> {
+        self.key_code.as_deref()
     }
     pub fn stop_propagation(&mut self) {
         self.stopped = true;
@@ -279,6 +287,8 @@ struct Entry {
 struct FocusScope {
     root: NodeId,
     previous: Option<NodeId>,
+    /// What the scope below holds stays live too (a submenu over its menu).
+    porous: bool,
 }
 #[derive(Clone, Copy)]
 struct Click {
@@ -350,6 +360,9 @@ struct State {
     pressed: Option<NodeId>,
     key_pressed: Option<(NodeId, Key)>,
     scopes: Vec<FocusScope>,
+    /// Non-modal layers (toasts): what they hold stays live under any modal
+    /// scope (`set_layer`).
+    layers: Vec<NodeId>,
     clicks: ClickTracker,
     drag: Option<drag::DragSession>,
     /// Listeners of the drag's source removed while it went on (a drop that
@@ -357,6 +370,14 @@ struct State {
     drag_orphans: Vec<Callback>,
     /// The source of a drag being finished (its drop and end delivering).
     drag_ending: Option<NodeId>,
+    /// The physical key of the key event being dispatched (`set_key_code`).
+    key_code: Option<Rc<str>>,
+    /// The modifier keys last known held (from the platform's pointer and
+    /// key events): what an activation (a click) was made with.
+    modifiers: Modifiers,
+    /// The last interaction was the pointer (a press), not the keyboard:
+    /// what it focuses shows no focus ring (`focus_visible_now`).
+    pointer_modality: bool,
 }
 #[derive(Clone, Default)]
 pub struct InputDispatcher {
@@ -449,6 +470,17 @@ impl InputDispatcher {
     /// A single wake deadline exists only while a key sequence is ambiguous.
     pub fn next_key_deadline(&self) -> Option<Instant> {
         self.actions.borrow().deadline()
+    }
+    /// Whether what takes focus now shows it (CSS's `:focus-visible`): not
+    /// when the last interaction was a pointer press (a clicked button),
+    /// yes after the keyboard, and at first.
+    pub fn focus_visible_now(&self) -> bool {
+        !self.state.borrow().pointer_modality
+    }
+    /// The physical key (a DOM `KeyboardEvent.code`) of the key events
+    /// dispatched until it's set again: a platform sets it around each.
+    pub fn set_key_code(&self, code: Option<Rc<str>>) {
+        self.state.borrow_mut().key_code = code;
     }
     pub fn has_pending_keys(&self) -> bool {
         self.next_key_deadline().is_some()
@@ -742,6 +774,11 @@ impl InputDispatcher {
         }
         let observer = s.disabled_observers.remove(&node);
         s.options.remove(&node);
+        if removed.is_some() {
+            crate::shrink_sparse(&mut s.entries);
+            crate::shrink_sparse(&mut s.options);
+        }
+        s.layers.retain(|id| *id != node);
         if s.clicks.0.is_some_and(|click| click.target == node) {
             s.clicks.0 = None;
         }
@@ -897,11 +934,28 @@ impl InputDispatcher {
         });
     }
     /// The active modal root, if any. Focus and pointer routing stay inside it.
+    /// Make `root` a non-modal layer (toasts): what it holds takes the
+    /// pointer and keys even while a modal holds focus elsewhere.
+    pub fn set_layer(&self, root: NodeId, layer: bool) {
+        let mut s = self.state.borrow_mut();
+        s.layers.retain(|id| *id != root);
+        if layer {
+            s.layers.push(root);
+        }
+    }
     pub fn focus_scope(&self) -> Option<NodeId> {
         self.state.borrow().scopes.last().map(|s| s.root)
     }
     /// Enter a nested modal scope and save the previous focus for restoration.
     pub fn push_focus_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId) -> bool {
+        self.push_scope(scene, root, false)
+    }
+    /// As `push_focus_scope`, leaving the scope below live to the pointer
+    /// and keys too: a submenu, whose parent menu's items stay hoverable.
+    pub fn push_porous_focus_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId) -> bool {
+        self.push_scope(scene, root, true)
+    }
+    fn push_scope(&self, scene: &Rc<RefCell<Scene>>, root: NodeId, porous: bool) -> bool {
         // Opening a sibling modal may supersede the current scope. Check the
         // node's actual ancestry, without applying the active scope boundary.
         if !self.enabled_without_scope(&scene.borrow(), root)
@@ -919,10 +973,11 @@ impl InputDispatcher {
             return false;
         }
         let previous = self.focused();
-        self.state
-            .borrow_mut()
-            .scopes
-            .push(FocusScope { root, previous });
+        self.state.borrow_mut().scopes.push(FocusScope {
+            root,
+            previous,
+            porous,
+        });
         let next = self.next_focus(&scene.borrow(), false);
         self.focus(scene, next);
         scene.borrow().contains(root)
@@ -1022,15 +1077,36 @@ impl InputDispatcher {
             return false;
         }
         let s = self.state.borrow();
-        if let Some(scope) = s.scopes.last() {
+        // A non-modal layer's content is live whatever scope is active.
+        let in_layer = !s.layers.is_empty() && {
             let mut ancestor = Some(node);
-            let mut inside = false;
+            let mut found = false;
             while let Some(id) = ancestor {
-                if id == scope.root {
-                    inside = true;
+                if s.layers.contains(&id) {
+                    found = true;
                     break;
                 }
                 ancestor = scene.parent(id);
+            }
+            found
+        };
+        // Inside the active scope, or, through porous scopes (submenus), any
+        // scope below it.
+        let mut live = s.scopes.iter().rev().peekable();
+        if !in_layer && live.peek().is_some() {
+            let mut inside = false;
+            for scope in live {
+                let mut ancestor = Some(node);
+                while let Some(id) = ancestor {
+                    if id == scope.root {
+                        inside = true;
+                        break;
+                    }
+                    ancestor = scene.parent(id);
+                }
+                if inside || !scope.porous {
+                    break;
+                }
             }
             if !inside {
                 return false;
@@ -1078,7 +1154,13 @@ impl InputDispatcher {
         if count != 0 {
             self.state.borrow_mut().clicks.0 = None;
         }
-        self.route_pointer(scene, target, event, Modifiers::default(), count)
+        // An activation carries the keys held as it was made (a ⌘-click).
+        let held = if matches!(event, InputEvent::Activate) {
+            self.state.borrow().modifiers
+        } else {
+            Modifiers::default()
+        };
+        self.route_pointer(scene, target, event, held, count)
     }
     fn route_pointer(
         &self,
@@ -1103,6 +1185,7 @@ impl InputDispatcher {
                 | InputEvent::PointerEnter
                 | InputEvent::PointerLeave
                 | InputEvent::PointerCancel
+                | InputEvent::Activate
         ) {
             modifiers
         } else {
@@ -1120,9 +1203,13 @@ impl InputDispatcher {
                 id = parent;
             }
         }
+        let key_code = matches!(event, InputEvent::KeyDown { .. } | InputEvent::KeyUp { .. })
+            .then(|| self.state.borrow().key_code.clone())
+            .flatten();
         let mut ctx = EventContext {
             pointer_modifiers,
             click_count,
+            key_code,
             ..EventContext::new(event, target)
         };
         let phases = path
@@ -1289,6 +1376,22 @@ impl InputDispatcher {
         modifiers: Option<Modifiers>,
         bindings: bool,
     ) -> DispatchResult {
+        if let Some(held) = modifiers {
+            self.state.borrow_mut().modifiers = held;
+        }
+        if let InputEvent::KeyDown { modifiers, .. } | InputEvent::KeyUp { modifiers, .. } = &event
+        {
+            self.state.borrow_mut().modifiers = *modifiers;
+        }
+        match &event {
+            InputEvent::PointerDown { .. } => self.state.borrow_mut().pointer_modality = true,
+            InputEvent::KeyDown { modifiers, .. }
+                if !modifiers.meta && !modifiers.control && !modifiers.alt =>
+            {
+                self.state.borrow_mut().pointer_modality = false
+            }
+            _ => {}
+        }
         if self.dispatch_drag(scene, &event) {
             return DispatchResult {
                 default_prevented: true,

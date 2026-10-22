@@ -127,6 +127,7 @@ fn reference_examples_run_and_type_check() {
             // What the examples ask of their host.
             host.action("save", |_| {});
             host.shared("user", "Ada");
+            host.expose_shared("user", None);
             if plugins.is_dir() {
                 host.plugins(plugins)
             } else {

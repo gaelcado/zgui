@@ -62,13 +62,27 @@ function M.activate(tab: string)
 		sessions.focus_view(pane)
 	end
 end
--- A tab with a new pane (or `pane`, moved), before the tab `before` or last.
-function M.new_tab(cwd: string, pane: string?, before: string?)
+-- What a new pane shows: a terminal starting in `cwd` (kind nil or
+-- "terminal"), or a page, the plugins or a plugin's panel (state.kinds).
+local function make(pane: string, kind: string?, cwd: string)
+	if kind == nil or kind == "terminal" then
+		sessions.spawn_dir[pane] = cwd
+		sessions.session(pane)
+		return
+	end
+	state.kinds:set_key(pane, kind)
+	if kind == "browser" then
+		state.address_focus:set(pane)
+	end
+end
+
+-- A tab with a new pane (a terminal, or `kind`), or `pane` moved there,
+-- before the tab `before` or last.
+function M.new_tab(cwd: string, pane: string?, before: string?, kind: string?)
 	local id = M.fresh("t")
 	local shown = pane or M.fresh("p")
 	if not pane then
-		sessions.spawn_dir[shown] = cwd
-		sessions.session(shown)
+		make(shown, kind, cwd)
 	end
 	local at = if before then M.tab_index(before) else nil
 	tabs:insert(at or #tabs:peek() + 1, { id = id, root = layout.pane(shown) })
@@ -76,8 +90,9 @@ function M.new_tab(cwd: string, pane: string?, before: string?)
 	M.activate(id)
 end
 
--- Split the focused pane: a terminal beside it, or a browser (`kind`).
-function M.split(axis: layout.Axis, kind: "browser"?)
+-- Split the focused pane: a terminal beside it, or what `kind` says (a
+-- browser, the plugins, a plugin's panel).
+function M.split(axis: layout.Axis, kind: string?)
 	local tab = active:peek()
 	local pane = M.current()
 	local root = M.root_of(tab)
@@ -85,13 +100,7 @@ function M.split(axis: layout.Axis, kind: "browser"?)
 		return
 	end
 	local new = M.fresh("p")
-	if kind == "browser" then
-		state.kinds:set_key(new, "browser")
-		state.address_focus:set(new)
-	else
-		sessions.spawn_dir[new] = sessions.cwd_of(pane)
-		sessions.session(new)
-	end
+	make(new, kind, sessions.cwd_of(pane))
 	zoom:set_key(tab, nil)
 	M.set_root(tab, layout.split(root, pane, axis, new, M.fresh("s")))
 	M.focus_pane(tab, new)
@@ -141,13 +150,15 @@ function M.close_pane(pane: string, force: boolean?)
 		state.confirm:set("")
 	end
 	M.detach(pane)
-	if sessions.is_browser(pane) then
-		sessions.page(pane):close()
-		state.kinds:set_key(pane, nil)
-	else
+	if sessions.is_terminal(pane) then
 		ui.term(pane):close()
 		-- Closed, not detached: its shell ends too.
 		ui.invoke("end_session", pane)
+	else
+		if sessions.is_browser(pane) then
+			sessions.page(pane):close()
+		end
+		state.kinds:set_key(pane, nil)
 	end
 	if #tabs:peek() == 0 then
 		ui.invoke("close_window")

@@ -34,7 +34,7 @@ local function restore(saved: state.SavedLayout?): boolean
 				if url then
 					sessions.page(pane):load(url)
 				end
-			else
+			elseif saved_kinds[pane] == nil then
 				sessions.spawn_dir[pane] = sessions.start_dir((saved.dirs or {})[pane])
 				sessions.session(pane)
 				table.insert(keep, pane)

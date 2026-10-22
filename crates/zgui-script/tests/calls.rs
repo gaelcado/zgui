@@ -367,3 +367,123 @@ fn remote_images_and_svgs_load_once_through_the_fetcher() {
     );
     assert_eq!(h.host.error().get(), None);
 }
+
+#[test]
+fn remote_images_show_their_fallback_until_they_come_and_if_they_fail() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.column {
+                ui.image { src = "https://img.test/ok.png", id = "ok", w = 20, h = 20,
+                    fallback = ui.text { "OK", id = "ok-initials" } },
+                ui.image { src = "https://img.test/gone.png", id = "gone", w = 20, h = 20,
+                    fallback = ui.text { "WL", id = "gone-initials" } },
+            }"#,
+        );
+        host.fetcher(move |request: zgui_script::Request| async move {
+            zgui::timer::sleep(Duration::from_millis(2)).await;
+            if request.url.ends_with("gone.png") {
+                return Ok(zgui_script::Response {
+                    status: 404,
+                    headers: vec![],
+                    body: vec![],
+                });
+            }
+            Ok(zgui_script::Response {
+                status: 200,
+                headers: vec![],
+                body: PNG.to_vec(),
+            })
+        });
+        host
+    });
+    // Both show their fallbacks while they load.
+    assert!(h.find("ok-initials").is_some() && h.find("gone-initials").is_some());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.find("ok-initials").is_some() && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..20 {
+        h.settle();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(h.find("ok-initials").is_none(), "the picture once it came");
+    assert!(
+        h.find("gone-initials").is_some(),
+        "the fallback when it failed"
+    );
+    assert_eq!(
+        h.host.error().get(),
+        None,
+        "a failed picture is no script error"
+    );
+}
+
+#[test]
+fn a_failed_remote_image_is_fetched_again_when_shown_after_a_backoff() {
+    let fetched = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = fetched.clone();
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local shown = ui.state("shown", true)
+            return ui.column {
+                ui.button { id = "toggle", on_click = function() shown:set(not shown:get()) end, "t" },
+                ui.show(shown, ui.image { src = "https://img.test/flaky.png", w = 20, h = 20,
+                    fallback = ui.text { "WL", id = "initials" } }),
+            }"#,
+        );
+        host.fetcher(move |_| {
+            count.set(count.get() + 1);
+            let first = count.get() == 1;
+            async move {
+                zgui::timer::sleep(Duration::from_millis(2)).await;
+                Ok(if first {
+                    zgui_script::Response {
+                        status: 503,
+                        headers: vec![],
+                        body: vec![],
+                    }
+                } else {
+                    zgui_script::Response {
+                        status: 200,
+                        headers: vec![],
+                        body: PNG.to_vec(),
+                    }
+                })
+            }
+        });
+        host
+    });
+    let remount = |h: &mut Harness| {
+        h.click("toggle");
+        h.click("toggle");
+        h.settle();
+    };
+    let wait = |h: &mut Harness, what: fn(&mut Harness) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !what(h) && Instant::now() < deadline {
+            h.settle();
+            h.ui.prepare_frame();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    for _ in 0..30 {
+        h.settle();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(fetched.get(), 1);
+    assert!(h.find("initials").is_some(), "the fallback when it failed");
+    // Shown again within the backoff: not fetched again.
+    remount(&mut h);
+    assert_eq!(fetched.get(), 1, "no refetch within the backoff");
+    std::thread::sleep(Duration::from_millis(5100));
+    remount(&mut h);
+    wait(&mut h, |h| h.find("initials").is_none());
+    assert_eq!(fetched.get(), 2, "fetched again once the backoff passed");
+    assert!(h.find("initials").is_none(), "the picture once it came");
+}

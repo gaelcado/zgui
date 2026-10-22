@@ -375,6 +375,92 @@ fn context_menus_show_what_scripts_return_at_the_pointer() {
     assert_eq!(h.host.error().get(), None);
 }
 
+#[test]
+fn host_functions_answer_now() {
+    let mut h = Harness::new(|runtime| {
+        let host = zgui_script::ScriptHost::inline(
+            runtime,
+            "app.luau",
+            r##"local row = ui.call_sync("row", 41)
+            return ui.text { row.label .. " " .. tostring(row.n), id = "t" }"##,
+        );
+        host.function("row", |arg| {
+            let n = arg.as_f64().unwrap_or(0.) + 1.;
+            Value::Map(vec![("label".into(), "row".into()), ("n".into(), Value::Num(n))].into())
+        });
+        host
+    });
+    assert_eq!(h.text("t"), "row 42");
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
+fn host_images_show_and_follow_replacement() {
+    let image = |shade: u8| {
+        std::sync::Arc::new(zgui::image::ImageData::new(2, 2, vec![shade; 16]).unwrap())
+    };
+    let mut h = Harness::inline(
+        r##"return ui.column { ui.image { id = "i", src = "host:art", w = 10, h = 10 } }"##,
+    );
+    let shown = |h: &mut Harness| {
+        h.ui.prepare_frame();
+        let node = h.find("i").unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if let zgui::scene::NodeKind::Image(image) = scene.kind(n) {
+                return Some(image.pixels()[0]);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        None
+    };
+    assert_ne!(
+        shown(&mut h),
+        Some(10),
+        "nothing of it until the host has it"
+    );
+    h.host.image("art", Some(image(10)));
+    h.frame();
+    assert_eq!(shown(&mut h), Some(10));
+    h.host.image("art", Some(image(200)));
+    h.frame();
+    assert_eq!(shown(&mut h), Some(200));
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
+fn menu_items_draw_content_of_their_own() {
+    let mut h = Harness::inline(
+        r##"local log = ui.state("log", "")
+        local open = ui.state("open", true)
+        return ui.column {
+            ui.menu {
+                open = open,
+                anchor = ui.button { id = "anchor", w = 40, h = 20 },
+                ui.menu_item {
+                    label = "Rename",
+                    id = "rename",
+                    on_click = function() log:set("renamed") end,
+                    ui.div { id = "icon", w = 14, h = 14 },
+                    ui.text { "Rename", id = "name" },
+                    ui.text { "⌘R", id = "shortcut" },
+                },
+            },
+            ui.text { "{log}", id = "log" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    assert!(
+        h.find("icon").is_some() && h.find("shortcut").is_some(),
+        "the item's own content"
+    );
+    assert_eq!(h.text("name"), "Rename");
+    h.click("rename");
+    assert_eq!(h.text("log"), "renamed");
+    assert_eq!(h.host.error().get(), None);
+}
+
 fn page(h: &mut Harness) -> zgui::web_view::WebView {
     h.ui.prepare_frame();
     let node = h.natives.nodes()[0];

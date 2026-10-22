@@ -4339,12 +4339,29 @@ impl Scene {
             let (id, before) = self.overflow_fades[index];
             let node = self.node(id);
             let own = node.bounds;
-            let reach = node
+            // What scrolls may sit a level or two down (a scroll view's
+            // viewport fills it and holds the moving content): look past
+            // a lone child as large as the node, adding up translations.
+            let (mut holder, mut shift) = (node, Transform::default());
+            while let [only] = holder.children[..] {
+                let child = self.node(only);
+                let same = (child.bounds.x - own.x).abs() < 0.5
+                    && (child.bounds.y - own.y).abs() < 0.5
+                    && (child.bounds.width - own.width).abs() < 0.5
+                    && (child.bounds.height - own.height).abs() < 0.5;
+                if !same || child.children.is_empty() {
+                    break;
+                }
+                shift.x += child.transform.x;
+                shift.y += child.transform.y;
+                holder = child;
+            }
+            let reach = holder
                 .children
                 .iter()
                 .map(|child| {
                     let child = self.node(*child);
-                    child.bounds.translated(child.transform)
+                    child.bounds.translated(child.transform).translated(shift)
                 })
                 .reduce(Rect::union);
             let [top, bottom] = node.style.fade_edges;

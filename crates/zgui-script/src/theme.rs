@@ -189,6 +189,29 @@ pub(crate) fn install(lua: &Lua, ui: &Table, dir: Option<PathBuf>) -> mlua::Resu
         lua.create_function(|lua, name: String| Ok(script_value(themes(lua)?.get(token(&name)))))?,
     )?;
     theme.set(
+        "strict",
+        lua.create_function(|lua, mode: Value| {
+            let mode = match &mode {
+                Value::Bool(on) => Some(if *on {
+                    crate::DesignLint::Warn
+                } else {
+                    crate::DesignLint::Off
+                }),
+                Value::Str(s) => crate::DesignLint::parse(s),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                fail("ui.theme.strict takes \"warn\", \"error\", \"off\" or a boolean")
+            })?;
+            let env = crate::node::env(lua)?;
+            let mut warnings = env.warnings.borrow_mut();
+            if !warnings.design_forced {
+                warnings.design = mode;
+            }
+            Ok(())
+        })?,
+    )?;
+    theme.set(
         "follow_system",
         lua.create_function(|lua, pair: Value| {
             let themes = themes(lua)?;

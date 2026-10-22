@@ -36,12 +36,42 @@ pub(crate) struct Assets {
     /// Where they are read from: the disk, or the app's bundle.
     source: std::cell::Cell<Option<crate::Files>>,
     /// Remote sources (`https://…`) by URL: fetched once, whoever shows
-    /// them; what shows one follows its `ready`.
-    remote: std::cell::RefCell<HashMap<String, zgui::reactive::Signal<bool>>>,
+    /// them; what shows one follows its status (`LOADING`, `READY`, `FAILED`).
+    remote: std::cell::RefCell<HashMap<String, zgui::reactive::Signal<u8>>>,
+    /// Failed remote sources: when, and how many times in a row. Asked
+    /// for again after a backoff, they're fetched again (as a browser
+    /// retries a broken image when a new element shows it).
+    failed: std::cell::RefCell<HashMap<String, (std::time::Instant, u32)>>,
     /// The host's tasks and transport, which remote sources go through.
     links: std::cell::RefCell<Option<(Rc<crate::timers::Timers>, crate::calls::SharedFetcher)>>,
+    /// Images the host made (`ScriptHost::image`), as `host:<name>`
+    /// sources: what shows one follows its version.
+    hosted: std::cell::RefCell<HashMap<String, zgui::reactive::Signal<u64>>>,
 }
 impl Assets {
+    /// `name`'s version signal, made with `runtime` the first time.
+    fn hosted(&self, src: &str, runtime: &zgui::reactive::Runtime) -> zgui::reactive::Signal<u64> {
+        self.hosted
+            .borrow_mut()
+            .entry(src.to_owned())
+            .or_insert_with(|| runtime.signal(0))
+            .clone()
+    }
+    /// The host sets (or, with None, clears) image `host:<name>`.
+    pub(crate) fn set_hosted(
+        &self,
+        name: &str,
+        image: Option<Arc<ImageData>>,
+        runtime: &zgui::reactive::Runtime,
+    ) {
+        let src = format!("host:{name}");
+        match image {
+            Some(image) => self.images.borrow_mut().insert(src.clone(), image),
+            None => self.images.borrow_mut().remove(&src),
+        };
+        let version = self.hosted(&src, runtime);
+        version.update(|v| *v = v.wrapping_add(1));
+    }
     pub(crate) fn connect(
         &self,
         timers: Rc<crate::timers::Timers>,
@@ -93,7 +123,8 @@ impl Assets {
 }
 
 pub(crate) struct Lowering {
-    pub slots: HashMap<String, Vec<Rc<Node>>>,
+    /// What each slot shows: its contributions and who made them.
+    pub slots: crate::node::Slots,
     pub actions: Actions,
     pub elements: Rc<crate::element::Elements>,
     pub runtime: zgui::reactive::Runtime,
@@ -121,10 +152,252 @@ pub(crate) fn lower(node: &Rc<Node>, low: &Rc<Lowering>) -> View {
         }
         _ => view,
     };
+    let view = match node.tooltip.as_deref() {
+        Some(
+            tip @ crate::node::Tooltip {
+                content: Some(_), ..
+            },
+        ) => tooltip(view, tip, &vm, low),
+        _ => view,
+    };
     match &node.theme {
         None => view,
         Some(spec) => themed(spec, &vm, view),
     }
+}
+
+/// A tooltip showing: its number, and what closes it.
+type Showing = (u64, Rc<dyn Fn()>);
+thread_local! {
+    /// Tooltips showing, and when the last one closed: within a second of
+    /// one, the next opens at once (as a tooltip provider's `timeout`).
+    static TOOLTIPS: std::cell::Cell<(usize, Option<std::time::Instant>)> =
+        const { std::cell::Cell::new((0, None)) };
+    /// The tooltip showing (one at most): its number, and what closes it.
+    static SHOWING: std::cell::RefCell<Option<Showing>> =
+        const { std::cell::RefCell::new(None) };
+    static NEXT_TOOLTIP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// Tooltip `open`'s showing ends (`shown` says whether it was showing).
+fn hide_tooltip(open: &Signal<bool>, shown: &std::cell::Cell<bool>) {
+    if !shown.replace(false) {
+        return;
+    }
+    TOOLTIPS.with(|t| {
+        let (count, _) = t.get();
+        t.set((count.saturating_sub(1), Some(std::time::Instant::now())));
+    });
+    open.set(false);
+}
+/// `anchor` with its tooltip: shown above it (unless placed otherwise)
+/// 300 ms after the pointer comes to rest on it, at once while another
+/// tooltip shows or just did, gone as the pointer leaves or presses. It
+/// takes no focus and lets the pointer through.
+fn tooltip(anchor: View, tip: &crate::node::Tooltip, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    use crate::node::TooltipContent;
+    use std::time::Duration;
+    use zgui::theme::tok;
+    let content = match tip.content.as_ref().expect("a tooltip's content") {
+        TooltipContent::Node(node) => lower(node, low),
+        // The theme's look: an overlay card, small text.
+        TooltipContent::Text(text) => column()
+            .px(8.)
+            .py(4.)
+            .max_w(320.)
+            .bg(tok::SURFACE_OVERLAY)
+            .border(0.5)
+            .border_color(tok::BORDER)
+            .rounded(tok::RADIUS_SM)
+            .text_size(tok::FONT_SIZE_XS)
+            .text_wrap(true)
+            .child(zgui::compose::text(text.clone())),
+    };
+    let open = low.runtime.signal(false);
+    let shown = std::rc::Rc::new(std::cell::Cell::new(false));
+    let timers = crate::node::env(&vm.lua).ok().map(|env| env.timers.clone());
+    // Its fade (Capy's: in over 140 ms, out over 100, both easing out; none
+    // when it takes over from another at once).
+    let fade = low.runtime.signal(0_f32);
+    let fading: Rc<std::cell::RefCell<Option<crate::timers::Stop>>> = Rc::default();
+    let animate = {
+        let (fade, fading, timers) = (fade.clone(), fading.clone(), timers.clone());
+        move |to: f32, ms: f32, done: Option<Rc<dyn Fn()>>| {
+            fading.borrow_mut().take();
+            let from = fade.with_untracked(|v| *v);
+            let Some(timers) = timers.as_ref().filter(|_| ms > 0. && from != to) else {
+                fade.set(to);
+                if let Some(done) = done {
+                    done();
+                }
+                return;
+            };
+            let start = std::time::Instant::now();
+            let fade = fade.clone();
+            *fading.borrow_mut() = Some(timers.start(Duration::from_millis(8), true, move || {
+                let t = (start.elapsed().as_secs_f32() * 1000. / ms).min(1.);
+                fade.set(from + (to - from) * (1. - (1. - t).powi(3)));
+                if t < 1. {
+                    return true;
+                }
+                if let Some(done) = &done {
+                    done();
+                }
+                false
+            }));
+        }
+    };
+    // One tooltip shows at a time: showing this one closes the last, at once.
+    let number = NEXT_TOOLTIP.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
+    });
+    let set = {
+        let (open, shown, fade, fading) =
+            (open.clone(), shown.clone(), fade.clone(), fading.clone());
+        move |on: bool, instant: bool| {
+            if !on {
+                SHOWING.with(|s| {
+                    let mut s = s.borrow_mut();
+                    if s.as_ref().is_some_and(|(n, _)| *n == number) {
+                        *s = None;
+                    }
+                });
+                if !shown.get() {
+                    return;
+                }
+                let (open, shown) = (open.clone(), shown.clone());
+                let hide: Rc<dyn Fn()> = Rc::new(move || hide_tooltip(&open, &shown));
+                animate(0., if instant { 0. } else { 100. }, Some(hide));
+                return;
+            }
+            let close: Rc<dyn Fn()> = {
+                let (open, shown, fade, fading) =
+                    (open.clone(), shown.clone(), fade.clone(), fading.clone());
+                Rc::new(move || {
+                    fading.borrow_mut().take();
+                    fade.set(0.);
+                    hide_tooltip(&open, &shown);
+                })
+            };
+            let last = SHOWING.with(|s| s.borrow_mut().replace((number, close)));
+            if let Some((n, close_last)) = last
+                && n != number
+            {
+                close_last();
+            }
+            if !shown.replace(true) {
+                TOOLTIPS.with(|t| {
+                    let (count, last) = t.get();
+                    t.set((count + 1, last));
+                });
+                open.set(true);
+            }
+            animate(1., if instant { 0. } else { 140. }, None);
+        }
+    };
+    let waiting: Rc<std::cell::RefCell<Option<crate::timers::Stop>>> = Rc::default();
+    // An interactive card: the pointer may cross from the node to the card
+    // (a moment's grace) and stay on either.
+    let interactive = tip.interactive;
+    let (over_anchor, over_card) = (
+        Rc::new(std::cell::Cell::new(false)),
+        Rc::new(std::cell::Cell::new(false)),
+    );
+    let leave = {
+        let (set, timers, waiting) = (set.clone(), timers.clone(), waiting.clone());
+        let (over_anchor, over_card) = (over_anchor.clone(), over_card.clone());
+        move || {
+            if !interactive {
+                waiting.borrow_mut().take();
+                set(false, false);
+                return;
+            }
+            let Some(timers) = &timers else {
+                return set(false, false);
+            };
+            let (set, over_anchor, over_card) =
+                (set.clone(), over_anchor.clone(), over_card.clone());
+            *waiting.borrow_mut() =
+                Some(timers.start(Duration::from_millis(120), false, move || {
+                    if !over_anchor.get() && !over_card.get() {
+                        set(false, false);
+                    }
+                    false
+                }));
+        }
+    };
+    let anchor = {
+        let (leave, over_anchor) = (leave.clone(), over_anchor.clone());
+        anchor.on_event(move |cx| {
+            if cx.phase == EventPhase::Capture {
+                return;
+            }
+            match cx.event {
+                InputEvent::PointerEnter if cx.target == cx.current_target => {
+                    over_anchor.set(true);
+                    let now = shown.get()
+                        || TOOLTIPS.with(|t| {
+                            let (count, last) = t.get();
+                            count > 0
+                                || last.is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+                        });
+                    if now {
+                        // Taking over from another (or back while it fades):
+                        // no fade in from nothing.
+                        waiting.borrow_mut().take();
+                        set(true, !shown.get());
+                    } else if let Some(timers) = &timers {
+                        let set = set.clone();
+                        *waiting.borrow_mut() =
+                            Some(timers.start(Duration::from_millis(300), false, move || {
+                                set(true, false);
+                                false
+                            }));
+                    }
+                }
+                InputEvent::PointerLeave if cx.target == cx.current_target => {
+                    over_anchor.set(false);
+                    leave();
+                }
+                InputEvent::PointerDown { .. } | InputEvent::Scroll { .. } if !interactive => {
+                    waiting.borrow_mut().take();
+                    set(false, true);
+                }
+                _ => {}
+            }
+        })
+    };
+    let content = if interactive {
+        content.on_event(move |cx| {
+            if cx.phase == EventPhase::Capture || cx.target != cx.current_target {
+                return;
+            }
+            match cx.event {
+                InputEvent::PointerEnter => over_card.set(true),
+                InputEvent::PointerLeave => {
+                    over_card.set(false);
+                    leave();
+                }
+                _ => {}
+            }
+        })
+    } else {
+        content
+    };
+    let placement = tip.placement.unwrap_or(zgui::compose::Placement {
+        side: zgui::compose::PlacementSide::Top,
+        align: zgui::compose::PlacementEdge::Center,
+        offset: 6.,
+    });
+    let content = column()
+        .child(content)
+        .reactive_style(move || zgui::style::Styles::new().opacity(fade.get()));
+    zgui::compose::popover("Tooltip", open, anchor)
+        .layer()
+        .autofocus(false)
+        .placement(placement)
+        .pointer_events(interactive)
+        .child(content)
 }
 
 /// `view` under the theme scope `theme = …` asks for.
@@ -165,6 +438,7 @@ fn token_field(prop: Prop) -> Option<zgui::theme::Field> {
         Bg => Field::Background,
         TextColor => Field::TextColor,
         BorderColor => Field::BorderColor,
+        OutlineColor => Field::OutlineColor,
         Rounded => Field::Radius,
         Border => Field::BorderWidth,
         P => Field::Padding(15),
@@ -188,6 +462,7 @@ fn token_field(prop: Prop) -> Option<zgui::theme::Field> {
         Weight => Field::FontWeight,
         Font => Field::FontFamily,
         Shadow => Field::Shadow,
+        InsetShadow => Field::InsetShadow,
         Opacity => Field::Opacity,
         BackdropBlur => Field::Blur,
         W => Field::Width,
@@ -234,6 +509,19 @@ fn number(value: &Value) -> f32 {
 /// component's body: the effects and computed values it creates live as long
 /// as what it built (not as long as the script), and its `ui.on_mount`
 /// hooks run once that is mounted.
+/// A slot's context, for what is contributed to it.
+pub(crate) struct SlotContext(pub Value);
+/// A copy of `props` with `slot = context`.
+fn with_slot(lua: &mlua::Lua, props: &mlua::Table, context: &Value) -> mlua::Result<mlua::Table> {
+    let copy = lua.create_table()?;
+    for pair in props.pairs::<mlua::Value, mlua::Value>() {
+        let (key, value) = pair?;
+        copy.raw_set(key, value)?;
+    }
+    copy.raw_set("slot", context.clone())?;
+    Ok(copy)
+}
+
 pub(crate) fn build_scoped(
     vm: &Rc<Vm>,
     cx: &mut Context,
@@ -422,17 +710,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
         }
         Kind::Text(text) => lower_text(text, vm),
         Kind::Rich(spans) => lower_rich(spans, vm, low),
-        Kind::Image { label, src } => {
-            let (src, vm2, low2) = (resolve_owned(src), vm.clone(), low.clone());
-            let label = label.clone();
-            image_signal(label, move || {
-                let path = match resolve(&src, Ty::Str, None, &vm2) {
-                    Some(Lit::Str(path)) => path,
-                    _ => return placeholder(),
-                };
-                load_image(&vm2, &low2, &path).unwrap_or_else(placeholder)
-            })
-        }
+        Kind::Image { .. } => lower_image(&node.kind, vm, low),
         Kind::Svg { label, src } => {
             let (src, vm2, low2) = (resolve_owned(src), vm.clone(), low.clone());
             let theme = cx.as_deref().map(Context::theme);
@@ -453,6 +731,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                     .and_then(|t| resolve(t, Ty::Color, None, &vm2))
                 {
                     Some(Lit::Color(c)) => Arc::new(data.tinted(c)),
+                    // `"currentColor"`: the inherited text colour, as CSS's.
+                    Some(Lit::Str(_)) => Arc::new(data.current_color()),
                     Some(Lit::Token(t)) => match theme.as_ref().map(|theme| theme.get(t).color()) {
                         Some(Some(c)) => Arc::new(data.tinted(c)),
                         _ => data,
@@ -491,6 +771,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             placeholder,
             placeholder_color,
             select_on_focus,
+            line_numbers,
+            secure,
         } => {
             let value = bridge(
                 need(&mut cx),
@@ -531,8 +813,14 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 }
                 None => {}
             }
+            if *secure {
+                view = view.secure(true);
+            }
             if *select_on_focus {
                 view = view.select_on_focus(true);
+            }
+            if *line_numbers {
+                view = view.line_numbers(true);
             }
             view
         }
@@ -567,7 +855,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                     match (on, &otherwise) {
                         (true, _) => lower(&then, &low),
                         (false, Some(otherwise)) => lower(otherwise, &low),
-                        (false, None) => div(),
+                        // Nothing: not a flex item either (no gap for it).
+                        (false, None) => div().hidden(),
                     }
                 },
             )
@@ -593,7 +882,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                     match (found, &default) {
                         (Some((_, node)), _) => lower(node, &low),
                         (None, Some(node)) => lower(node, &low),
-                        (None, None) => div(),
+                        (None, None) => div().hidden(),
                     }
                 },
             )
@@ -663,66 +952,116 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 },
             )
         }
-        Kind::List {
-            count,
-            height,
-            overscan,
-            build: builder,
-            offset,
+        Kind::List { .. } => lower_list(&node.kind, vm, low, &mut cx),
+        Kind::Modal {
+            label,
+            open,
+            placement,
+            autofocus,
+            layer,
         } => {
-            let offset = match offset {
-                Some(offset) => bridge(need(&mut cx), offset, number, |x| Value::Num(x as f64)),
-                None => need(&mut cx).state(0_f32),
+            let view = modal(
+                label.clone(),
+                bridge(need(&mut cx), open, Value::truthy, Value::Bool),
+            );
+            let view = if *autofocus {
+                view
+            } else {
+                view.autofocus(false)
             };
-            let (count, count_vm) = (Rc::new(resolve_owned(count)), vm.clone());
-            let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
-            virtual_list(
-                offset,
-                *height,
-                *overscan,
-                move || match resolve(&count, Ty::Num, None, &count_vm) {
-                    Some(Lit::Num(n)) => n.max(0.) as usize,
-                    _ => 0,
-                },
-                |index| index,
-                // Each row owns what it makes, as `each` rows do.
-                move |_, index, cx| build_scoped(&vm, cx, &low, &builder, index + 1),
-            )
+            let view = if *layer { view.layer() } else { view };
+            match placement {
+                Some(at) => view.modal_placement(*at),
+                None => view,
+            }
         }
-        Kind::Modal { label, open } => modal(
-            label.clone(),
-            bridge(need(&mut cx), open, Value::truthy, Value::Bool),
-        ),
         Kind::Popover {
             label,
             open,
             anchor,
-        } => popover(
-            label.clone(),
-            bridge(need(&mut cx), open, Value::truthy, Value::Bool),
-            lower(anchor, low),
-        ),
+            placement,
+            autofocus,
+        } => {
+            let view = popover(
+                label.clone(),
+                bridge(need(&mut cx), open, Value::truthy, Value::Bool),
+                lower(anchor, low),
+            );
+            let view = if *autofocus {
+                view
+            } else {
+                view.autofocus(false)
+            };
+            match placement {
+                Some(at) => view.placement(*at),
+                None => view,
+            }
+        }
         Kind::Menu {
             label,
             open,
             anchor,
-        } => menu(
-            label.clone(),
-            bridge(need(&mut cx), open, Value::truthy, Value::Bool),
-            lower(anchor, low),
-        ),
-        Kind::MenuItem(label) => menu_item(label.clone()),
-        Kind::Submenu { label, open } => submenu(
-            label.clone(),
-            bridge(need(&mut cx), open, Value::truthy, Value::Bool),
-        ),
+            placement,
+            autofocus,
+        } => {
+            let view = menu(
+                label.clone(),
+                bridge(need(&mut cx), open, Value::truthy, Value::Bool),
+                lower(anchor, low),
+            );
+            let view = if *autofocus {
+                view
+            } else {
+                view.autofocus(false)
+            };
+            match placement {
+                Some(at) => view.placement(*at),
+                None => view,
+            }
+        }
+        Kind::MenuItem(label, keep_open) => {
+            let item = menu_item(label.clone());
+            if *keep_open { item.keep_open() } else { item }
+        }
+        Kind::Submenu {
+            label,
+            open,
+            trigger,
+        } => {
+            let view = submenu(
+                label.clone(),
+                bridge(need(&mut cx), open, Value::truthy, Value::Bool),
+            );
+            match trigger {
+                // A menu item is the row; anything else goes in one.
+                Some(node) if matches!(node.kind, Kind::MenuItem(..)) => {
+                    view.trigger(lower(node, low))
+                }
+                Some(node) => view.trigger(menu_item(label.clone()).child(lower(node, low))),
+                None => view,
+            }
+        }
         Kind::Component {
             build: builder,
             props,
         } => {
             let (builder, props, vm, low) =
                 (builder.clone(), props.clone(), vm.clone(), low.clone());
-            component(move |cx| build_scoped(&vm, cx, &low, &builder, props.clone()))
+            component(move |cx| {
+                // Contributed to a slot with a context: its own props, with
+                // the context as `slot`.
+                let props = match cx.try_service::<SlotContext>() {
+                    Some(context) => match with_slot(&vm.lua, &props, &context.0) {
+                        Ok(props) => props,
+                        Err(error) => {
+                            vm.report(error);
+                            props.clone()
+                        }
+                    },
+                    None => props.clone(),
+                };
+                build_scoped(&vm, cx, &low, &builder, props)
+            })
         }
         Kind::Presence {
             value,
@@ -743,12 +1082,23 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             vm,
             low,
         ),
-        Kind::Slot(name) => column().children(
+        Kind::Slot {
+            name,
+            context,
+            from,
+        } => column().children(
             low.slots
                 .get(name)
                 .into_iter()
                 .flatten()
-                .map(|n| lower(n, low)),
+                .filter(|(owner, _)| from.as_deref().is_none_or(|from| **owner == *from))
+                .map(|(_, n)| match context {
+                    // What is contributed here hears it (`props.slot`).
+                    Some(context) => {
+                        zgui::compose::provide(SlotContext(context.clone()), lower(n, low))
+                    }
+                    None => lower(n, low),
+                }),
         ),
     };
     if let Some(mask) = &node.mask {
@@ -866,10 +1216,13 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 low.clone(),
             )
         });
-    let shader = node
-        .shader
-        .clone()
-        .map(|shader| (shader, node.shader_params.unwrap_or_default()));
+    let shader = node.shader.clone().map(|shader| {
+        (
+            shader,
+            node.shader_params.unwrap_or_default(),
+            node.shader_tokens,
+        )
+    });
     if !dynamic.is_empty() || element.is_some() || bg_image.is_some() || shader.is_some() {
         let vm = vm.clone();
         let element = element.clone();
@@ -877,7 +1230,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             let lits: Vec<(Prop, Lit)> = dynamic
                 .iter()
                 .filter_map(|(prop, source, scalar)| {
-                    Some((*prop, resolve(source, prop.ty(), scalar.as_ref(), &vm)?))
+                    Some((*prop, resolve_style(source, *prop, scalar.as_ref(), &vm)?))
                 })
                 .collect();
             let styles = match &element {
@@ -896,27 +1249,56 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             };
             // A shader fill, with its literal parameters unless animated.
             match &shader {
-                Some((fill, params)) => {
+                Some((fill, params, tokens)) => {
                     let animated = element.as_ref().and_then(|e| e.animated.borrow().shader);
                     let uniforms = animated.unwrap_or(zgui::decoration::ShaderUniforms {
                         time: 0.,
                         params: *params,
                     });
+                    // Theme colours bind to their slots: resolved where the
+                    // node is styled, and again when the theme changes.
+                    let mut styles = styles;
+                    for (slot, token) in tokens.iter().enumerate() {
+                        if let Some(token) = token {
+                            styles =
+                                styles.token(zgui::theme::Field::ShaderParam(slot as u8), *token);
+                        }
+                    }
                     styles.bg_shader(fill.clone()).shader_uniforms(uniforms)
                 }
                 None => styles,
             }
         });
     }
-    for (pseudo, lits) in &node.pseudo {
-        let lits = lits.clone();
-        let style = move |s: Styles| apply_all(s, &lits);
-        view = match pseudo {
-            Pseudo::Hover => view.hover(style),
-            Pseudo::Active => view.active(style),
-            Pseudo::Focus => view.focus(style),
-            Pseudo::Disabled => view.disabled_style(style),
-        };
+    if let Some(selection) = &node.variant_interaction {
+        // Variants chosen by state set interaction styles: the choice's,
+        // the element's own over them, swapped when the choice changes.
+        let (selection, own) = (selection.clone(), crate::node::interaction_of(&node.pseudo));
+        let mut last: Option<Box<[u16]>> = None;
+        view = view.reactive_interaction(move || {
+            let key = selection.key();
+            if last.as_ref() == Some(&key) {
+                return None;
+            }
+            let layer = selection.layer(&key);
+            last = Some(key);
+            Some(std::array::from_fn(|slot| {
+                let mut lits = layer.interaction[slot].clone();
+                crate::variants::over(&mut lits, &own[slot]);
+                (!lits.is_empty()).then(|| apply_all(Styles::new(), &lits))
+            }))
+        });
+    } else {
+        for (pseudo, lits) in &node.pseudo {
+            let lits = lits.clone();
+            let style = move |s: Styles| apply_all(s, &lits);
+            view = match pseudo {
+                Pseudo::Hover => view.hover(style),
+                Pseudo::Active => view.active(style),
+                Pseudo::Focus => view.focus(style),
+                Pseudo::Disabled => view.disabled_style(style),
+            };
+        }
     }
     if let Some(disabled) = &node.disabled {
         let (disabled, vm) = (resolve_owned(disabled), vm.clone());
@@ -955,8 +1337,10 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
     }
     if let Some(handler) = &node.events.click {
         let (handler, vm, actions) = (handler.clone(), vm.clone(), low.actions.clone());
-        view = view.on_click(move || {
-            run(&handler, &vm, &actions, ());
+        // Told the keys held: `{ shift, ctrl, alt, meta }` (a ⌘-click).
+        view = view.on_click_with(move |held| {
+            let keys = modifiers_table(&vm.lua, held).ok();
+            run(&handler, &vm, &actions, keys);
         });
     }
     // The node's handle, for local pointer coordinates and elements.
@@ -1036,9 +1420,10 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             let depth = if node.sizes_layout() { 2 } else { 0 };
             (node.layout_id.clone(), timing, depth)
         });
-        let (mount, resize, vm) = (
+        let (mount, resize, visible, vm) = (
             node.events.mount.clone(),
             node.events.resize.clone(),
+            node.events.visible.clone(),
             vm.clone(),
         );
         view = view.on_mount(move |mounted| {
@@ -1084,6 +1469,67 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                     };
                     if let Err(e) = vm.runtime.untracked(call) {
                         vm.report(e);
+                    }
+                });
+                mounted.retain(effect);
+            }
+            if let (Some(f), Some(shown)) = (visible.clone(), mounted.observe_visibility()) {
+                // Changes only, and the first layout's answer, delivered
+                // after the frame as an IntersectionObserver does: what the
+                // handler builds or drops lays out next frame, never feeding
+                // back into the layout that reported it.
+                let timers = crate::node::env(&vm.lua).ok().map(|env| env.timers.clone());
+                let (vm, element, runtime) = (vm.clone(), element.clone(), vm.runtime.clone());
+                let bounds = mounted.observe_bounds();
+                let latest = Rc::new(std::cell::Cell::new(None::<bool>));
+                let told = Rc::new(std::cell::Cell::new(None::<bool>));
+                let pending: Rc<std::cell::RefCell<Option<crate::timers::Stop>>> = Rc::default();
+                let deliver = {
+                    let (latest, told, pending) = (latest.clone(), told.clone(), pending.clone());
+                    move || {
+                        pending.borrow_mut().take();
+                        let Some(on) = latest.get() else { return };
+                        if told.replace(Some(on)) == Some(on) {
+                            return;
+                        }
+                        let call = || -> mlua::Result<()> {
+                            let el = vm.lua.create_userdata(ElementUd(element.clone()))?;
+                            vm.call::<()>(&f, (on, el))
+                        };
+                        if let Err(e) = vm.runtime.untracked(call) {
+                            vm.report(e);
+                        }
+                    }
+                };
+                let deliver = Rc::new(deliver);
+                let effect = runtime.effect(move || {
+                    let on = shown.get();
+                    // Nothing to report before the first layout.
+                    if latest.get().is_none()
+                        && bounds
+                            .as_ref()
+                            .is_some_and(|b| b.get().width == 0. && b.get().height == 0.)
+                    {
+                        return;
+                    }
+                    latest.set(Some(on));
+                    if pending.borrow().is_some() {
+                        return;
+                    }
+                    match timers.as_ref() {
+                        Some(timers) => {
+                            let deliver = deliver.clone();
+                            let stop = timers.start(
+                                std::time::Duration::from_millis(1),
+                                false,
+                                move || {
+                                    deliver();
+                                    false
+                                },
+                            );
+                            *pending.borrow_mut() = Some(stop);
+                        }
+                        None => deliver(),
                     }
                 });
                 mounted.retain(effect);
@@ -1347,19 +1793,42 @@ enum Decoded {
     Image(Arc<ImageData>),
     Svg(Arc<SvgData>),
 }
+const LOADING: u8 = 0;
+const READY: u8 = 1;
+const FAILED: u8 = 2;
 /// Whether remote `src` is in the caches: the first ask fetches it (once,
 /// through the host's fetcher), decodes it off the main thread and caches
 /// it. Tracked: what asked shows it once it arrives.
 fn remote_ready(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> bool {
+    remote_status(vm, low, src, svg) == READY
+}
+/// Remote `src`'s status (`LOADING`, `READY`, `FAILED`), fetching it the
+/// first time. Tracked.
+fn remote_status(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> u8 {
     let existing = low.assets.remote.borrow().get(src).cloned();
-    if let Some(ready) = existing {
-        return ready.get();
-    }
-    let ready = low.runtime.signal(false);
-    low.assets
-        .remote
-        .borrow_mut()
-        .insert(src.to_owned(), ready.clone());
+    let ready = match existing {
+        Some(status) if status.get() != FAILED => return status.get(),
+        Some(status) => {
+            // 5 s, doubling each time in a row it fails, up to 5 minutes.
+            let failed = low.assets.failed.borrow().get(src).copied();
+            let wait = |times: u32| {
+                std::time::Duration::from_secs((5u64 << times.saturating_sub(1).min(6)).min(300))
+            };
+            if failed.is_some_and(|(at, times)| at.elapsed() < wait(times)) {
+                return FAILED;
+            }
+            status.set(LOADING);
+            status
+        }
+        None => {
+            let ready = low.runtime.signal(LOADING);
+            low.assets
+                .remote
+                .borrow_mut()
+                .insert(src.to_owned(), ready.clone());
+            ready
+        }
+    };
     let links = low.assets.links.borrow().clone();
     let fetch = links
         .as_ref()
@@ -1413,23 +1882,39 @@ fn remote_ready(vm: &Rc<Vm>, low: &Lowering, src: &str, svg: bool) -> bool {
         };
         match decoded {
             Ok(Decoded::Image(image)) => {
+                assets.failed.borrow_mut().remove(&src);
                 assets.images.borrow_mut().insert(src, image);
             }
             Ok(Decoded::Svg(svg)) => {
+                assets.failed.borrow_mut().remove(&src);
                 assets.svgs.borrow_mut().insert(src, svg);
             }
             Err(error) => {
-                if let Some(vm) = vm.upgrade() {
-                    vm.report(mlua::Error::runtime(format!("{src}: {error}")));
-                }
+                // A picture that doesn't come is the network's doing, not
+                // the script's: logged, and `fallback` shows in its place.
+                let _ = vm;
+                eprintln!("zgui: {src} didn't load: {error}");
+                let now = std::time::Instant::now();
+                assets
+                    .failed
+                    .borrow_mut()
+                    .entry(src)
+                    .and_modify(|(at, times)| (*at, *times) = (now, *times + 1))
+                    .or_insert((now, 1));
+                runtime.batch(|| arriving.set(FAILED));
                 return;
             }
         }
-        runtime.batch(|| arriving.set(true));
+        runtime.batch(|| arriving.set(READY));
     });
     ready.get()
 }
 fn load_image(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Option<Arc<ImageData>> {
+    // The host's own images, followed as it replaces them.
+    if src.starts_with("host:") {
+        low.assets.hosted(src, &low.runtime).get();
+        return low.assets.images.borrow().get(src).cloned();
+    }
     if let Some(image) = low.assets.images.borrow().get(src) {
         return Some(image.clone());
     }
@@ -1500,6 +1985,16 @@ fn load_svg(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Arc<SvgData> {
     }
 }
 
+/// The modifier keys held, as a script sees them.
+fn modifiers_table(lua: &mlua::Lua, held: zgui::input::Modifiers) -> mlua::Result<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("shift", held.shift)?;
+    t.set("ctrl", held.control)?;
+    t.set("alt", held.alt)?;
+    t.set("meta", held.meta)?;
+    Ok(t)
+}
+
 fn key_name(key: &Key) -> String {
     match key {
         Key::Character(c) => c.clone(),
@@ -1544,6 +2039,7 @@ fn with_events(
                 .map_or((0., 0.), |b| (b.x, b.y));
             (x - origin.0, y - origin.1)
         };
+        let held = event.pointer_modifiers();
         let point = |x: f32, y: f32| -> mlua::Result<mlua::Table> {
             let (lx, ly) = local(x, y);
             let t = lua.create_table()?;
@@ -1551,6 +2047,10 @@ fn with_events(
             t.set("y", y)?;
             t.set("local_x", lx)?;
             t.set("local_y", ly)?;
+            t.set("shift", held.shift)?;
+            t.set("ctrl", held.control)?;
+            t.set("alt", held.alt)?;
+            t.set("meta", held.meta)?;
             Ok(t)
         };
         if captures
@@ -1577,6 +2077,8 @@ fn with_events(
                 button: PointerButton::Primary,
             } => {
                 if let (Some(h), Ok(p)) = (&press, point(*x, *y)) {
+                    // The press's count: 2 for a double click's second.
+                    let _ = p.set("clicks", event.click_count());
                     run(h, &vm, &actions, p);
                 }
             }
@@ -1617,6 +2119,8 @@ fn with_events(
                         t.set("alt", modifiers.alt)?;
                         t.set("meta", modifiers.meta)?;
                         t.set("repeat", *repeat)?;
+                        t.set("code", event.key_code())?;
+                        t.set("editing", handle.get().is_some_and(|h| h.editing()))?;
                         Ok(t)
                     });
                     if let Ok(t) = table
@@ -1811,11 +2315,13 @@ fn run(
 
 /// A source with its Lua function or animation detached from the node, so a
 /// reactive closure can own it.
+#[derive(Clone)]
 enum Owned {
     Lit(Lit),
     State(Signal<Value>),
     Computed(mlua::Function),
     Anim(Option<Value>, Option<Value>),
+    Variant(Rc<crate::variants::Selection>, Prop),
 }
 fn resolve_owned(source: &Source) -> Owned {
     match source {
@@ -1823,11 +2329,41 @@ fn resolve_owned(source: &Source) -> Owned {
         Source::State(s) => Owned::State(s.clone()),
         Source::Computed(f) => Owned::Computed(f.clone()),
         Source::Anim(a) => Owned::Anim(a.from.clone(), a.to.clone()),
+        Source::Variant(selection, prop) => Owned::Variant(selection.clone(), *prop),
     }
+}
+/// A style's value now. What a function returns is checked by the design
+/// lint, unless it is `ui.raw`.
+fn resolve_style(source: &Owned, prop: Prop, scalar: Option<&Signal<f32>>, vm: &Vm) -> Option<Lit> {
+    if let Owned::Computed(f) = source
+        && crate::design::mode(&vm.lua) != crate::DesignLint::Off
+    {
+        let value = vm
+            .call::<mlua::Value>(f, ())
+            .map_err(|e| vm.report(e))
+            .ok()?;
+        let raw = crate::design::is_raw(&value);
+        let value = vm.lua.unpack::<Value>(value).ok()?;
+        let lit = lit(&value, prop.ty())?;
+        if !raw {
+            let name = prop.name();
+            if let Err(message) = crate::design::check_returned(&vm.lua, f, prop, name, &lit) {
+                vm.report(mlua::Error::runtime(message));
+                return None;
+            }
+        }
+        return Some(lit);
+    }
+    resolve(source, prop.ty(), scalar, vm)
 }
 fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Option<Lit> {
     match source {
         Owned::Lit(l) => Some(l.clone()),
+        Owned::Variant(selection, prop) => selection
+            .current()
+            .props
+            .iter()
+            .find_map(|(p, l)| (p == prop).then(|| l.clone())),
         Owned::State(s) => s.with(|v| lit(v, ty)),
         Owned::Computed(f) => vm
             .call::<Value>(f, ())
@@ -1837,7 +2373,13 @@ fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Opt
         Owned::Anim(from, to) => {
             let t = scalar?.get();
             match (from, to) {
-                (Some(a), Some(b)) => lerp(&lit(a, ty)?, &lit(b, ty)?, t),
+                (Some(a), Some(b)) => {
+                    let (a, b) = (lit(a, ty)?, lit(b, ty)?);
+                    match ty {
+                        Ty::Color => mix_theme(&a, &b, t).or_else(|| lerp(&a, &b, t)),
+                        _ => lerp(&a, &b, t),
+                    }
+                }
                 _ => Some(Lit::Num(t)),
             }
         }
@@ -1855,6 +2397,18 @@ fn resolve_value(source: &Owned, vm: &Vm) -> Value {
         }),
         _ => Value::Nil,
     }
+}
+/// `t` of the way between two colours, one or both theme tokens: a blend
+/// the node resolves from its theme, so it eases between theme colours and
+/// follows theme changes.
+fn mix_theme(a: &Lit, b: &Lit, t: f32) -> Option<Lit> {
+    use zgui::theme::Themed;
+    Some(match (a, b) {
+        (Lit::Token(a), Lit::Token(b)) => Lit::Mix(*a, Themed::Token(*b), t),
+        (Lit::Token(a), Lit::Color(b)) => Lit::Mix(*a, Themed::Value(*b), t),
+        (Lit::Color(a), Lit::Token(b)) => Lit::Mix(*b, Themed::Value(*a), 1. - t),
+        _ => return None,
+    })
 }
 fn lerp(a: &Lit, b: &Lit, t: f32) -> Option<Lit> {
     let mix = |x: f32, y: f32| x + (y - x) * t;
@@ -1922,12 +2476,225 @@ fn lower_text(text: &Text, vm: &Rc<Vm>) -> View {
         }
     }
 }
+/// A `ui.image` (out of `build`, as `lower_list` is).
+#[inline(never)]
+fn lower_image(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    let Kind::Image {
+        label,
+        src,
+        fallback,
+    } = kind
+    else {
+        unreachable!("lower_image takes images")
+    };
+    // The picture, as a view (made again each time it shows).
+    let picture = {
+        let (src, vm2, low2, label) = (resolve_owned(src), vm.clone(), low.clone(), label.clone());
+        move || {
+            let (src, vm2, low2) = (src.clone(), vm2.clone(), low2.clone());
+            image_signal(label.clone(), move || {
+                let path = match resolve(&src, Ty::Str, None, &vm2) {
+                    Some(Lit::Str(path)) => path,
+                    _ => return placeholder(),
+                };
+                load_image(&vm2, &low2, &path).unwrap_or_else(placeholder)
+            })
+        }
+    };
+    match fallback {
+        None => picture(),
+        Some(fallback) => {
+            // The picture once a remote one has arrived (a local one
+            // at once), else the fallback.
+            let (src, vm2, low2) = (resolve_owned(src), vm.clone(), low.clone());
+            let shown = move || match resolve(&src, Ty::Str, None, &vm2) {
+                Some(Lit::Str(path)) if is_remote(&path) => {
+                    remote_status(&vm2, &low2, &path, false) == READY
+                }
+                Some(Lit::Str(_)) => true,
+                _ => false,
+            };
+            let (fallback, low3) = (fallback.clone(), low.clone());
+            zgui::compose::switch(shown, move |ready, _| {
+                if ready {
+                    picture().w_full().h_full()
+                } else {
+                    lower(&fallback, &low3).w_full().h_full()
+                }
+            })
+        }
+    }
+}
+
+/// A `ui.list` (kept out of `build`, which recurses: its locals would
+/// weigh on every level of a deep interface's stack).
+#[inline(never)]
+fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut Context>) -> View {
+    let Kind::List {
+        count,
+        height,
+        heights,
+        sticky,
+        sticky_top,
+        overscan,
+        build: builder,
+        offset,
+    } = kind
+    else {
+        unreachable!("lower_list takes lists")
+    };
+    let mut cx = cx.as_deref_mut();
+    let offset = match offset {
+        Some(offset) => bridge(need(&mut cx), offset, number, |x| Value::Num(x as f64)),
+        None => need(&mut cx).state(0_f32),
+    };
+    if let Some(heights) = heights {
+        let cx = need(&mut cx);
+        let rows = zgui::compose::VariableHeights::new(&cx.runtime(), 0, *height);
+        // Every height replaced when the list changes: linear, in Rust.
+        let (list, heights_vm, r) = (heights.clone(), vm.clone(), rows.clone());
+        cx.retain(cx.runtime().effect(move || {
+            let value = match &list {
+                crate::node::Heights::Lit(v) => v.clone(),
+                crate::node::Heights::State(s) => s.get(),
+                crate::node::Heights::Computed(f) => heights_vm
+                    .call::<Value>(f, ())
+                    .map_err(|e| heights_vm.report(e))
+                    .unwrap_or_default(),
+            };
+            let values = value.list().iter().map(|v| match v {
+                Value::Num(n) if n.is_finite() && *n > 0. => *n as f32,
+                _ => 1.,
+            });
+            let _ = r.replace(values);
+        }));
+        let list = {
+            let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
+            variable_virtual_list(
+                offset.clone(),
+                rows.clone(),
+                *overscan,
+                |index| index,
+                move |_, index, cx| build_scoped(&vm, cx, &low, &builder, index + 1),
+            )
+        };
+        match sticky {
+            None => list,
+            Some(sticky) => sticky_list(
+                list,
+                sticky,
+                *sticky_top,
+                offset,
+                rows,
+                builder,
+                vm,
+                low,
+                cx,
+            ),
+        }
+    } else {
+        let (count, count_vm) = (Rc::new(resolve_owned(count)), vm.clone());
+        let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
+        virtual_list(
+            offset,
+            *height,
+            *overscan,
+            move || match resolve(&count, Ty::Num, None, &count_vm) {
+                Some(Lit::Num(n)) => n.max(0.) as usize,
+                _ => 0,
+            },
+            |index| index,
+            // Each row owns what it makes, as `each` rows do.
+            move |_, index, cx| build_scoped(&vm, cx, &low, &builder, index + 1),
+        )
+    }
+}
+
+/// A variable list with sticky rows: the list, and over it the sticky row
+/// whose section covers the top of the view (the last one at or above it),
+/// built as any row is and pushed up as the next sticky row arrives: CSS's
+/// `position: sticky` for section headers, with the rows virtualized.
+#[allow(clippy::too_many_arguments)]
+fn sticky_list(
+    list: View,
+    sticky: &crate::node::Heights,
+    // How far below the top they stick (CSS's sticky `top`).
+    inset: f32,
+    offset: Signal<f32>,
+    rows: zgui::compose::VariableHeights,
+    builder: &mlua::Function,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    cx: &mut Context,
+) -> View {
+    // The sticky rows, from 0, kept sorted.
+    let indices = cx.state(Rc::<[usize]>::from([]));
+    {
+        let (sticky, vm, indices) = (sticky.clone(), vm.clone(), indices.clone());
+        cx.retain(cx.runtime().effect(move || {
+            let value = match &sticky {
+                crate::node::Heights::Lit(v) => v.clone(),
+                crate::node::Heights::State(s) => s.get(),
+                crate::node::Heights::Computed(f) => vm
+                    .call::<Value>(f, ())
+                    .map_err(|e| vm.report(e))
+                    .unwrap_or_default(),
+            };
+            let mut list: Vec<usize> = value
+                .list()
+                .iter()
+                .filter_map(|v| v.as_f64().filter(|n| *n >= 1.).map(|n| n as usize - 1))
+                .collect();
+            list.sort_unstable();
+            list.dedup();
+            indices.set(list.into());
+        }));
+    }
+    // The sticky row in charge at the top, if any.
+    let current = {
+        let (offset, rows, indices) = (offset.clone(), rows.clone(), indices.clone());
+        move || -> Option<usize> {
+            let top = rows.row_at((offset.get() + inset).max(0.))?;
+            indices.with(|list| list.iter().rev().find(|&&i| i <= top).copied())
+        }
+    };
+    // How far the next sticky row pushes it up.
+    let shift = {
+        let (offset, rows, indices) = (offset.clone(), rows.clone(), indices.clone());
+        let current = current.clone();
+        move || -> f32 {
+            let Some(at) = current() else { return 0. };
+            let height = rows.row_height(at).unwrap_or(0.);
+            let next = indices.with(|list| list.iter().find(|&&i| i > at).copied());
+            match next {
+                Some(next) => (rows.row_offset(next) - offset.get() - inset - height).min(0.),
+                None => 0.,
+            }
+        }
+    };
+    let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
+    let header = zgui::compose::switch(current, move |at, cx| match at {
+        Some(at) => build_scoped(&vm, cx, &low, &builder, at + 1),
+        None => div(),
+    });
+    overlay().child(list.w_full().h_full()).child(
+        column()
+            .absolute()
+            .top(inset)
+            .left(0.)
+            .right(0.)
+            .child(header)
+            .reactive_style(move || zgui::style::Styles::new().translate(0., shift())),
+    )
+}
+
 fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     /// A span with its text and handler owned by the closure.
     struct Owned {
         text: Text,
         style: SpanStyle,
         click: Option<Handler>,
+        icon: Option<crate::node::SpanIcon>,
     }
     #[derive(Clone, Copy)]
     struct SpanStyle {
@@ -1939,6 +2706,10 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         underline: bool,
         strike: bool,
         mono: bool,
+        padding: [f32; 2],
+        radius: f32,
+        underline_offset: Option<f32>,
+        hover: Option<(bool, Option<zgui::theme::Themed<Color>>)>,
     }
     let owned: Vec<Owned> = spans
         .iter()
@@ -1965,11 +2736,16 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 underline: s.underline,
                 strike: s.strike,
                 mono: s.mono,
+                padding: s.padding,
+                radius: s.radius,
+                underline_offset: s.underline_offset,
+                hover: s.hover,
             },
             click: s.click.clone(),
+            icon: s.icon.clone(),
         })
         .collect();
-    let (vm, actions) = (vm.clone(), low.actions.clone());
+    let (vm, actions, low) = (vm.clone(), low.actions.clone(), low.clone());
     rich_text_signal(move || {
         owned
             .iter()
@@ -1983,7 +2759,18 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     underline,
                     strike,
                     mono,
+                    padding,
+                    radius,
+                    underline_offset,
+                    hover,
                 } = span.style;
+                let decoration = || {
+                    let d = zgui::rich_text::Decoration::default();
+                    match underline_offset {
+                        Some(offset) => d.offset(offset),
+                        None => d,
+                    }
+                };
                 let mut out: TextSpan = text_span(render_text(&span.text, &vm));
                 if let Some(c) = color {
                     out = out.text_color(c);
@@ -2001,7 +2788,13 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     out = out.italic(true);
                 }
                 if underline {
-                    out = out.underline(Default::default());
+                    out = out.underline(decoration());
+                }
+                if let Some((underlined, color)) = hover {
+                    out = out.hover(zgui::compose::SpanHover {
+                        underline: underlined.then(decoration),
+                        text_color: color,
+                    });
                 }
                 if strike {
                     out = out.strikethrough(Default::default());
@@ -2009,10 +2802,34 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if mono {
                     out = out.font_family(FontFamily::Monospace);
                 }
+                if padding != [0.; 2] {
+                    out = out.padding(padding[0], padding[1]);
+                }
+                if radius > 0. {
+                    out = out.radius(radius);
+                }
                 if let Some(handler) = &span.click {
                     let (handler, vm, actions) = (handler.clone(), vm.clone(), actions.clone());
                     out = out.on_click(move || {
                         run(&handler, &vm, &actions, ());
+                    });
+                }
+                if let Some(icon) = &span.icon {
+                    // Tracked: a remote icon shows once it comes.
+                    let data = load_svg(&vm, &low, &icon.src);
+                    // `"currentColor"`: the span's text colour.
+                    let (svg, tint) = match &icon.tint {
+                        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
+                            (Arc::new(data.current_color()), None)
+                        }
+                        Some(tint) => (data, crate::node::themed_color(tint)),
+                        None => (data, None),
+                    };
+                    out = out.icon(zgui::compose::SpanIcon {
+                        svg,
+                        size: icon.size,
+                        gap: icon.gap,
+                        tint,
                     });
                 }
                 out
@@ -2120,6 +2937,12 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
     if let Lit::Token(token) = lit {
         return match token_field(prop) {
             Some(field) => s.token(field, *token),
+            None => s,
+        };
+    }
+    if let Lit::Mix(from, to, t) = lit {
+        return match token_field(prop) {
+            Some(field) => s.token_mix(field, *from, *to, *t),
             None => s,
         };
     }
@@ -2274,6 +3097,9 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (RoundedTl | RoundedTr | RoundedBr | RoundedBl, _) => s,
         (Border, Lit::Num(v)) => s.border(*v),
         (BorderColor, Lit::Color(c)) => s.border_color(*c),
+        (Outline, Lit::Num(v)) => s.outline_width(*v),
+        (OutlineColor, Lit::Color(c)) => s.outline_color(*c),
+        (OutlineOffset, Lit::Num(v)) => s.outline_offset(*v),
         (BorderDash, Lit::Pair(length, gap)) => {
             s.border_style(zgui::decoration::BorderStyle::Dashed {
                 length: *length,
@@ -2281,6 +3107,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
             })
         }
         (Shadow, Lit::Shadows(shadows)) => s.shadows(shadows.clone()),
+        (InsetShadow, Lit::Shadows(shadows)) => s.inset_shadows(shadows.clone()),
         (Opacity, Lit::Num(v)) => s.opacity(v.clamp(0., 1.)),
         (Blur, Lit::Num(v)) => s.filter_blur(v.max(0.)),
         (BackdropBlur, Lit::Num(v)) => s.blur(v.max(0.)),
@@ -2330,6 +3157,8 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Lines, Lit::Num(v)) => s.line_clamp(*v as u32),
         (LineHeight, Lit::Num(v)) => s.line_height(*v),
         (LetterSpacing, Lit::Num(v)) => s.letter_spacing(*v),
+        (Underline, Lit::Bool(v)) => s.text_underline(*v),
+        (UnderlineOffset, Lit::Num(v)) => s.underline_offset(*v),
         // Every digit one width, so changing numbers hold still.
         (Tabular, Lit::Bool(true)) => {
             s.font_features(zgui::text_layout::FontFeatures::new([(*b"tnum", 1)]))
@@ -2610,6 +3439,13 @@ fn presence(
     // The content lays out as if it stood where the presence does (or in
     // the presence's box): the region and each entry's wrapper are contents
     // nodes, and what leaves lies over the current content.
+    let showing = {
+        let (state, shown) = (state.clone(), shown.clone());
+        move || {
+            shown.with(|_| ());
+            state.borrow().entries.iter().any(|e| e.value != Value::Nil)
+        }
+    };
     let region = keyed(
         move || shown.get(),
         move |id, cx| {
@@ -2651,7 +3487,9 @@ fn presence(
     .contents();
     if boxed {
         // Its content fills it, in both directions, unless it sizes itself.
-        cell().child(region)
+        // Showing nothing, the box is not there for the pointer (a sheet's
+        // full-window box over the panes while it is put away).
+        cell().pointer_events_when(showing).child(region)
     } else {
         region
     }

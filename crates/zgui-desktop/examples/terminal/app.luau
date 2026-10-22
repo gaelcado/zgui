@@ -12,7 +12,11 @@
 --   commands.luau  the menu bar's commands
 --   frames.luau    where the active tab's panes go
 --   agents.luau    the coding agents in every pane, as the session server sees them (the sidebar)
---   components/    the views: the titlebar, sidebar, panes, dividers, the sheet
+--   components/    the views: the titlebar, sidebar, panes, dividers, the sheets,
+--                  the ⌘K palette, plugins' panels
+--
+-- Plugins (terminal/plugins.rs) add panels: each runs in a VM of its own,
+-- reaching only what the user allowed it when zterm found it.
 --   lib/           plain logic: the split tree, pane names
 local theme = require("./theme")
 local state = require("./state")
@@ -23,6 +27,8 @@ local tabs = require("@components/tabs")
 local sidebar = require("@components/sidebar")
 local content = require("@components/content")
 local confirm = require("@components/confirm")
+local palette = require("@components/palette")
+local consent = require("@components/consent")
 
 -- Open the last layout (or a first tab), keep it saved, declare the menus.
 saved.start()
@@ -55,4 +61,8 @@ return ui.row {
 	-- Over the sidebar's header and the titlebar, past the traffic lights.
 	sidebar.Toggle(),
 	confirm.Sheet(),
+	-- ⌘K: a new pane (components/palette.luau).
+	palette.Palette(),
+	-- A plugin found that has not been allowed asks (components/consent.luau).
+	consent.Sheet(),
 }

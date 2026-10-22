@@ -1,5 +1,6 @@
 //! Glass resource monitor: launches the kitchen sink, or another example with
-//! `--app <example>` (or attaches with `--pid <pid>`), and charts CPU, GPU and
+//! `--app <example>` (or attaches with `--pid <pid>`, or neither with
+//! `--app none`), and charts CPU, GPU and
 //! memory over the last minute for any process on the machine. GPU time per
 //! process comes from the GPU driver's per-client accounting (macOS: each
 //! `AGXDeviceUserClient`'s `AppUsage`), the way Activity Monitor reads it.
@@ -89,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let child: Rc<RefCell<Option<Child>>> = Rc::default();
             let launched = match attach_pid() {
                 Some(pid) => Some(pid),
+                None if target() == "none" => None,
                 None => match launch_target() {
                     Ok(process) => {
                         let pid = process.id() as i32;
@@ -184,7 +186,8 @@ fn attach_pid() -> Option<i32> {
         .and_then(|pid| pid.parse().ok())
 }
 
-/// The example to launch: `--app <name>`, the kitchen sink by default.
+/// The example to launch: `--app <name>`, the kitchen sink by default;
+/// `--app none` launches nothing.
 fn target() -> String {
     let args: Vec<String> = std::env::args().collect();
     args.iter()

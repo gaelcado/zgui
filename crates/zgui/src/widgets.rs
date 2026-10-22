@@ -37,6 +37,7 @@ pub struct EditorHandle {
     refresh: Rc<dyn Fn()>,
     typography: Rc<RefCell<(Color, f32, FontStyle)>>,
     wrap: Rc<Cell<bool>>,
+    line_numbers: Rc<Cell<bool>>,
     preferred_x: Rc<Cell<Option<f32>>>,
     text: NodeId,
     scene: Rc<RefCell<Scene>>,
@@ -53,6 +54,8 @@ struct EditorHint {
     /// The placeholder and its colour (`None`: the theme's `muted`).
     placeholder: RefCell<Option<(std::sync::Arc<str>, Option<Color>)>>,
     select_on_focus: Cell<bool>,
+    /// A password field: its text shows masked and never leaves it.
+    secure: Cell<bool>,
 }
 impl EditorHandle {
     /// The selection as UTF-8 byte offsets into the committed text,
@@ -87,6 +90,12 @@ impl EditorHandle {
     /// front keeps the selection it had.
     pub fn set_select_on_focus(&self, select: bool) {
         self.hint.select_on_focus.set(select);
+    }
+    /// A password field: its text shows as a bullet per character (each in
+    /// that character's place, so carets and selections work), and copying
+    /// or cutting it gives nothing.
+    pub fn set_secure(&self, secure: bool) {
+        self.hint.secure.set(secure);
     }
     /// Text shown, never edited, while the editor is empty: in its own
     /// typography, coloured `color` (`None`: the theme's `muted`). It is
@@ -133,6 +142,16 @@ impl EditorHandle {
         let wrap = wrap && self.multiline;
         if self.wrap.replace(wrap) != wrap {
             self.preferred_x.set(None);
+            self.refresh();
+        }
+    }
+    /// Number a multiline editor's lines in a gutter at its left (a code
+    /// editor's): each logical line's number beside its first row, the
+    /// caret's brighter, only those in view built. Single-line controls
+    /// have none.
+    pub fn set_line_numbers(&self, numbered: bool) {
+        let numbered = numbered && self.multiline;
+        if self.line_numbers.replace(numbered) != numbered {
             self.refresh();
         }
     }
@@ -200,6 +219,10 @@ impl EditorHandle {
         (self.refresh)();
     }
     pub fn copy(&self) -> String {
+        // A password field's text never leaves it.
+        if self.hint.secure.get() {
+            return String::new();
+        }
         self.editor.borrow().selected_text().to_owned()
     }
     /// Copy the selection and delete it when editable. Read-only cut is copy-only.
@@ -272,6 +295,15 @@ struct EditorLayoutEntry {
     font: FontStyle,
     revision: u64,
     layout: Rc<dyn TextLayout>,
+}
+
+/// A numbered editor's gutter: space before the numbers, and between them
+/// and the text.
+const GUTTER_INSET: f32 = 4.;
+const GUTTER_GAP: f32 = 14.;
+/// How many times `byte` occurs in `bytes`.
+fn memchr_count(byte: u8, bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&b| b == byte).count()
 }
 
 fn editor_layout(
@@ -390,6 +422,9 @@ struct UiStorage {
     editor_layout_revision: Cell<Option<u64>>,
     bounds_geometry_revision: Cell<Option<u64>>,
     preparing_frame: Cell<bool>,
+    /// Where focus falls once the frame settles, if nothing took it: the
+    /// nearest focusable ancestor of a removed focused node (`Ui::remove`).
+    refocus: Cell<Option<NodeId>>,
     content_sizes: RefCell<HashMap<NodeId, Signal<(f32, f32)>>>,
     observed_bounds: RefCell<HashMap<NodeId, Signal<Rect>>>,
     observed_visibility: RefCell<HashMap<NodeId, Signal<bool>>>,
@@ -530,6 +565,7 @@ impl Ui {
             editor_layout_revision: Cell::new(None),
             bounds_geometry_revision: Cell::new(None),
             preparing_frame: Cell::new(false),
+            refocus: Cell::new(None),
             content_sizes: RefCell::new(HashMap::new()),
             observed_bounds: RefCell::new(HashMap::new()),
             observed_visibility: RefCell::new(HashMap::new()),
@@ -1204,6 +1240,15 @@ impl Ui {
                 self.storage.bounds_geometry_revision.get() != Some(geometry_revision);
             if !layout_changed && !geometry_changed {
                 if !self.run_after_layout() {
+                    // Settled: a removed focused node's focus falls to its
+                    // ancestor, unless something (a list revealing a row)
+                    // focused since.
+                    if let Some(id) = self.storage.refocus.take()
+                        && self.input.focused().is_none()
+                        && self.scene.borrow().contains(id)
+                    {
+                        self.input.focus(&self.scene, Some(id));
+                    }
                     return Ok(());
                 }
                 continue;
@@ -1514,6 +1559,24 @@ impl Ui {
             let mut storage = self.storage.editors.borrow_mut();
             ids.iter().filter_map(|id| storage.remove(id)).collect()
         };
+        // Focus inside it falls to its nearest focusable ancestor that stays
+        // (as a page's falls to its body), so keys still reach the app: once
+        // the frame settles (`try_prepare_frame`).
+        let refocus = self
+            .input
+            .focused()
+            .filter(|id| ids.contains(id))
+            .and_then(|_| {
+                let s = self.scene.borrow();
+                let mut at = s.parent(node);
+                while let Some(id) = at {
+                    if self.input.options(id).is_some_and(|o| o.focusable) {
+                        return Some(id);
+                    }
+                    at = s.parent(id);
+                }
+                None
+            });
         // Detach geometry before listener captures or cached layouts can run
         // user destructors. Reentrant removal of this owner (or an ancestor)
         // then observes an already removed subtree instead of stale node IDs.
@@ -1531,8 +1594,16 @@ impl Ui {
             self.semantics.borrow_mut().remove(id);
         }
         drop(cached_layout);
+        // A page of thousands of nodes gone: the maps give back their room.
+        crate::shrink_sparse(&mut self.storage.owned.borrow_mut());
+        crate::shrink_sparse(&mut self.storage.editors.borrow_mut());
+        crate::shrink_sparse(&mut self.storage.content_sizes.borrow_mut());
+        crate::shrink_sparse(&mut self.storage.observed_bounds.borrow_mut());
         drop(owned);
         drop(editors);
+        if refocus.is_some() && self.input.focused().is_none() {
+            self.storage.refocus.set(refocus);
+        }
     }
 }
 pub fn fixed(width: f32, height: f32) -> Style {
@@ -1627,6 +1698,12 @@ impl Ui {
             },
         );
         let selection_layer = self.container(viewport, Layout::Overlay, Style::default());
+        // Line numbers (`set_line_numbers`): a clipped column beside the
+        // viewport, which moves right to make room.
+        let gutter = self.container(root, Layout::Overlay, fixed(0., 0.));
+        let number_nodes: Rc<RefCell<Vec<NodeId>>> = Rc::default();
+        let line_numbers = Rc::new(Cell::new(false));
+        let draw_numbers = line_numbers.clone();
         let mut initial = value.get();
         if let std::borrow::Cow::Owned(canonical) = normalize_text(&initial, multiline) {
             initial = canonical;
@@ -1729,15 +1806,52 @@ impl Ui {
                     bottom: 6.,
                 }
             };
-            let inner_width = (bounds.width - padding.left - padding.right).max(0.);
+            let (color, size, font) = draw_typography.borrow().clone();
+            let font = crate::text_layout::FontStyle {
+                masked: draw_hint.secure.get(),
+                ..font
+            };
+            // The gutter: as wide as the last line's number (two digits at
+            // least, so the text does not move at line 10), and a gap.
+            let numbered = draw_numbers.get();
+            let (digits, digit) = if numbered {
+                let lines = memchr_count(b'\n', display.as_bytes()) + 1;
+                let digits = lines.max(10).ilog10() as usize + 1;
+                (digits, s.measure_text_with_font("0", size, None, &font).0)
+            } else {
+                (0, 0.)
+            };
+            let gutter_width = if numbered {
+                GUTTER_INSET + digit * digits as f32 + GUTTER_GAP
+            } else {
+                0.
+            };
+            let inner_width = (bounds.width - padding.left - padding.right - gutter_width).max(0.);
             let inner_height = (bounds.height - padding.top - padding.bottom).max(0.);
             let mut viewport_style = fixed(inner_width, inner_height);
             viewport_style.clip = true;
             s.set_style(viewport, viewport_style);
+            let origin = if styled { (0., 0.) } else { (8., 6.) };
+            s.set_transform(
+                viewport,
+                Transform {
+                    x: origin.0 + gutter_width,
+                    y: origin.1,
+                },
+            );
+            let mut gutter_style = fixed(gutter_width, if numbered { inner_height } else { 0. });
+            gutter_style.clip = true;
+            s.set_style(gutter, gutter_style);
+            s.set_transform(
+                gutter,
+                Transform {
+                    x: origin.0,
+                    y: origin.1,
+                },
+            );
             if let Some(bg) = bg {
                 s.set_style(bg, fixed(bounds.width, bounds.height));
             }
-            let (color, size, font) = draw_typography.borrow().clone();
             // Empty, the text node shows the placeholder instead (laid out
             // as the empty text it stands for: it sizes nothing).
             let placeholder = draw_hint.placeholder.borrow();
@@ -1883,6 +1997,85 @@ impl Ui {
                 s.set_style(*id, fixed(w, h));
                 s.set_transform(*id, Transform { x, y });
             }
+            // The numbers of the lines in view: found by where each line
+            // starts (rows are in order, so the first is a binary search),
+            // built only for those.
+            let mut shown: Vec<(usize, f32)> = Vec::new();
+            let mut current = 0;
+            if numbered {
+                let starts: Vec<usize> = std::iter::once(0)
+                    .chain(display.match_indices('\n').map(|(at, _)| at + 1))
+                    .collect();
+                let top_of = |byte_offset: usize| {
+                    layout
+                        .caret_position(TextPosition {
+                            byte_offset,
+                            affinity: TextAffinity::After,
+                        })
+                        .y
+                        - scroll.1
+                };
+                let first = starts
+                    .partition_point(|&start| top_of(start) + line_height <= 0.)
+                    .saturating_sub(1);
+                for (line, &start) in starts.iter().enumerate().skip(first) {
+                    let y = top_of(start);
+                    if y >= inner_height {
+                        break;
+                    }
+                    if y + line_height > 0. {
+                        shown.push((line + 1, y));
+                    }
+                }
+                current = starts.partition_point(|&start| start <= display_cursor);
+            }
+            let mut numbers = number_nodes.borrow_mut();
+            while numbers.len() > shown.len() {
+                s.remove(numbers.pop().unwrap());
+            }
+            while numbers.len() < shown.len() {
+                numbers.push(s.append(
+                    gutter,
+                    NodeKind::Text {
+                        text: std::sync::Arc::from(""),
+                        color,
+                        font_size: size,
+                    },
+                    Style::default(),
+                ));
+            }
+            let (dim, bright) = (
+                theme.color_untracked(tok::TEXT_TERTIARY),
+                theme.color_untracked(tok::TEXT_SECONDARY),
+            );
+            for (id, (line, y)) in numbers.iter().zip(shown) {
+                // Right-aligned by figure spaces, a digit wide in any font.
+                let label = line.to_string();
+                let label: String =
+                    std::iter::repeat_n('\u{2007}', digits - label.len().min(digits))
+                        .chain(label.chars())
+                        .collect();
+                let color = if line == current { bright } else { dim };
+                let unchanged = matches!(
+                    s.kind(*id),
+                    NodeKind::Text { text, color: c, font_size }
+                        if **text == *label && *c == color && *font_size == size
+                );
+                if !unchanged {
+                    s.set_kind(
+                        *id,
+                        NodeKind::Text {
+                            text: std::sync::Arc::from(label),
+                            color,
+                            font_size: size,
+                        },
+                    );
+                    s.set_font(*id, font.clone());
+                }
+                s.set_style(*id, fixed(digit * digits as f32 + 1., line_height));
+                s.set_transform(*id, Transform { x: GUTTER_INSET, y });
+            }
+            drop(numbers);
             let lines: Vec<_> = if let Some(preedit) = e.preedit() {
                 let start = selection.range().start;
                 layout
@@ -1943,6 +2136,7 @@ impl Ui {
             refresh: refresh.clone(),
             typography: typography.clone(),
             wrap: wrap.clone(),
+            line_numbers: line_numbers.clone(),
             preferred_x: preferred_x.clone(),
             text,
             scene: self.scene.clone(),

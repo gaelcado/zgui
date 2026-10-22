@@ -65,6 +65,68 @@ type function Item(t)
 	return types.never
 end
 
+-- What a `ui.variants` definition's axes accept, the choosing table its
+-- recipe is called with: each axis its options' names (a boolean for an
+-- on-off axis, `[true]` / `[false]`), or `extra` (a state or a function
+-- choosing it). Closed, as props tables are: an unknown axis is an error.
+type function VariantChoice(definition, extra)
+	local out = types.newtable()
+	if not definition:is("table") then
+		return out
+	end
+	local variants = definition:readproperty(types.singleton("variants"))
+	if not variants or not variants:is("table") then
+		return out
+	end
+	for axis, property in variants:properties() do
+		local options = property.read
+		local names: { type } = {}
+		local boolean = false
+		if options and options:is("table") then
+			for option in options:properties() do
+				local name = option:value()
+				if name == "true" or name == "false" then
+					boolean = true
+				else
+					names[#names + 1] = option
+				end
+			end
+			local indexer = options:indexer()
+			if indexer and indexer.index:is("boolean") then
+				boolean = true
+			end
+		end
+		if boolean then
+			names[#names + 1] = types.boolean
+		end
+		names[#names + 1] = extra
+		local choice = if #names == 1 then names[1] else types.unionof(table.unpack(names))
+		out:setproperty(axis, types.optional(choice))
+	end
+	out:setindexer(types.number, types.never)
+	return out
+end
+
+-- A recipe's variant props, for a component's own props type:
+-- `Merge<ContainerProps, VariantProps<typeof(button)>>` (the axes alone,
+-- so the props keep their children).
+export type function VariantProps(recipe)
+	local out = types.newtable()
+	if not recipe:is("function") then
+		return out
+	end
+	local head: { type } = recipe:parameters().head or {}
+	local choice: type? = head[1]
+	if choice and choice:is("table") then
+		for key, property in choice:properties() do
+			if property.read then
+				out:setproperty(key, property.read)
+			end
+		end
+	end
+	return out
+end
+
 -- A table's fields, each optional: what `state:patch` takes.
 type function Partial(t)
 	if t:is("any") then
@@ -364,6 +426,10 @@ end
 -- `ui.tween`, `ui.spring`, `ui.loop`: a property eased in Rust.
 declare extern type Binding with
 end
+-- Variants chosen from a `ui.variants` recipe: give it to an element as
+-- `variants = …`.
+declare extern type Variants with
+end
 declare extern type Bitmap with
 	w: number
 	h: number
@@ -649,8 +715,37 @@ export type Child = Node | string | (() -> TextValue) | { read [number]: Child }
 
 -- Event handlers: a function, or an action Rust runs.
 export type Handler = () -> ...unknown
-export type PointerEvent = { x: number, y: number, local_x: number, local_y: number }
-export type KeyEvent = { key: string, shift: boolean, ctrl: boolean, alt: boolean, meta: boolean, ["repeat"]: boolean }
+-- `clicks` (on_press): the press's count, 2 for a double click's second.
+-- `shift`, `ctrl`, `alt`, `meta`: the keys held.
+export type PointerEvent = {
+	x: number,
+	y: number,
+	local_x: number,
+	local_y: number,
+	clicks: number?,
+	shift: boolean,
+	ctrl: boolean,
+	alt: boolean,
+	meta: boolean,
+}
+-- What `on_click` is told: the keys held as it was clicked (a ⌘-click).
+export type ClickEvent = { shift: boolean, ctrl: boolean, alt: boolean, meta: boolean }
+-- A node's click: told the keys held, which it may ignore.
+export type ClickHandler = (e: ClickEvent) -> ...unknown
+-- `code`: the physical key, as the DOM's `KeyboardEvent.code` (`"KeyA"`,
+-- `"Digit1"`, `"BracketLeft"`), whatever the layout and modifiers typed;
+-- nil when the platform doesn't say.
+export type KeyEvent = {
+	key: string,
+	code: string?,
+	-- A text field holds focus: a bare-key shortcut gives way to typing.
+	editing: boolean,
+	shift: boolean,
+	ctrl: boolean,
+	alt: boolean,
+	meta: boolean,
+	["repeat"]: boolean,
+}
 export type WheelEvent = { dx: number, dy: number }
 export type Size = { w: number, h: number }
 export type DragPoint = { x: number, y: number, local_x: number, local_y: number, w: number, h: number }
@@ -735,7 +830,15 @@ export type Styles = {
 	border_color: Color?,
 	border_over: boolean?,
 	border_dash: Pair?,
+	-- An outline around the box (CSS's): its width, colour, and how far
+	-- outside it starts (negative: over the box's edge, an inset ring).
+	outline: Num?,
+	outline_color: Color?,
+	outline_offset: Num?,
 	shadow: Shadow?,
+	-- Shadows inside the box (CSS's inset): a ring as wide on each side as
+	-- the offset pushes it, plus the spread; drawn sharp (no blur).
+	inset_shadow: Shadow?,
 	opacity: Num?,
 	brightness: number?,
 	contrast: number?,
@@ -768,6 +871,10 @@ export type Styles = {
 	letter_spacing: Num?,
 	-- Tabular figures: every digit the same width.
 	tabular: boolean?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: boolean?,
+	underline_offset: Num?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: number?,
 	y: number?,
@@ -862,7 +969,11 @@ export type StyleProps = {
 	border_color: Reactive<Color>?,
 	border_over: Reactive<boolean>?,
 	border_dash: Reactive<Pair>?,
+	outline: Reactive<Num>?,
+	outline_color: Reactive<Color>?,
+	outline_offset: Reactive<Num>?,
 	shadow: Reactive<Shadow>?,
+	inset_shadow: Reactive<Shadow>?,
 	opacity: Reactive<Num>?,
 	brightness: Reactive<number>?,
 	contrast: Reactive<number>?,
@@ -893,6 +1004,10 @@ export type StyleProps = {
 	letter_spacing: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Reactive<boolean>?,
+	underline_offset: Reactive<Num>?,
 	-- Transforms: after layout, about `origin` (fractions of the node).
 	x: Reactive<number>?,
 	y: Reactive<number>?,
@@ -916,6 +1031,10 @@ export type NodeProps = {
 	id: string?,
 	-- Space-separated class names.
 	class: string?,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
@@ -925,6 +1044,14 @@ export type NodeProps = {
 	-- descendants with handlers still take it. A state or function follows.
 	pointer_events: (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?,
 	window_drag: boolean?,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: (string | Node)?,
+	tooltip_placement: Placement?,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: boolean?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -948,7 +1075,7 @@ export type NodeProps = {
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
 	shader_params: { read [number]: Color | { number } }?,
 	-- Events.
-	on_click: (Handler | Action)?,
+	on_click: (ClickHandler | Handler | Action)?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -963,6 +1090,10 @@ export type NodeProps = {
 	on_mount: ((element: Element) -> ...unknown)?,
 	-- When layout gives it a new size, and at its first layout.
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -1000,7 +1131,12 @@ export type ScrollProps = Merge<ContainerProps, {
 	follow: boolean?,
 }>
 -- `ui.text { "Count: {count}", text_size = 18 }`: the text first.
-export type TextProps = Merge<Props, { [number]: Text }>
+export type TextProps = Merge<Props, {
+	[number]: Text,
+	-- Show a string as it is, braces and all, not as a template: for data
+	-- (code, titles, messages) that might hold `{name}`.
+	literal: boolean?,
+}>
 -- `ui.span`'s options are plain values.
 export type SpanProps = {
 	-- The text first.
@@ -1012,17 +1148,47 @@ export type SpanProps = {
 	bold: boolean?,
 	italic: boolean?,
 	underline: boolean?,
+	-- How far below the baseline the underline sits (CSS's
+	-- `text-underline-offset`).
+	underline_offset: number?,
 	strike: boolean?,
 	font: "mono"?,
+	-- A link (`on_click`) under the pointer: underlined, recoloured. With
+	-- it, the link isn't underlined at rest unless `underline` says so.
+	hover: { underline: boolean?, color: Color? }?,
+	-- An icon before the text, in the line (a file chip's file type):
+	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
+	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,
+	-- or `"currentColor"` for the span's.
+	icon: {
+		src: string?,
+		code: string?,
+		size: number?,
+		gap: number?,
+		tint: Color?,
+	}?,
 	on_click: (Handler | Action)?,
+	-- Its text as it is, not a template (see TextProps).
+	literal: boolean?,
+	-- Room around it: across (before and after it, taking space in the
+	-- line), or `{ across, down }`; with `bg`, the background hugs the text
+	-- plus this (an inline code chip) instead of filling the line.
+	padding: (number | { number })?,
+	-- The background's corner radius.
+	radius: number?,
 }
--- Runs: spans, strings, functions, or span options.
-export type RichProps = Merge<Props, { [number]: Span | Text | SpanProps }>
+-- Runs: spans, strings, functions, or span options. `literal`: the runs'
+-- strings as they are (a span's own `literal` wins).
+export type RichProps = Merge<Props, { [number]: Span | Text | SpanProps, literal: boolean? }>
 export type ImageProps = Merge<Props, {
-	-- PNG or JPEG, relative to the script.
+	-- PNG or JPEG, relative to the script; `https://…` (through the
+	-- host's fetcher); `host:<name>` (an image the app made).
 	src: Reactive<string>,
 	-- For accessibility.
 	label: string?,
+	-- Shown in its place while a remote picture loads and if it fails (an
+	-- avatar's initials).
+	fallback: Node?,
 }>
 -- One of `src` (a file) and `code` (SVG markup) is required.
 export type SvgProps = Merge<Props, {
@@ -1046,6 +1212,11 @@ export type InputProps = Merge<Props, {
 	placeholder_color: Reactive<Color>?,
 	-- Focusing it selects all its text (an address bar).
 	select_on_focus: boolean?,
+	-- A password field: its text shows as a bullet per character, and
+	-- copying or cutting it gives nothing.
+	secure: boolean?,
+	-- Several lines only: numbered in a gutter at the left (a code editor).
+	line_numbers: boolean?,
 }>
 export type ProgressProps = Merge<Props, { value: State<number>, label: string? }>
 export type SliderProps = Merge<Props, {
@@ -1057,25 +1228,71 @@ export type SliderProps = Merge<Props, {
 }>
 -- A virtualized list: only visible rows are built.
 export type ListProps = Merge<Props, {
-	count: Reactive<number>,
+	-- The row count (with `heights`, their length).
+	count: Reactive<number>?,
 	-- Builds row `index` (from 1).
 	row: (index: number) -> Node,
 	-- Every row's height in points (28 by default).
 	height: number?,
+	-- Each row's own height instead, in order: a list, a state holding one
+	-- (a host's shared value costs the script nothing), or a function
+	-- returning one (tracked). The row count is its length.
+	heights: ({ number } | Readable<{ number }> | (() -> { number }))?,
+	-- Rows (from 1, in order) that stick to the top while their section
+	-- scrolls past, each pushed up by the next: section headers. With
+	-- `heights`.
+	sticky: ({ number } | Readable<{ number }> | (() -> { number }))?,
+	-- How far below the top the sticky rows stick (CSS's sticky `top`).
+	sticky_top: number?,
 	-- Rows built beyond each edge (2 by default).
 	overscan: number?,
 	offset: State<number>?,
 }>
-export type ModalProps = Merge<ContainerProps, { open: State<boolean>, label: string? }>
+-- Where a modal's panel sits in the window: lined up with its start,
+-- centre or end across (`x`) and down (`y`), `inset` points from the edges
+-- (a number, or { top, right, bottom, left }). Centred unless set.
+export type ModalPlacement = {
+	x: ("start" | "center" | "end")?,
+	y: ("start" | "center" | "end")?,
+	inset: (number | { number })?,
+}
+export type LayerProps = Merge<ContainerProps, { open: State<boolean>?, label: string?, placement: ModalPlacement? }>
+export type ModalProps = Merge<ContainerProps, { open: State<boolean>, label: string?, placement: ModalPlacement?, autofocus: boolean? }>
+-- Where an anchored popover or menu opens: on `side` of its trigger
+-- (flipping when that side lacks room), lined up with its start, centre
+-- or end, `offset` points away (bottom, start, 4 by default).
+export type Placement = {
+	side: ("bottom" | "top" | "left" | "right")?,
+	align: ("start" | "center" | "end")?,
+	offset: number?,
+}
 export type PopoverProps = Merge<ContainerProps, {
 	open: State<boolean>,
 	-- The trigger, shown where the popover is written.
 	anchor: Node,
 	label: string?,
+	placement: Placement?,
+	-- Focus its first control as it opens (true); false keeps the panel
+	-- itself focused (a menu whose search field waits to be clicked).
+	autofocus: boolean?,
 }>
 -- `ui.menu_item { "Copy", on_click = … }`: the label first.
-export type MenuItemProps = Merge<Props, { [number]: string, label: string? }>
-export type SubmenuProps = Merge<ContainerProps, { open: State<boolean>, label: string? }>
+-- The label (`{ "Copy" }`), or `label` with content of its own after it
+-- (an icon, the label, a shortcut).
+export type MenuItemProps = Merge<Props, {
+	[number]: Child,
+	label: string?,
+	-- Chosen, it leaves the menu open (a toggle, a pin).
+	keep_open: boolean?,
+}>
+export type SubmenuProps = Merge<ContainerProps, {
+	open: State<boolean>,
+	label: string?,
+	-- Its trigger row, drawn by the app (a `ui.menu_item` with an icon, the
+	-- label, a value, a chevron); the label and a "›" otherwise. It opens
+	-- when the pointer moves onto it.
+	trigger: Node?,
+}>
 export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	-- A `ui.web()` controller, so the page outlives the node; the options
 	-- above make one otherwise.
@@ -1095,6 +1312,8 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_new_window: ((url: string) -> ...unknown)?,
 }>>
 export type TerminalProps = Merge<Props, { term: Term }>
+-- `from`: only what that plugin (by name) contributes.
+export type SlotProps = Merge<Props, { context: unknown?, from: string? }>
 -- How `ui.each` rows slide when the list moves them: `true` (a spring,
 -- bounce .1 over 400 ms), an ease, `{ duration, ease }`, `{ bounce,
 -- duration }` or `{ spring = anime.spring {...} }`.
@@ -1168,6 +1387,10 @@ export type ThemeApi = {
 	-- A token's value (tracked): colours as "#rrggbbaa", numbers, font names.
 	get: (name: TokenName | string) -> any,
 	follow_system: (themes: { dark: string, light: string } | false) -> (),
+	-- The design lint: styles that hard-code a colour, spacing, radius,
+	-- type size, weight, font or shadow warn ("warn", true) or fail
+	-- ("error"), naming the token to use. `ZGUI_DESIGN_LINT` overrides it.
+	strict: (mode: "warn" | "error" | "off" | boolean) -> (),
 }
 
 declare ui: {
@@ -1209,6 +1432,11 @@ declare ui: {
 	progress: (props: ProgressProps) -> Node,
 	slider: (props: SliderProps) -> Node,
 	modal: (props: ModalProps) -> Node,
+	-- Over the window and non-modal (toasts): no focus, no backdrop; the
+	-- pointer passes through but for what it holds, which stays live while
+	-- a dialog holds focus. Raised over everything as it opens (`open`, a
+	-- state; open unless given).
+	layer: (props: LayerProps) -> Node,
 	popover: (props: PopoverProps) -> Node,
 	menu: (props: PopoverProps) -> Node,
 	menu_item: (props: MenuItemProps) -> Node,
@@ -1226,7 +1454,10 @@ declare ui: {
 	-- nil shows nothing. The value is `any`, as `each`'s item is.
 	presence: (value: string | Readable<unknown> | (() -> unknown), build: (value: any) -> Node, opts: PresenceOptions?) -> Node,
 	-- Where plugins' contributions to `name` go.
-	slot: (name: string, props: Props?) -> Node,
+	-- A plugin extension point. `context` reaches what is contributed to
+	-- it: a contributed component gets it as `props.slot` (one component,
+	-- an instance per slot: a panel per pane).
+	slot: (name: string, props: SlotProps?) -> Node,
 	contribute: (name: string, node: Node) -> (),
 	-- The script's (or module's) state for `key`, kept across reloads.
 	state: <T>(key: string, initial: T) -> State<T>,
@@ -1237,6 +1468,15 @@ declare ui: {
 	-- A component instance's own state.
 	use_state: <T>(initial: T) -> State<T>,
 	computed: <T>(f: () -> T) -> State<T>,
+	-- A component's styles by variant (shadcn's `cva`): `base`, then the
+	-- chosen option of each axis in `variants` (by name), then the matching
+	-- `compound` rules, then the element's own properties; each replaces
+	-- what it covers (`p` an earlier `px`). Returns a recipe: call it with
+	-- the options (names, or states or functions choosing them) and give
+	-- the result to an element as `variants = …`.
+	variants: <D>(definition: D) -> (choice: VariantChoice<D, Readable<any> | (() -> any)>) -> Variants,
+	-- A style value the design lint lets through, with the reason.
+	raw: <T>(value: T, reason: string) -> T,
 	effect: (f: () -> ...unknown) -> (),
 	-- One update for many writes; returns what `f` returns.
 	batch: <R...>(f: () -> R...) -> R...,
@@ -1253,6 +1493,22 @@ declare ui: {
 	action: (name: string, arg: unknown?) -> Action,
 	-- Call a host action now.
 	invoke: (name: string, arg: unknown?) -> (),
+	-- JSON's null, as a value that keeps its key in a table (nil drops it):
+	-- `{ caps = ui.null }` reaches Rust as `{"caps": null}`.
+	null: any,
+	-- Runs `f` when what is being built goes away: a component unmounting,
+	-- an effect running again, the script reloading.
+	on_cleanup: (f: () -> ()) -> (),
+	-- Milliseconds since the epoch, to the microsecond (`os.time` counts
+	-- whole seconds). Not tracked.
+	now: () -> number,
+	-- `t` (or a new table) marked a JSON object: empty, it sends `{}`, not
+	-- `[]` (a Lua table can't tell). An empty object from the host comes
+	-- marked, so it goes back as one.
+	object: <T>(t: T?) -> T,
+	-- A host function's value, now (`ScriptHost::function`): a read of data the
+	-- host keeps, so large data is never copied into the script whole.
+	call_sync: (name: string, arg: unknown?) -> any,
 	-- Call a host action for its result (`ScriptHost::async_action`; a
 	-- plain action settles at once with nil): a promise of what it returns.
 	call: (name: string, arg: unknown?) -> Promise,

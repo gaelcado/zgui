@@ -147,7 +147,8 @@ fn resolve_size(size: Themed<f32>, scope: Option<&ThemeScope>) -> f32 {
         (Themed::Token(_), None) => 16.,
     }
 }
-/// Which token, if any, sets `field` in `styles`.
+/// Which token, if any, sets `field` in `styles` (a blend of two is passed
+/// on as the colour it resolved to).
 fn token_of(styles: &Styles, field: crate::theme::Field) -> Option<crate::theme::TokenId> {
     styles
         .tokens
@@ -155,8 +156,8 @@ fn token_of(styles: &Styles, field: crate::theme::Field) -> Option<crate::theme:
         .0
         .iter()
         .rev()
-        .find(|(bound, _)| *bound == field)
-        .map(|(_, token)| *token)
+        .find(|(bound, _, _)| *bound == field)
+        .and_then(|(_, token, mix)| mix.is_none().then_some(*token))
 }
 /// A resolved text colour as typography carries it: the token if one set it.
 fn themed_color(styles: &Styles) -> Option<Themed<Color>> {
@@ -179,7 +180,15 @@ pub(crate) struct Variants {
     /// widget never hovered, pressed or focused keeps none of them. They
     /// set no typography.
     pub defaults: [Option<fn() -> Styles>; 3],
+    /// Hover, active, focus and disabled styles that change (`View::
+    /// reactive_interaction`): they replace the four above when it returns
+    /// them.
+    pub reactive: Option<InteractionStyles>,
 }
+/// Run in a node's style effect, so it follows what it reads: the hover,
+/// active, focus and disabled styles when they changed since its last call,
+/// or `None` to keep them.
+pub(crate) type InteractionStyles = Box<dyn FnMut() -> Option<[Option<Styles>; 4]>>;
 #[derive(Clone, Copy, PartialEq)]
 enum ActivationKey {
     Space,
@@ -191,6 +200,9 @@ struct Interaction {
     pointer_active: bool,
     key_active: Option<ActivationKey>,
     focus: bool,
+    /// The focus shows (CSS's `:focus-visible`): it came from the keyboard,
+    /// the node edits text, or a key went to it since.
+    focus_visible: bool,
 }
 
 #[cfg(test)]
@@ -386,9 +398,12 @@ pub(crate) fn mount_style_with_intrinsic(
     theme: Option<std::rc::Rc<crate::theme::ThemeScope>>,
 ) -> Signal<Typography> {
     let mut base = base;
+    let mut reactive = variants.reactive;
     // A node setting no typography (nor through a variant or a dynamic
     // style) shows its parent's: it passes that signal on, not a copy.
+    // Interaction styles that change might set it.
     let own = dynamic.is_some()
+        || reactive.is_some()
         || base.sets_typography()
         || [
             &variants.hover,
@@ -414,6 +429,7 @@ pub(crate) fn mount_style_with_intrinsic(
     let output = own.then(|| typography.clone());
     let interaction = ui.signal(Interaction::default());
     if interactive
+        || reactive.is_some()
         || variants.hover.is_some()
         || variants.active.is_some()
         || variants.focus.is_some()
@@ -423,7 +439,9 @@ pub(crate) fn mount_style_with_intrinsic(
         // Only a press that shows (or activates) follows the pointer: a
         // view styled on hover alone leaves it to what is under it (a window
         // drag region around it).
-        let presses = interactive || variants.active.is_some() || defaults[1].is_some();
+        let presses =
+            interactive || reactive.is_some() || variants.active.is_some() || defaults[1].is_some();
+        let (input, owner) = (ui.input.clone(), ui.downgrade());
         ui.on_event(node, interactive, move |event| {
             if event.phase == EventPhase::Capture {
                 return;
@@ -456,9 +474,14 @@ pub(crate) fn mount_style_with_intrinsic(
                     ..
                 }
                 | InputEvent::PointerCancel => state.pointer_active = false,
-                InputEvent::Focus if event.target == node => state.focus = true,
+                InputEvent::Focus if event.target == node => {
+                    state.focus = true;
+                    state.focus_visible = input.focus_visible_now()
+                        || owner.upgrade().is_some_and(|ui| ui.is_editor(node));
+                }
                 InputEvent::Blur if event.target == node => {
                     state.focus = false;
+                    state.focus_visible = false;
                     state.pointer_active = false;
                     state.key_active = None;
                 }
@@ -466,12 +489,27 @@ pub(crate) fn mount_style_with_intrinsic(
                     key: Key::Space,
                     repeat: false,
                     ..
-                } if event.target == node => state.key_active = Some(ActivationKey::Space),
+                } if event.target == node => {
+                    state.key_active = Some(ActivationKey::Space);
+                    state.focus_visible = true;
+                }
                 InputEvent::KeyDown {
                     key: Key::Enter,
                     repeat: false,
                     ..
-                } if event.target == node => state.key_active = Some(ActivationKey::Enter),
+                } if event.target == node => {
+                    state.key_active = Some(ActivationKey::Enter);
+                    state.focus_visible = true;
+                }
+                // A key to it (not a shortcut) shows its focus.
+                InputEvent::KeyDown { modifiers, .. }
+                    if event.target == node
+                        && !modifiers.meta
+                        && !modifiers.control
+                        && !modifiers.alt =>
+                {
+                    state.focus_visible = true;
+                }
                 InputEvent::KeyUp {
                     key: Key::Space, ..
                 } if event.target == node && state.key_active == Some(ActivationKey::Space) => {
@@ -515,6 +553,7 @@ pub(crate) fn mount_style_with_intrinsic(
     let is_text = matches!(originals.kind, NodeKind::Text { .. });
     let scope = if is_text { theme.clone() } else { None };
     let needs_theme = dynamic.is_some()
+        || reactive.is_some()
         || base.has_tokens()
         || variants
             .iter()
@@ -538,13 +577,28 @@ pub(crate) fn mount_style_with_intrinsic(
                 settled: None,
             }));
         }
+        // Interaction styles that changed take their slots, their tokens
+        // resolved below as those of a slot never resolved.
+        let mut swapped = false;
+        if let Some(next) = reactive.as_mut().and_then(|styles| styles()) {
+            for (slot, (variant, next)) in variants.iter_mut().zip(next).enumerate() {
+                if let Some(theme) = &mut theme {
+                    if let Some(next) = &next {
+                        theme.include(next);
+                    }
+                    theme.replaced(slot + 1);
+                }
+                *variant = next.map(Box::new);
+            }
+            swapped = true;
+        }
         let mut produced = dynamic.as_mut().map(|dynamic| dynamic());
         let state = interaction.get();
         let is_disabled = disabled.as_mut().is_some_and(|read| read());
         let in_effect = [
             !is_disabled && state.hover,
             !is_disabled && (state.pointer_active || state.key_active.is_some()),
-            !is_disabled && state.focus,
+            !is_disabled && state.focus && state.focus_visible,
             is_disabled,
         ];
         if lazy {
@@ -584,6 +638,7 @@ pub(crate) fn mount_style_with_intrinsic(
             && last.state == state
             && last.disabled == is_disabled
             && !themed
+            && !swapped
         {
             let paint = produced.as_mut().map(Paint::take);
             let unchanged = paint.map(|p| p.set()) == last.paint
@@ -746,7 +801,9 @@ pub(crate) fn mount_style_with_intrinsic(
             || resolved.font_weight.is_none()
             || resolved.italic.is_none()
             || resolved.line_height.is_none()
-            || resolved.rare().letter_spacing.is_none();
+            || resolved.rare().letter_spacing.is_none()
+            || resolved.rare().underline.is_none()
+            || resolved.rare().underline_offset.is_none();
         let parent = if tracks_parent {
             inherited.get()
         } else {
@@ -808,6 +865,16 @@ pub(crate) fn mount_style_with_intrinsic(
                         .rare()
                         .letter_spacing
                         .unwrap_or(parent.font.letter_spacing),
+                    masked: false,
+                    underline: {
+                        let rare = resolved.rare();
+                        let offset = rare
+                            .underline_offset
+                            .or_else(|| parent.font.underline.and_then(|u| u.offset()));
+                        rare.underline
+                            .unwrap_or(parent.font.underline.is_some())
+                            .then(|| crate::text_layout::TextUnderline::new(offset))
+                    },
                 },
             }
         };
@@ -1184,6 +1251,7 @@ fn apply_resolved(
                 || resolved.border_edges.is_some()
                 || resolved.rare().border_style.is_some()
                 || resolved.rare().shadows.is_some()
+                || resolved.rare().inset_shadows.is_some()
             {
                 let mut detail = quad.decoration.as_deref().cloned().unwrap_or_default();
                 if let Some(value) = &resolved.paint_background {
@@ -1200,6 +1268,9 @@ fn apply_resolved(
                 }
                 if let Some(value) = &resolved.rare().shadows {
                     detail.shadows = value.clone();
+                }
+                if let Some(value) = &resolved.rare().inset_shadows {
+                    detail.inset_shadows = value.clone();
                 }
                 quad.decoration = (detail != crate::decoration::Decoration::default())
                     .then(|| std::sync::Arc::new(detail));
@@ -1295,6 +1366,7 @@ mod tests {
                 focus: Some(Box::new(Styles::new().border(2.).border_over(true))),
                 disabled: Some(Box::new(color(4))),
                 defaults: Default::default(),
+                reactive: None,
             },
             Some(Box::new(move || read_disabled.get())),
             true,
@@ -1309,6 +1381,15 @@ mod tests {
         });
         assert_eq!(fill(&ui, node), Color(3, 0, 0, 255));
         assert_eq!(ui.input.focused(), Some(node));
+        // A press's focus shows no ring (`:focus-visible`); a key to it does.
+        assert!(
+            matches!(ui.scene.borrow().kind(node), NodeKind::Panel { quad, .. } if quad.border_width == 0.)
+        );
+        ui.dispatch(InputEvent::KeyDown {
+            key: Key::Character("x".into()),
+            modifiers: Default::default(),
+            repeat: false,
+        });
         assert!(
             matches!(ui.scene.borrow().kind(node), NodeKind::Panel { quad, .. } if quad.border_width == 2.)
         );

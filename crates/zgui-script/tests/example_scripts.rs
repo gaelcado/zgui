@@ -14,6 +14,9 @@ fn runs(app: &str, plugins: Option<&str>) {
         // What hot_reload.rs publishes for its plugins.
         host.shared("window", "400 × 300");
         host.action("quit", |_| {});
+        host.expose_shared("window", None);
+        host.expose_shared("count", None);
+        host.expose_action("quit", None);
         match plugins {
             Some(dir) => host.plugins(dir),
             None => host,

@@ -186,8 +186,11 @@ impl TestApp {
         let mut out = Vec::new();
         let mut stack = vec![scene.root()];
         while let Some(n) = stack.pop() {
-            if let NodeKind::Text { text, .. } = scene.kind(n) {
-                out.push(text.to_string());
+            match scene.kind(n) {
+                NodeKind::Text { text, .. } => out.push(text.to_string()),
+                // A paragraph of spans (`ui.rich`): its text, whole.
+                NodeKind::RichText { text, .. } => out.push(text.text().to_owned()),
+                _ => {}
             }
             stack.extend(scene.children(n).iter().rev());
         }

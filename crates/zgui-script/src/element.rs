@@ -41,6 +41,10 @@ pub(crate) struct Animated {
     pub clip: Option<[f32; 4]>,
     /// A shader fill's time and parameters.
     pub shader: Option<zgui::decoration::ShaderUniforms>,
+    /// Which of them animations drive (bit 0 the time, 1 to 16 the
+    /// parameters): only those are written, so parameters the node's style
+    /// sets (theme colours) stay.
+    pub shader_slots: u32,
     pub styles: Vec<(Prop, Lit)>,
 }
 
@@ -277,7 +281,10 @@ impl Element {
             return;
         }
         *target = value;
-        self.animated.borrow_mut().shader = Some(u);
+        let mut animated = self.animated.borrow_mut();
+        animated.shader = Some(u);
+        animated.shader_slots |= 1 << slot;
+        drop(animated);
         self.compositor_changed.set(true);
     }
     pub fn set_base_clip(&self, clip: Option<[f32; 4]>) {
@@ -411,6 +418,7 @@ impl Element {
             }
             if keys.is_none_or(|keys| keys.iter().any(|k| matches!(k, Key::Shader(_)))) {
                 cleared.shader = animated.shader.take();
+                animated.shader_slots = 0;
             }
             let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut animated.styles)
                 .into_iter()
@@ -527,7 +535,17 @@ impl Element {
                 scene.set_clip_inset(id, Some(zgui::scene::ClipInset::px(t, r, b, l)));
             }
             if let Some(uniforms) = animated.shader {
-                scene.set_shader_uniforms(id, uniforms);
+                let mut shown = scene.shader_uniforms(id);
+                if animated.shader_slots & 1 != 0 {
+                    shown.time = uniforms.time;
+                }
+                for slot in 1..=16 {
+                    if animated.shader_slots & (1 << slot) != 0 {
+                        let (v, i) = ((slot - 1) / 4, (slot - 1) % 4);
+                        shown.params[v][i] = uniforms.params[v][i];
+                    }
+                }
+                scene.set_shader_uniforms(id, shown);
             }
         }
         self.styles_changed.replace(false)

@@ -14,6 +14,44 @@ ui.theme.tokens {
 		glass_hover = "{hover}",
 		-- The focused pane's border, when there are several.
 		ring = "{border.strong}",
+		-- A tab's icon tiles (dimmer in a background tab) and their edge.
+		tile_bg = "{pressed}",
+		tile_dim = "{hover}",
+		tile_line = "{border.subtle}",
+		-- A tab a dragged tab would drop on, and the ghost of the tab a
+		-- dragged pane would open as.
+		drop = "{pressed}",
+		slot = "{hover}",
+		slot_line = "{border.strong}",
+		-- From the window's edge to the panes and the tools.
+		inset = 6,
+		-- The interface's text: tabs' names, menus.
+		text = 12.5,
+		-- Context menus: frosted panels.
+		menu = {
+			bg = "{surface.overlay}",
+			line = "{border.subtle}",
+			hover = "{hover}",
+			separator = "{border.subtle}",
+			shadow = "{shadow.md}",
+			-- In from the panel's edge to its items.
+			pad = 3,
+		},
+		tab = {
+			-- The icons' tiles sit as far in from a tab's edge as from its
+			-- top; the name, without a tile, a little more.
+			inset = 3,
+			["end"] = 10,
+			gap = 7,
+			radius = 8,
+			-- Between the tiles in a tab, and between tabs in the strip.
+			tile_gap = 3,
+			strip_gap = 3,
+			tile_radius = 5,
+			-- "+3", for panes past three: its tile's sides and text.
+			tile_pad = 5,
+			tile_text = 10.5,
+		},
 		-- Claude's colour, whatever the theme.
 		claude = "#d97757",
 	},

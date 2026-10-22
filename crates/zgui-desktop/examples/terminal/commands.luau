@@ -3,6 +3,7 @@
 local state = require("./state")
 local sessions = require("./sessions")
 local actions = require("./actions")
+local palette = require("@components/palette")
 local layout = require("@lib/layout")
 
 local active, zoom = state.active, state.zoom
@@ -52,7 +53,7 @@ local function binding(action: string): () -> ()
 			if run then
 				run(sessions.page(pane), pane)
 			end
-		else
+		elseif sessions.is_terminal(pane) then
 			ui.term(pane):binding(action)
 		end
 	end
@@ -74,6 +75,8 @@ function M.declare()
 	command("new_browser", "New Browser Pane", "Shell", "cmd+shift+b", function()
 		actions.split("row", "browser")
 	end)
+	-- Terminals, browsers, the plugins and plugins' panels.
+	command("open_panel", "Open Panel…", "Shell", "cmd+k", palette.open)
 	ui.command { menu = "Shell", separator = true }
 	command("close_pane", "Close Pane", "Shell", "cmd+w", function()
 		local pane = current()
@@ -89,7 +92,8 @@ function M.declare()
 	command("paste", "Paste", "Edit", "cmd+v", binding("paste_from_clipboard"))
 	command("select_all", "Select All", "Edit", "cmd+a", binding("select_all"))
 	ui.command { menu = "Edit", separator = true }
-	command("clear", "Clear", "Edit", "cmd+k", binding("clear_screen"))
+	-- ⌘K opens panels; Clear moves over, by ⇧.
+	command("clear", "Clear", "Edit", "cmd+shift+k", binding("clear_screen"))
 
 	command("zoom_pane", "Zoom Pane", "View", "cmd+shift+enter", function()
 		local tab, pane = active:peek(), current()

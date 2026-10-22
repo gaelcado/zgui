@@ -345,6 +345,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, terms: Rc<Terms>) -> mlua::Result<(
     ui.set(
         "term",
         lua.create_function(move |lua, (id, opts): (String, Option<Table>)| {
+            crate::node::env(lua)?.may(crate::Capability::Terminals, "ui.term")?;
             if let Some(opts) = &opts {
                 for (key, _) in opts.clone().pairs::<String, LuaValue>().flatten() {
                     let known = matches!(key.as_str(), "command" | "cwd" | "env" | "font_size")

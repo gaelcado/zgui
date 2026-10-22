@@ -50,11 +50,12 @@ return function(): Node
 			drop:set {}
 			frames.commit_drop(d)
 		end,
-		ui.each(frames.pane_ids, function(id: string)
+		ui.each(frames.mounted_ids, function(id: string)
 			return Pane { pane = id }
 		end, {
+			-- A pane moved to another tab is built again there.
 			key = function(id: string)
-				return id
+				return `{id}@{actions.tab_of(id) or ""}`
 			end,
 		}),
 		ui.each(frames.divider_ids, function(id: string)

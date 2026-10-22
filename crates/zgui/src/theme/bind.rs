@@ -33,11 +33,17 @@ pub enum Field {
     FontWeight,
     FontFamily,
     Shadow,
+    /// `Styled::inset_shadows`.
+    InsetShadow,
+    /// `Styled::outline_color`.
+    OutlineColor,
     Opacity,
     /// Backdrop blur (frosted glass).
     Blur,
     Width,
     Height,
+    /// One of a shader fill's four parameters (a colour, as 0 to 1).
+    ShaderParam(u8),
 }
 impl Field {
     /// Sides of padding or margin, else 15.
@@ -104,9 +110,17 @@ themed!(FontFamily:
     tokens FontToken, TokenId);
 themed!(BoxShadow: BoxShadow => |s| s; tokens ShadowToken, TokenId);
 
-/// The token bindings of one `Styles`.
+/// The token bindings of one `Styles`: each field's token, and for a colour
+/// mid-way to another (an animation between theme colours), the blend.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Bindings(pub(crate) Vec<(Field, TokenId)>);
+pub(crate) struct Bindings(pub(crate) Vec<(Field, TokenId, Option<Mix>)>);
+
+/// A token's colour `t` of the way to `to` (a colour or another token).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Mix {
+    pub(crate) to: Themed<Color>,
+    pub(crate) t: f32,
+}
 
 /// Drop the bindings `field` (and its sides) replaces.
 pub(crate) fn unbind(styles: &mut Styles, field: Field) {
@@ -115,7 +129,7 @@ pub(crate) fn unbind(styles: &mut Styles, field: Field) {
     };
     let sides = field.sides();
     let bindings = Arc::make_mut(bindings);
-    bindings.0.retain_mut(|(bound, _)| {
+    bindings.0.retain_mut(|(bound, _, _)| {
         if !bound.same(field) {
             return true;
         }
@@ -131,6 +145,24 @@ pub(crate) fn unbind(styles: &mut Styles, field: Field) {
 pub(crate) fn bind_in(styles: &mut Styles, field: Field, token: TokenId) {
     apply(styles, field, &TokenValue::Unset);
     rebind(styles, field, Some(token));
+}
+/// Bind the colour `field` to `t` of the way from `from` to `to`, resolved
+/// from the node's theme like any token.
+pub(crate) fn bind_mix(
+    styles: &mut Styles,
+    field: Field,
+    from: TokenId,
+    to: Themed<Color>,
+    t: f32,
+) {
+    bind_in(styles, field, from);
+    if let Some((_, _, mix)) = styles
+        .tokens
+        .as_mut()
+        .and_then(|b| Arc::make_mut(b).0.last_mut())
+    {
+        *mix = Some(Mix { to, t });
+    }
 }
 /// What a setter writes for a token until it resolves.
 pub(crate) trait Placeholder {
@@ -188,7 +220,7 @@ pub(crate) fn rebind(styles: &mut Styles, field: Field, token: Option<TokenId>) 
     if let Some(token) = token {
         Arc::make_mut(styles.tokens.get_or_insert_with(Default::default))
             .0
-            .push((field, token));
+            .push((field, token, None));
     }
 }
 /// Write `value` into `field` through its setter (which drops any binding
@@ -264,6 +296,12 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
                 _ => s.shadow_none(),
             };
         }
+        Field::InsetShadow => {
+            s.inset_shadows(value.shadows().unwrap_or_default());
+        }
+        Field::OutlineColor => {
+            s.outline_color(color());
+        }
         Field::Opacity => {
             s.opacity(value.number().unwrap_or(1.));
         }
@@ -276,6 +314,34 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
         Field::Height => {
             s.h(number());
         }
+        Field::ShaderParam(slot) => {
+            if let Some(c) = value.color() {
+                let rare = s.rare_mut();
+                let uniforms = rare.shader_uniforms.get_or_insert_with(Default::default);
+                uniforms.params[(slot & 3) as usize] = [
+                    c.0 as f32 / 255.,
+                    c.1 as f32 / 255.,
+                    c.2 as f32 / 255.,
+                    c.3 as f32 / 255.,
+                ];
+            }
+        }
+    }
+}
+/// A binding's value in `scope`, subscribing the running effect to the
+/// tokens it reads.
+fn value(scope: &ThemeScope, token: TokenId, mix: Option<Mix>) -> TokenValue {
+    let value = scope.get(token);
+    let Some(Mix { to, t }) = mix else {
+        return value;
+    };
+    let to = match to {
+        Themed::Value(c) => Some(c),
+        Themed::Token(token) => scope.get(token).color(),
+    };
+    match (value.color(), to) {
+        (Some(from), Some(to)) => TokenValue::Color(super::value::mix(from, to, t)),
+        _ => value,
     }
 }
 /// Resolve `styles`' bindings from `scope`, subscribing the running effect
@@ -284,8 +350,8 @@ pub(crate) fn resolve(styles: &mut Styles, scope: &ThemeScope) {
     let Some(bindings) = styles.tokens.take() else {
         return;
     };
-    for (field, token) in &bindings.0 {
-        apply(styles, *field, &scope.get(*token));
+    for (field, token, mix) in &bindings.0 {
+        apply(styles, *field, &value(scope, *token, *mix));
     }
     styles.tokens = Some(bindings);
 }
@@ -313,10 +379,14 @@ fn sets(styles: &Styles, field: Field) -> u8 {
         Field::FontWeight => all(styles.font_weight.is_some()),
         Field::FontFamily => all(styles.font_family.is_some()),
         Field::Shadow => all(styles.rare().shadow.is_some() || styles.rare().shadows.is_some()),
+        Field::InsetShadow => all(styles.rare().inset_shadows.is_some()),
+        Field::OutlineColor => all(styles.rare().outline.is_some()),
         Field::Opacity => all(styles.opacity.is_some()),
         Field::Blur => all(styles.blur.is_some()),
         Field::Width => all(styles.width.is_some() || styles.width_percent.is_some()),
         Field::Height => all(styles.height.is_some() || styles.height_percent.is_some()),
+        // Set alongside the uniforms it lands in; nothing replaces it.
+        Field::ShaderParam(_) => 0,
     }
 }
 /// `Styles::merge`'s part for bindings: what `other` sets replaces `target`'s
@@ -325,7 +395,7 @@ pub(crate) fn merge(target: &mut Styles, other: &Styles) {
     if target.tokens.is_some() {
         let mut replaced = Vec::new();
         if let Some(bindings) = &target.tokens {
-            for (field, _) in &bindings.0 {
+            for (field, _, _) in &bindings.0 {
                 let mask = sets(other, *field) & field.sides();
                 if mask != 0 {
                     replaced.push(field.with_sides(mask));
@@ -407,11 +477,18 @@ impl StyleTheme {
             return false;
         };
         let stale = self.fresh & (1 << slot) == 0;
-        for (field, token) in &bindings.0 {
+        for (field, token, mix) in &bindings.0 {
             if stale {
-                apply(patch, *field, &self.scope.get(*token));
+                apply(patch, *field, &value(&self.scope, *token, *mix));
             } else {
                 self.scope.track(*token);
+                if let Some(Mix {
+                    to: Themed::Token(to),
+                    ..
+                }) = mix
+                {
+                    self.scope.track(*to);
+                }
             }
         }
         self.fresh |= 1 << slot;
@@ -429,6 +506,11 @@ impl StyleTheme {
     pub(crate) fn include(&mut self, variant: &Styles) {
         self.themed |= variant.tokens.is_some();
     }
+    /// A patch (`slot`: 0 the base, then hover, active, focus, disabled) was
+    /// replaced: its tokens resolve when it next comes into effect.
+    pub(crate) fn replaced(&mut self, slot: usize) {
+        self.fresh &= !(1 << slot);
+    }
     /// Whether the base or a variant uses tokens.
     pub(crate) fn themed(&self) -> bool {
         self.themed
@@ -444,7 +526,7 @@ mod tests {
         let s = Styles::new().p(tok::SPACE_3).px(4.);
         assert_eq!(
             s.tokens.as_ref().unwrap().0,
-            vec![(Field::Padding(5), tok::SPACE_3.0)]
+            vec![(Field::Padding(5), tok::SPACE_3.0, None)]
         );
         let s = Styles::new().bg(tok::ACCENT).bg(Color(1, 2, 3, 255));
         assert!(s.tokens.is_none());
@@ -453,13 +535,13 @@ mod tests {
         base.merge(&Styles::new().bg(Color(9, 9, 9, 255)));
         assert_eq!(
             base.tokens.as_ref().unwrap().0,
-            vec![(Field::Radius, tok::RADIUS_MD.0)]
+            vec![(Field::Radius, tok::RADIUS_MD.0, None)]
         );
         let mut base = Styles::new().bg(Color(9, 9, 9, 255));
         base.merge(&Styles::new().bg(tok::ACCENT));
         assert_eq!(
             base.tokens.as_ref().unwrap().0,
-            vec![(Field::Background, tok::ACCENT.0)]
+            vec![(Field::Background, tok::ACCENT.0, None)]
         );
     }
     #[test]
@@ -479,5 +561,29 @@ mod tests {
         assert_eq!(s.font_family, Some(FontFamily::Monospace));
         assert!(s.rare().shadows.as_ref().unwrap().as_ref().unwrap().len() == 1);
         assert!(s.tokens.is_some(), "bindings stay for the next resolution");
+    }
+    #[test]
+    fn blends_resolve_between_theme_colours() {
+        let runtime = crate::reactive::Runtime::new();
+        let themes = Themes::of(&runtime);
+        let scope = themes.root();
+        let (a, b) = (
+            scope.color(tok::SURFACE_RAISED),
+            scope.color(tok::TEXT_PRIMARY),
+        );
+        let mut s = Styles::new().token_mix(
+            Field::TextColor,
+            tok::SURFACE_RAISED,
+            tok::TEXT_PRIMARY,
+            0.5,
+        );
+        resolve(&mut s, scope);
+        assert_eq!(s.text_color, Some(crate::theme::value::mix(a, b, 0.5)));
+        let white = Color(255, 255, 255, 255);
+        let mut s = Styles::new().token_mix(Field::Background, tok::SURFACE_RAISED, white, 1.);
+        resolve(&mut s, scope);
+        assert_eq!(s.background, Some(white));
+        let s = s.bg(Color(1, 2, 3, 255));
+        assert!(s.tokens.is_none(), "a later value replaces the blend");
     }
 }

@@ -386,3 +386,37 @@ fn fade_overflow_shows_only_the_bands_content_runs_past() {
     scroll(&mut ui, 200.);
     assert_eq!(bands(&mut ui), Some([14., 0., 0., 0.]));
 }
+
+#[test]
+fn fade_overflow_measures_a_scroll_views_content() {
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0_f32);
+    let view = ui.mount(
+        column().child(
+            zgui::compose::scroll(offset.clone())
+                .id("view")
+                .w(200.)
+                .h(100.)
+                .fade_edges(14., 18.)
+                .fade_overflow(true)
+                .child(column().id("list").h(300.).child(div().id("row").h(20.))),
+        ),
+    );
+    let bands = |ui: &mut Ui| {
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        let node = view.find("row").unwrap();
+        let scene = ui.scene.borrow();
+        let item = scene
+            .layer_items(None)
+            .into_iter()
+            .find(|item| item.id == node)
+            .unwrap();
+        item.mask.map(|(_, bands)| bands)
+    };
+    // The scrolled content sits under the scroll view's own viewport: its
+    // overflow counts all the same.
+    assert_eq!(bands(&mut ui), Some([0., 0., 18., 0.]));
+    offset.set(5.);
+    assert_eq!(bands(&mut ui), Some([5., 0., 18., 0.]));
+}

@@ -15,6 +15,7 @@ One page per element and API group of [zgui-script](../scripting.md). Each gives
 | [State and components](state.md) | `state`, `shared`, `persist`, `use_state`, `computed`, `effect`, `batch`, `ref`, `component`, `on_mount`, `slot`, `contribute`, actions |
 | [Animation](anime.md) | the `anime` global (anime.js v4), `tween`, `spring`, `loop` |
 | [Properties](properties.md) | every style property, grouped |
+| [Design systems](design.md) | `variants`, `raw`, `theme.strict`: component variants and the design lint |
 | [Events](events.md) | pointer, keyboard, focus, lifecycle, drag and drop |
 | [App structure](app-structure.md) | splitting an app across modules with shared state |
 
@@ -34,6 +35,7 @@ Signatures are Luau types from [`zgui.d.luau`](../../crates/zgui-script/types/zg
 | `Color`, `Length` | `"#rrggbb"`, `"rgb(…)"`, `0xrrggbb`; points or `"50%"`, `"auto"` |
 | `Element`, `Ref` | a mounted node, and what follows one (see [Events](events.md#elements)) |
 | `Merge<A, B>` | `A` with `B`'s properties: `Merge<ContainerProps, { title: string }>` |
+| `VariantProps<R>` | a `ui.variants` recipe's axes as props (see [Design systems](design.md)) |
 
 Each element function also has its own props type (`InputProps`, `ListProps`, `EachOptions`…), named on its page. Every props and options table is closed: an unknown key is an error, which luau-lsp reports as the key's type not being `number` (`Expected this to be 'number', but got '"bgg"'`, for `bgg`). A missing required option (an input's `value`) is reported as a missing field.
 

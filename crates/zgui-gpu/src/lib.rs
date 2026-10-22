@@ -1211,6 +1211,12 @@ pub struct GpuRenderer {
     /// resized or restyled node gets a new raster; the old texture goes at
     /// once instead of waiting for a structural prune.
     node_images: FxHashMap<NodeId, u64>,
+    /// Gradient ramps (see `axis_gradient`) by their stops, and the ramp
+    /// each node draws, so a ramp lives while a node shows it.
+    ramps: FxHashMap<RampKey, Arc<zgui::image::ImageData>>,
+    node_ramps: FxHashMap<NodeId, RampKey>,
+    /// SVG sources that failed to draw, reported once each.
+    failed_svgs: rustc_hash::FxHashSet<u64>,
     /// The viewport of the target currently being rendered.
     viewport_bind: Option<wgpu::BindGroup>,
     /// Reused upload memory for per-frame vertices; `write_buffer` would
@@ -1539,6 +1545,9 @@ impl GpuRenderer {
                 mapped_at_creation: false,
             }),
             node_images: FxHashMap::default(),
+            ramps: FxHashMap::default(),
+            node_ramps: FxHashMap::default(),
+            failed_svgs: Default::default(),
             viewport_bind: None,
             belt: RefCell::new(wgpu::util::StagingBelt::new(device.clone(), 256 * 1024)),
             mapped: context
@@ -1767,7 +1776,9 @@ impl GpuRenderer {
             present.resized_at = Some(std::time::Instant::now());
         }
         self.flush_pending();
-        self.layers.clear();
+        // Layers stay: what they hold changes with layout (their revision),
+        // not with the window's size. (Clearing them made a live resize
+        // allocate and paint every layer, blurs and all, at every step.)
         // Scratch grows on demand; release it when the window shrinks a lot.
         if self.blur_scratch.as_ref().is_some_and(|scratch| {
             scratch
@@ -1987,6 +1998,9 @@ impl GpuRenderer {
     /// Drop cached shapes, canvases, SVGs and textures of nodes that are gone.
     fn prune(&mut self, scene: &Scene) {
         self.node_images.retain(|id, _| scene.contains(*id));
+        self.node_ramps.retain(|id, _| scene.contains(*id));
+        let shown: std::collections::HashSet<&RampKey> = self.node_ramps.values().collect();
+        self.ramps.retain(|key, _| shown.contains(key));
         self.shapes.retain(|id, _| {
             scene.contains(*id)
                 && matches!(
@@ -2008,6 +2022,7 @@ impl GpuRenderer {
                 })
                 .collect();
             live_images.extend(self.canvases.image_ids());
+            live_images.extend(self.ramps.values().map(|ramp| ramp.id()));
             live_images.extend(self.svgs.image_ids());
             // Boxes' background images.
             live_images.extend(scene.paint_items().filter_map(|item| match item.kind {
@@ -2733,6 +2748,53 @@ impl GpuRenderer {
                                 });
                                 fill_shading = Some(Shading::Fill(shader.id()));
                             }
+                            // (A shader fill shades this item's quads: no insets over it.)
+                            if fill_shading.is_none() {
+                                quads.extend(inset_quads(style, bounds, opacity, edge_fade));
+                            }
+                            if ring && !later {
+                                quads.push(ring_quad(style, bounds, opacity, edge_fade));
+                            }
+                        } else if let Some((key, uv)) = (!style.has_border() || ring)
+                            .then(|| axis_gradient(style, bounds))
+                            .flatten()
+                        {
+                            // A gradient along one axis: a ramp texture
+                            // stretched over the box (its corners cut by the
+                            // quad shader), not a raster of the whole box.
+                            if let Some(old) = self.node_images.remove(&item.id) {
+                                self.images.remove(&old);
+                            }
+                            let ramp = match self.ramps.get(&key) {
+                                Some(ramp) => ramp.clone(),
+                                None => {
+                                    let ramp = Arc::new(ramp_image(&key)?);
+                                    self.ramps.insert(key.clone(), ramp.clone());
+                                    ramp
+                                }
+                            };
+                            if !self.images.contains_key(&ramp.id()) {
+                                self.upload_image(&ramp)?;
+                                stats.image_uploads += 1;
+                            }
+                            self.node_ramps.insert(item.id, key);
+                            canvas_image = Some(ramp.id());
+                            quads.push(Quad {
+                                rect: fade,
+                                uv,
+                                color: [1., 1., 1., opacity],
+                                fade,
+                                options: [edge_fade, 2., 0., 1.],
+                                shape: [0., 0., 0., 1.],
+                                border: decoration::shadow_corners(
+                                    style,
+                                    bounds.width,
+                                    bounds.height,
+                                    0.,
+                                ),
+                                mask: NO_MASK,
+                            });
+                            quads.extend(inset_quads(style, bounds, opacity, edge_fade));
                             if ring && !later {
                                 quads.push(ring_quad(style, bounds, opacity, edge_fade));
                             }
@@ -2801,9 +2863,21 @@ impl GpuRenderer {
                         continue;
                     }
                     let before = self.svgs.rasterizations();
+                    // An SVG that won't draw (bad markup, too large) shows
+                    // nothing; it is the content's fault, not the frame's.
                     let image =
-                        self.svgs
-                            .get(item.id, svg, bounds.width, bounds.height, self.scale)?;
+                        match self
+                            .svgs
+                            .get(item.id, svg, bounds.width, bounds.height, self.scale)
+                        {
+                            Ok(image) => image,
+                            Err(error) => {
+                                if self.failed_svgs.insert(svg.source_id()) {
+                                    eprintln!("zgui: an SVG doesn't draw: {}", error.0);
+                                }
+                                continue;
+                            }
+                        };
                     stats.svg_rasterizations += (self.svgs.rasterizations() - before) as usize;
                     // Nodes share SVG rasters: `prune` releases their textures
                     // once no node shows them (a new source prunes).
@@ -3029,7 +3103,14 @@ impl GpuRenderer {
                                 None,
                                 self.scale,
                             );
-                            Err((glyphs, Vec::new(), laid.key()))
+                            let underlines = item.font.underline.map_or_else(Vec::new, |line| {
+                                text::plain_underlines(
+                                    laid.runs(Some(bounds.height)),
+                                    font_size,
+                                    line,
+                                )
+                            });
+                            Err((glyphs, underlines, laid.key()))
                         } else if let Some(rich) = prepared {
                             let mut cache = self.text_cache.borrow_mut();
                             let laid = cache.layout(&mut fonts, rich, Some(bounds.width));
@@ -3068,7 +3149,7 @@ impl GpuRenderer {
                                 font_size.max(1.),
                                 item.font.line_height.resolve(font_size),
                             ));
-                            b.set_size(Some(bounds.width), Some(bounds.height));
+                            b.set_size(text::wrap_width(Some(bounds.width)), Some(bounds.height));
                             text::set_buffer_text(
                                 &mut fonts,
                                 &mut b,
@@ -3088,8 +3169,13 @@ impl GpuRenderer {
                                     rich.as_deref(),
                                     self.scale,
                                 ),
-                                rich.as_ref()
-                                    .map_or_else(Vec::new, |rich| text::rich_decorations(&b, rich)),
+                                match (&rich, item.font.underline) {
+                                    (Some(rich), _) => text::rich_decorations(&b, rich),
+                                    (None, Some(line)) => {
+                                        text::plain_underlines(b.layout_runs(), font_size, line)
+                                    }
+                                    (None, None) => Vec::new(),
+                                },
                                 None,
                             ),
                         };
@@ -3162,6 +3248,10 @@ impl GpuRenderer {
                         let mut quad = *cached;
                         quad.rect[0] += bounds.x;
                         quad.rect[1] += bounds.y;
+                        if quad.shape[3] > 0.5 {
+                            quad.fade[0] += bounds.x;
+                            quad.fade[1] += bounds.y;
+                        }
                         quad.color = if rich.is_some() {
                             [
                                 cached.color[0],
@@ -5839,13 +5929,20 @@ fn texture(device: &wgpu::Device, width: u32, height: u32, label: &str) -> wgpu:
     })
 }
 fn rich_decoration_quad(d: &text::RichDecoration) -> Quad {
+    let rect = [d.bounds.x, d.bounds.y, d.bounds.width, d.bounds.height];
     Quad {
-        rect: [d.bounds.x, d.bounds.y, d.bounds.width, d.bounds.height],
+        rect,
         color: rgba(d.color, 1.),
         uv: [0.; 4],
-        fade: [0.; 4],
+        // A rounded background (an inline code chip) is a rounded rect over
+        // its own box; `fade` carries that box and moves with the text.
+        fade: if d.radius > 0. { rect } else { [0.; 4] },
         options: [0.; 4],
-        shape: [0.; 4],
+        shape: if d.radius > 0. {
+            [d.radius, 0., 0., 1.]
+        } else {
+            [0.; 4]
+        },
         border: [0.; 4],
         mask: NO_MASK,
     }
@@ -5910,6 +6007,125 @@ pub(crate) fn fill_validates(source: &str) -> bool {
 /// A background `image` placed in `bounds` as `fit` has it (centred), the
 /// part inside them, cut to `style`'s rounded corners (the quad shader's
 /// per-corner shape over the box, whatever part of it the image covers).
+/// A gradient ramp: its stops (offsets and colours, as bits) and whether
+/// it runs down (a column of texels) or across (a row).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct RampKey {
+    vertical: bool,
+    stops: Vec<(u32, [u8; 4])>,
+}
+/// Texels in a ramp: smooth to the eye at any size, as the texture is
+/// sampled linearly between them.
+const RAMP: u32 = 256;
+/// `style`'s linear gradient, when it runs straight down or across `bounds`
+/// (any other angle rasterizes): its ramp and the texture coordinates that
+/// stretch the ramp's ends to the gradient's (padded past them by the
+/// sampler's clamping).
+fn axis_gradient(style: &zgui::scene::QuadStyle, bounds: Rect) -> Option<(RampKey, [f32; 4])> {
+    use zgui::{canvas::Point, decoration::Background};
+    let (w, h) = (bounds.width, bounds.height);
+    if !(w > 0. && h > 0.) {
+        return None;
+    }
+    let (start, end, stops) = match style.decoration.as_deref()?.background.as_ref()? {
+        Background::Linear { angle, stops } => {
+            // As `decoration::canvas` places them.
+            let (sin, cos) = angle.sin_cos();
+            let half = (w * cos.abs() + h * sin.abs()) * 0.5;
+            (
+                Point::new(w * 0.5 - cos * half, h * 0.5 - sin * half),
+                Point::new(w * 0.5 + cos * half, h * 0.5 + sin * half),
+                stops,
+            )
+        }
+        Background::Brush(zgui::canvas::Brush::Linear { start, end, stops }) => {
+            (*start, *end, stops)
+        }
+        _ => return None,
+    };
+    if stops.len() < 2
+        || stops.len() > 64
+        || stops
+            .iter()
+            .any(|s| !s.offset.is_finite() || !(0. ..=1.).contains(&s.offset))
+        || stops.windows(2).any(|p| p[1].offset < p[0].offset)
+    {
+        return None;
+    }
+    let vertical = (start.x - end.x).abs() <= 1e-3;
+    let horizontal = (start.y - end.y).abs() <= 1e-3;
+    let (from, to, extent) = match (vertical, horizontal) {
+        (true, false) => (start.y, end.y, h),
+        (false, true) => (start.x, end.x, w),
+        _ => return None,
+    };
+    let span = to - from;
+    if !span.is_finite() || span.abs() < 1e-3 {
+        return None;
+    }
+    // Offset 0 at the first texel's centre, 1 at the last's.
+    let texel = |t: f32| (0.5 + t * (RAMP - 1) as f32) / RAMP as f32;
+    let (a, b) = (texel(-from / span), texel((extent - from) / span));
+    let uv = if vertical {
+        [0., a, 1., b - a]
+    } else {
+        [a, 0., b - a, 1.]
+    };
+    let stops = stops
+        .iter()
+        .map(|s| {
+            (
+                s.offset.to_bits(),
+                [s.color.0, s.color.1, s.color.2, s.color.3],
+            )
+        })
+        .collect();
+    Some((RampKey { vertical, stops }, uv))
+}
+/// A ramp's texels: the stops interpolated with premultiplied alpha (as
+/// CSS gradients are, and rasters, see `canvas::premultiplied_stops`),
+/// padded with the end colours.
+fn ramp_image(key: &RampKey) -> Result<zgui::image::ImageData, GpuError> {
+    let stops: Vec<(f32, [f32; 4])> = key
+        .stops
+        .iter()
+        .map(|&(offset, [r, g, b, a])| {
+            let alpha = a as f32 / 255.;
+            (
+                f32::from_bits(offset),
+                [
+                    r as f32 * alpha,
+                    g as f32 * alpha,
+                    b as f32 * alpha,
+                    a as f32,
+                ],
+            )
+        })
+        .collect();
+    let mut pixels = Vec::with_capacity(RAMP as usize * 4);
+    for i in 0..RAMP {
+        let t = i as f32 / (RAMP - 1) as f32;
+        let next = stops.iter().position(|s| s.0 > t).unwrap_or(stops.len());
+        let c = match next {
+            0 => stops[0].1,
+            n if n == stops.len() => stops[n - 1].1,
+            n => {
+                let ((t0, c0), (t1, c1)) = (stops[n - 1], stops[n]);
+                let f = if t1 > t0 { (t - t0) / (t1 - t0) } else { 1. };
+                std::array::from_fn(|k| c0[k] + (c1[k] - c0[k]) * f)
+            }
+        };
+        // Images hold straight colour (their upload premultiplies).
+        let alpha = c[3] / 255.;
+        let straight = |v: f32| if alpha > 0. { v / alpha } else { 0. };
+        pixels.extend(
+            [straight(c[0]), straight(c[1]), straight(c[2]), c[3]]
+                .map(|v| v.round().clamp(0., 255.) as u8),
+        );
+    }
+    let (width, height) = if key.vertical { (1, RAMP) } else { (RAMP, 1) };
+    zgui::image::ImageData::new(width, height, pixels).map_err(|e| GpuError(e.into()))
+}
 fn background_quad(
     image: &zgui::image::ImageData,
     fit: zgui::style::ObjectFit,
@@ -6018,6 +6234,45 @@ fn ring_quad(style: &zgui::scene::QuadStyle, bounds: Rect, opacity: f32, edge_fa
         border: decoration::shadow_corners(style, bounds.width, bounds.height, 0.),
         mask: NO_MASK,
     }
+}
+/// A box's inset shadows (`Decoration::inset_shadows`), each a ring inside
+/// it as wide on each side as the shadow's offset pushes it (and its spread
+/// all round), in the shadow's colour, cut to the box's corners.
+fn inset_quads(
+    style: &zgui::scene::QuadStyle,
+    bounds: Rect,
+    opacity: f32,
+    edge_fade: f32,
+) -> impl Iterator<Item = Quad> + '_ {
+    let shadows = style
+        .decoration
+        .as_deref()
+        .and_then(|d| d.inset_shadows.as_deref())
+        .unwrap_or(&[]);
+    shadows.iter().filter(|s| s.color.3 > 0).map(move |s| {
+        let spread = s.spread.max(0.);
+        let width = |value: f32| match value.is_finite() {
+            true => ((value.max(0.) + spread) * 16.).round().min(4095.),
+            false => 0.,
+        };
+        let (x, y) = (s.offset.x, s.offset.y);
+        let fade = [bounds.x, bounds.y, bounds.width, bounds.height];
+        Quad {
+            rect: fade,
+            uv: [0.; 4],
+            color: rgba(s.color, opacity),
+            fade,
+            options: [edge_fade, 0., 0., 1.],
+            shape: [
+                width(y) + 4096. * width(-x),
+                -1.,
+                width(-y) + 4096. * width(x),
+                1.,
+            ],
+            border: decoration::shadow_corners(style, bounds.width, bounds.height, 0.),
+            mask: NO_MASK,
+        }
+    })
 }
 fn rgba(c: Color, opacity: f32) -> [f32; 4] {
     [

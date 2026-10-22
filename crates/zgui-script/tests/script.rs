@@ -224,6 +224,8 @@ fn plugins_contribute_to_slots_and_read_shared_state() {
             r#"ui.contribute("toolbar", ui.text { "Hello, {user}", id = "greeting" })"#,
         );
         host.shared("user", "Ada");
+        // Plugins reach the shared state the app exposes to them.
+        host.expose_shared("user", None);
         host
     });
     assert_eq!(h.text("greeting"), "Hello, Ada");
@@ -270,6 +272,10 @@ fn the_hot_reload_example_loads() {
     let mut h = Harness::new(|runtime| {
         let host = ScriptHost::new(runtime, dir.join("app.luau")).plugins(dir.join("plugins"));
         host.shared("window", "820×560");
+        // What hot_reload.rs exposes to its plugins.
+        host.expose_shared("window", None);
+        host.expose_shared("count", None);
+        host.expose_action("quit", None);
         host
     });
     assert_eq!(h.host.error().get(), None);
@@ -414,9 +420,14 @@ fn modules_resolve_like_luau_and_keep_their_own_state() {
         local open = ui.state("open", "card")
         return function(label) return ui.text { label .. " " .. open:get() .. " " .. theme.accent, id = "card" } end"##,
     );
+    write("ui/lib/helper.luau", r##"return "helper""##);
     write(
         "ui/lib/init.luau",
-        r##"local open = ui.state("open", "lib") return { open = open }"##,
+        r##"-- An init.luau is its directory as a module: `./` is beside the
+        -- directory, `@self` inside it.
+        assert(require("./components/theme").accent == "#8b7cf6", "./ from an init.luau")
+        assert(require("@self/helper") == "helper", "@self from an init.luau")
+        local open = ui.state("open", "lib") return { open = open }"##,
     );
     write(
         "app.luau",

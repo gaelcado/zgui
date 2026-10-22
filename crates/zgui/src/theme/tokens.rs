@@ -284,6 +284,12 @@ pub fn lookup(name: &str) -> Option<TokenId> {
 pub(crate) fn count() -> usize {
     registry().read().unwrap().names.len()
 }
+/// Every token interned so far: the standard ones, and those an app
+/// declared or a style named, whether or not anything defines them
+/// (`ThemeScope::is_defined` says).
+pub fn interned() -> impl Iterator<Item = TokenId> {
+    (0..count() as u32).map(TokenId)
+}
 /// The standard token's kind, or `None` for an app token.
 pub fn standard_kind(id: TokenId) -> Option<TokenKind> {
     STANDARD.get(id.index()).map(|(_, kind, _)| *kind)

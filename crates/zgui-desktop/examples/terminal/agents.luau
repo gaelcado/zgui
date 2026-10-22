@@ -68,7 +68,7 @@ local function panes(): { { pane: string, tab: string } }
 	local out = {}
 	for _, tab in state.tabs:get() do
 		for _, pane in layout.leaves(tab.root) do
-			if not sessions.is_browser(pane) then
+			if sessions.is_terminal(pane) then
 				table.insert(out, { pane = pane, tab = tab.id })
 			end
 		end
@@ -132,7 +132,7 @@ ui.effect(function()
 	local tab = state.active:get()
 	local pane = (state.focus:get())[tab]
 	local by_id = if all then all.sessions else nil
-	if not (by_id and pane) or sessions.is_browser(pane) then
+	if not (by_id and pane) or not sessions.is_terminal(pane) then
 		return
 	end
 	local s = by_id[pane]

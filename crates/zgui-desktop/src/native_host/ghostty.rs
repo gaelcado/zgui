@@ -1029,6 +1029,24 @@ define_class!(
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             self.handle_key_equivalent(event)
         }
+        // NSDraggingDestination's, which NSView declares informally: the
+        // view's own methods, not NSTextInputClient's (a debug build checks
+        // a protocol block's methods are the protocol's, and would panic).
+        // Dropped files and text (as Ghostty's own terminal takes them):
+        // pasted, files as their shell-escaped paths, so a program reading
+        // a path (an agent taking an image) gets it whole.
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &AnyObject) -> NSUInteger {
+            if dropped_text(sender).is_some() { DRAG_COPY } else { 0 }
+        }
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &AnyObject) -> NSUInteger {
+            if dropped_text(sender).is_some() { DRAG_COPY } else { 0 }
+        }
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(&self, sender: &AnyObject) -> bool {
+            self.drop_text(sender)
+        }
     }
 
     unsafe impl NSObjectProtocol for TerminalView {}
@@ -1118,21 +1136,6 @@ define_class!(
         #[unsafe(method(doCommandBySelector:))]
         fn do_command_by_selector(&self, _selector: Sel) {
             self.redispatch_command();
-        }
-        // Dropped files and text (as Ghostty's own terminal takes them):
-        // pasted, files as their shell-escaped paths, so a program reading
-        // a path (an agent taking an image) gets it whole.
-        #[unsafe(method(draggingEntered:))]
-        fn dragging_entered(&self, sender: &AnyObject) -> NSUInteger {
-            if dropped_text(sender).is_some() { DRAG_COPY } else { 0 }
-        }
-        #[unsafe(method(draggingUpdated:))]
-        fn dragging_updated(&self, sender: &AnyObject) -> NSUInteger {
-            if dropped_text(sender).is_some() { DRAG_COPY } else { 0 }
-        }
-        #[unsafe(method(performDragOperation:))]
-        fn perform_drag_operation(&self, sender: &AnyObject) -> bool {
-            self.drop_text(sender)
         }
     }
 );
