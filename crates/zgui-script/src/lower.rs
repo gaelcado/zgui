@@ -394,6 +394,7 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, vm: &Rc<Vm>, low: &Rc<Lower
         .reactive_style(move || zgui::style::Styles::new().opacity(fade.get()));
     zgui::compose::popover("Tooltip", open, anchor)
         .layer()
+        .lazy()
         .autofocus(false)
         .placement(placement)
         .pointer_events(interactive)
@@ -1031,10 +1032,13 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             autofocus,
             layer,
         } => {
+            // Built when it first opens (`View::lazy`), as every script
+            // overlay: closed, a list's menus and cards cost nothing.
             let view = modal(
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
-            );
+            )
+            .lazy();
             let view = if *autofocus {
                 view
             } else {
@@ -1057,7 +1061,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
                 lower(anchor, low),
-            );
+            )
+            .lazy();
             let view = if *autofocus {
                 view
             } else {
@@ -1079,7 +1084,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
                 lower(anchor, low),
-            );
+            )
+            .lazy();
             let view = if *autofocus {
                 view
             } else {

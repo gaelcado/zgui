@@ -280,6 +280,8 @@ struct PortalOptions {
     autofocus: Option<bool>,
     modal_placement: Option<crate::compose_modal::ModalPlacement>,
     trigger: Option<View>,
+    /// `View::lazy`: built the first time it opens.
+    lazy: bool,
 }
 pub struct View {
     kind: Kind,
@@ -478,6 +480,15 @@ impl View {
     /// holds focus; it is raised over everything as it opens.
     pub fn layer(mut self) -> Self {
         self.portal.get_or_insert_default().layer = true;
+        self
+    }
+    /// Build a modal's, popover's or menu's panel the first time it opens
+    /// (and keep it), rather than as it mounts: a list's hundreds of row
+    /// menus, tooltips and hover cards cost nothing (no nodes, styles or
+    /// observers) until one opens. What is inside is not found (`find`) or
+    /// in the accessibility tree before then.
+    pub fn lazy(mut self) -> Self {
+        self.portal.get_or_insert_default().lazy = true;
         self
     }
     /// Whether a modal, popover or menu focuses its first control as it
@@ -1718,7 +1729,7 @@ fn mount_portal(
     open: Signal<bool>,
     anchor: Option<Box<View>>,
     mut view: View,
-    mut environment: Environment,
+    environment: Environment,
     is_menu: bool,
     is_submenu: bool,
 ) -> NodeId {
@@ -1753,6 +1764,63 @@ fn mount_portal(
         });
     }
     let anchor = anchor.map(|anchor| mount(ui, owner, *anchor, environment.clone()));
+    if !view.portal.as_ref().is_some_and(|p| p.lazy) {
+        mount_portal_panel(
+            ui,
+            owner,
+            anchor,
+            label,
+            open,
+            view,
+            environment,
+            is_menu,
+            is_submenu,
+        );
+        return owner;
+    }
+    // Lazy (`View::lazy`): built the first time it opens, and kept.
+    let mut pending = Some((label, open.clone(), view, environment));
+    let weak = ui.downgrade();
+    let runtime = ui.runtime.clone();
+    ui.bind(owner, move || {
+        if !open.get() || pending.is_none() {
+            return;
+        }
+        let Some(mut ui) = weak.upgrade() else { return };
+        if !ui.scene.borrow().contains(owner) {
+            return;
+        }
+        let (label, open, view, environment) = pending.take().expect("checked above");
+        runtime.untracked(|| {
+            mount_portal_panel(
+                &mut ui,
+                owner,
+                anchor,
+                label,
+                open,
+                view,
+                environment,
+                is_menu,
+                is_submenu,
+            )
+        });
+    });
+    owner
+}
+/// The rest of `mount_portal`, when it first opens.
+#[allow(clippy::too_many_arguments)]
+fn mount_portal_panel(
+    ui: &mut Ui,
+    owner: NodeId,
+    anchor: Option<NodeId>,
+    label: String,
+    open: Signal<bool>,
+    mut view: View,
+    mut environment: Environment,
+    is_menu: bool,
+    is_submenu: bool,
+) {
+    let anchored = anchor.is_some();
     let portal_parent = environment
         .portal
         .as_ref()
@@ -1937,7 +2005,6 @@ fn mount_portal(
         options.pass_through = true;
         ui.input.set_options(portal.overlay, options);
     }
-    owner
 }
 /// The built-in widgets' default styles, built once per thread and cloned
 /// for each widget: their theme token bindings are shared, not allocated
@@ -2703,16 +2770,22 @@ fn mount_element(
                 ..Default::default()
             },
         );
-        let size = ui.observe_content_size(root);
+        // Its size arrives with the frame's layout (deferred: an icon
+        // mounting forces no layout of its own, so a thread of hundreds
+        // lays out once).
+        let size = ui.observe_content_size_deferred(root);
         let scene = ui.scene.clone();
         let (typography, theme) = (environment.typography.clone(), environment.theme.clone());
         ui.bind(root, move || {
+            let (width, height) = size.get();
+            if width.is_nan() || height.is_nan() {
+                return;
+            }
             let mut data = source();
             // `currentColor`: the text colour here, as it changes.
             if data.follows_text_color() {
                 data = std::sync::Arc::new(data.tinted(typography.get().color_in(Some(&theme))));
             }
-            let (width, height) = size.get();
             let mut scene = scene.borrow_mut();
             scene.set_kind(child, NodeKind::Svg(data));
             scene.set_style(
@@ -2727,7 +2800,8 @@ fn mount_element(
         });
     }
     if let Some(mut draw) = canvas_compute {
-        let size = ui.observe_content_size(root);
+        // As an icon's: with the frame's layout, forcing none.
+        let size = ui.observe_content_size_deferred(root);
         let drawing = ui.scene.borrow_mut().append(
             root,
             NodeKind::Canvas(Default::default()),
@@ -2739,6 +2813,9 @@ fn mount_element(
         let scene = ui.scene.clone();
         ui.bind(root, move || {
             let (width, height) = size.get();
+            if width.is_nan() || height.is_nan() {
+                return;
+            }
             let content = if width > 0. && height > 0. {
                 draw((width, height))
             } else {

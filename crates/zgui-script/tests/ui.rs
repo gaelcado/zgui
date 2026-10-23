@@ -1334,12 +1334,13 @@ fn modals_open_from_state() {
             ui.modal { open = open, label = "Dialog", ui.text { "inside", id = "inside" } },
         }"##,
     );
-    // A closed modal keeps its content mounted, hidden.
+    // A modal is built the first time it opens; closed again, it keeps its
+    // content, hidden.
+    assert!(h.find("inside").is_none(), "nothing before it opens");
     let shown = |h: &mut Harness| {
         let node = h.find("inside").unwrap();
         h.ui.scene.borrow().visible_bounds(node).is_some()
     };
-    assert!(!shown(&mut h));
     h.click("open");
     assert!(shown(&mut h));
 }

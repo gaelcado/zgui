@@ -798,11 +798,11 @@ fn color_filters_animate_on_the_compositor() {
 
 #[test]
 fn a_loop_no_one_can_see_waits_until_it_shows() {
-    // A spinner inside a closed dialog: mounted, never seen.
+    // A spinner inside a dialog opened once and closed: kept, unseen.
     let mut h = Harness::inline(
-        r##"local open = ui.state("open", false)
+        r##"local open = ui.state("open", true)
         return ui.column {
-            ui.button { id = "b", w = 20, h = 20, on_click = function() open:set(true) end, "b" },
+            ui.button { id = "b", w = 20, h = 20, on_click = function() open:set(not open:peek()) end, "b" },
             ui.modal { open = open, w = 100, h = 100,
                 ui.div { id = "spin", w = 10, h = 10, bg = "#ff0000",
                     on_mount = function(el)
@@ -810,8 +810,13 @@ fn a_loop_no_one_can_see_waits_until_it_shows() {
                     end } } }"##,
     );
     h.frame();
+    h.run_ms(100.);
+    // The open dialog's backdrop takes the click and closes it.
+    h.click("b");
+    h.frame();
+    let x = h.x("spin");
     h.run_ms(300.);
-    assert_eq!(h.x("spin"), 0., "unseen, it stands still");
+    assert_eq!(h.x("spin"), x, "unseen, it stands still");
     assert_eq!(
         h.clock.demanded_rate(120.),
         Some(4.),
@@ -819,6 +824,6 @@ fn a_loop_no_one_can_see_waits_until_it_shows() {
     );
     h.click("b");
     h.run_ms(300.);
-    assert!(h.x("spin") > 0., "open, it moves: {}", h.x("spin"));
+    assert!(h.x("spin") != x, "open, it moves: {}", h.x("spin"));
     assert_eq!(h.clock.demanded_rate(120.), Some(30.));
 }

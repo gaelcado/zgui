@@ -1065,6 +1065,15 @@ impl ScriptHost {
                 .sum()
         })
     }
+    /// How many converted values the loaded scripts' VMs keep (their tables
+    /// held weakly): with `script_memory`, what tells data the scripts hold
+    /// from data the host holds.
+    pub fn converted_values(&self) -> usize {
+        let loaded = self.0.current.borrow().clone();
+        loaded.map_or(0, |l| {
+            l._vms.iter().map(|vm| value::converted_len(&vm.lua)).sum()
+        })
+    }
     /// The latest load or script error, shown over the interface until fixed.
     pub fn error(&self) -> Signal<Option<String>> {
         self.0.error.clone()

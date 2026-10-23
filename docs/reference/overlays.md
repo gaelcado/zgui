@@ -114,7 +114,7 @@ return ui.column {
 
 - `open` must be a state; the panel writes `false` back to it when it closes, so a toggle that reads it stays right.
 - The anchor is a node, given as `anchor = ui.button { … }`, not a child: the children are the panel's content. Opening on the anchor's click is yours to do (`on_click = ui.toggle(open)`).
-- A closed panel keeps its content mounted (and its state), drawn and focused only while open.
+- A panel (and a tooltip or hover card) is built the first time it opens, so a list's hundreds of row menus and cards cost nothing until one opens; closed again, it keeps its content mounted (and its state), drawn and focused only while open. Before it first opens, nothing inside it is found by `id` or a ref.
 - A separator is any small node: a 1-point `ui.div`. A `menu_item` with children needs `label` for its accessible name and for typing to find it.
 - `context_menu` runs at the click, in one update: build the items there (they may read state). It is called with the pointer, so the same function can offer different items in different places. Returning nothing lets the click through to what is under it.
 - `context_menu_style` takes plain values, as `hover` does: a state or a function there is an error.

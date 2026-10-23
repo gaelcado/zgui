@@ -747,6 +747,11 @@ fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
     }
     Ok(mlua::Value::Table(table))
 }
+/// How many values a VM's conversion cache holds.
+pub(crate) fn converted_len(lua: &Lua) -> usize {
+    lua.app_data_ref::<Converted>()
+        .map_or(0, |cache| cache.held.borrow().len())
+}
 /// The value a read-only table converted from a cached value came from.
 fn converted_from(t: &Table, lua: &Lua) -> Option<Value> {
     if !t.is_readonly() {
