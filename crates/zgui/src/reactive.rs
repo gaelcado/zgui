@@ -348,8 +348,8 @@ impl<T: 'static> Signal<T> {
             });
         }
     }
-    /// Whether any effect reads it.
-    pub(crate) fn is_observed(&self) -> bool {
+    /// Whether any effect reads it: for a host dropping data nothing shows.
+    pub fn is_observed(&self) -> bool {
         !self.inner.subscribers.borrow().is_empty()
     }
     /// Whether both handles are the same signal.

@@ -2089,3 +2089,52 @@ fn each_rows_follow_their_items_under_a_key() {
         "only the changed plain row was built again"
     );
 }
+
+#[test]
+fn closed_overlays_in_a_long_list_cost_no_nodes() {
+    // Two hundred rows, each with a menu and a tooltip: closed, their
+    // panels are not built; opening one builds that one alone, and it stays.
+    let script = |rows: usize| {
+        format!(
+            r##"local rows = {{}}
+            for i = 1, {rows} do table.insert(rows, i) end
+            local list = ui.state("rows", rows)
+            local open = ui.state("open", 0)
+            return ui.column {{
+                ui.button {{ id = "open", w = 10, h = 10, on_click = function() open:set(3) end }},
+                ui.button {{ id = "close", w = 10, h = 10, on_click = function() open:set(0) end }},
+                ui.each(list, function(i)
+                    return ui.row {{ h = 20,
+                        ui.text {{ "row " .. i, tooltip = "Row " .. i }},
+                        ui.menu {{
+                            open = ui.computed(function() return open:get() == i end),
+                            anchor = ui.button {{ id = "more-" .. i, w = 10, h = 10 }},
+                            ui.menu_item {{ label = "Rename", id = "rename-" .. i }},
+                            ui.menu_item {{ label = "Archive" }},
+                        }},
+                    }}
+                end),
+            }}"##
+        )
+    };
+    let nodes = |h: &mut common::Harness| {
+        h.ui.prepare_frame();
+        h.ui.scene.borrow().len()
+    };
+    let mut few = common::Harness::inline(&script(20));
+    let mut many = common::Harness::inline(&script(200));
+    let (a, b) = (nodes(&mut few), nodes(&mut many));
+    // Per row: what the row shows, no panel.
+    let per_row = (b - a) as f32 / 180.;
+    assert!(per_row <= 12., "{per_row} nodes a closed row");
+    assert!(
+        many.find("rename-3").is_none(),
+        "nothing inside a closed menu"
+    );
+    many.click("open");
+    let opened = nodes(&mut many);
+    assert!(many.find("rename-3").is_some(), "the opened menu is built");
+    assert!(opened - b < 40, "{} nodes for one menu", opened - b);
+    many.click("close");
+    assert_eq!(nodes(&mut many), opened, "closed again, it is kept");
+}
