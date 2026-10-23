@@ -121,6 +121,96 @@ impl Value {
             .ok()
             .map(|_| crate::node::json_value(json))
     }
+    /// This value, keeping `old`'s own parts wherever they are equal (as
+    /// Solid's `reconcile`): what did not change stays the same `Rc`, so
+    /// comparing, converting for scripts and `ui.each`'s rows skip it at a
+    /// pointer's glance. List items that are tables with an `id` are matched
+    /// by it (a row inserted above keeps the rows below theirs); others by
+    /// position. Equal throughout, it is `old` itself.
+    pub fn reconcile(self, old: &Value) -> Value {
+        fn same(a: &Value, b: &Value) -> bool {
+            match (a, b) {
+                (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
+                (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+                (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b),
+                (a, b) => a == b,
+            }
+        }
+        fn id_of(item: &Value) -> Option<String> {
+            match item.field("id")? {
+                Value::Str(s) => Some(format!("s{s}")),
+                Value::Num(n) => Some(format!("n{n}")),
+                _ => None,
+            }
+        }
+        match (self, old) {
+            (Value::List(new), Value::List(was)) => {
+                if Rc::ptr_eq(&new, was) {
+                    return old.clone();
+                }
+                // By id when every old item has one.
+                let ids: Option<HashMap<String, &Value>> = (was.len() > 1)
+                    .then(|| was.iter().map(|v| id_of(v).map(|id| (id, v))).collect())
+                    .flatten();
+                let mut unchanged = new.len() == was.len();
+                let items: Vec<Value> = new
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let prior = match &ids {
+                            Some(ids) => id_of(item).and_then(|id| ids.get(&id).copied()),
+                            None => was.get(i),
+                        };
+                        let item = match prior {
+                            Some(prior) => item.clone().reconcile(prior),
+                            None => item.clone(),
+                        };
+                        unchanged = unchanged && was.get(i).is_some_and(|w| same(&item, w));
+                        item
+                    })
+                    .collect();
+                if unchanged {
+                    old.clone()
+                } else {
+                    Value::List(items.into())
+                }
+            }
+            (Value::Map(new), Value::Map(was)) => {
+                if Rc::ptr_eq(&new, was) {
+                    return old.clone();
+                }
+                // Both sorted by key: walk them together.
+                let mut unchanged = new.len() == was.len();
+                let mut at = 0;
+                let fields: Vec<(Rc<str>, Value)> = new
+                    .iter()
+                    .map(|(key, value)| {
+                        while at < was.len() && *was[at].0 < **key {
+                            at += 1;
+                        }
+                        match was.get(at) {
+                            Some((k, v)) if *k == *key => {
+                                let value = value.clone().reconcile(v);
+                                unchanged = unchanged && same(&value, v);
+                                (k.clone(), value)
+                            }
+                            _ => {
+                                unchanged = false;
+                                (key.clone(), value.clone())
+                            }
+                        }
+                    })
+                    .collect();
+                if unchanged {
+                    old.clone()
+                } else {
+                    Value::Map(fields.into())
+                }
+            }
+            (new, old) if new == *old => old.clone(),
+            (new, _) => new,
+        }
+    }
     pub fn truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
     }
@@ -367,7 +457,17 @@ pub(crate) fn convert(value: mlua::Value, old: Option<&Value>) -> mlua::Result<V
             Some(Value::Str(o)) if *s.as_bytes() == *o.as_bytes() => Value::Str(o.clone()),
             _ => Value::Str(s.to_string_lossy().into()),
         },
-        mlua::Value::Table(t) => table(&t, old)?,
+        mlua::Value::Table(t) => match t
+            .weak_lua()
+            .try_upgrade()
+            .and_then(|lua| converted_from(&t, &lua))
+        {
+            Some(value) => match old {
+                Some(old) if *old == value => old.clone(),
+                _ => value,
+            },
+            None => table(&t, old)?,
+        },
         mlua::Value::UserData(ud) if ud.is::<State>() => ud.borrow::<State>()?.0.get(),
         // `ui.raw(value, reason)` is its value; only the design lint looks.
         mlua::Value::UserData(ud) if ud.is::<crate::design::RawUd>() => {
@@ -461,6 +561,9 @@ impl FromLua for Value {
 /// As script data: tables are read-only (`frozen`) when they are state's
 /// own, or a mutable copy for `state:update`.
 pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlua::Value> {
+    if matches!(value, Value::List(_) | Value::Map(_)) {
+        CONVERTED.set(CONVERTED.get() + 1);
+    }
     match value {
         Value::Nil => Ok(mlua::Value::Nil),
         Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
@@ -493,20 +596,26 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
 }
 impl IntoLua for Value {
     fn into_lua(self, lua: &Lua) -> mlua::Result<mlua::Value> {
-        if large(&self) {
-            cached(&self, lua)
-        } else {
-            to_lua(&self, lua, true)
-        }
+        shared_lua(&self, lua)
     }
+}
+
+thread_local! {
+    static CONVERTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// How many tables state values have been converted into for scripts on
+/// this thread, ever: for budgets (a delta's work must not grow with what
+/// did not change).
+pub fn tables_converted() -> u64 {
+    CONVERTED.get()
 }
 
 /// Values this large (items and fields, counted all the way down) are
 /// converted once and the read-only table reused while the value stays the
-/// same: a large list read by every computed that needs it costs one
-/// conversion, not one per read. Nested counts too: a small record holding
-/// a long list (a transcript's `{ rows, loading, … }`) is as costly as the
-/// list.
+/// same, and so is every large part of them: a list read by every computed
+/// that needs it costs one conversion, not one per read, and a new list
+/// that keeps most of its rows (a transcript as a turn streams) converts
+/// only the rows that are new.
 const CACHED_FROM: usize = 16;
 fn large(value: &Value) -> bool {
     // Counts down from CACHED_FROM, stopping as soon as it gets there.
@@ -526,17 +635,38 @@ fn large(value: &Value) -> bool {
     }
     matches!(value, Value::List(_) | Value::Map(_)) && count(value, &mut CACHED_FROM.clone())
 }
-/// How many converted values a VM keeps (oldest first out).
-const CACHED_MAX: usize = 64;
-/// A VM's converted values: by the identity of their contents, which the
-/// entry keeps alive (so an address is never reused while cached).
 /// Give a new VM its cache of converted values.
 pub(crate) fn install_cache(lua: &Lua) {
-    lua.set_app_data(Converted::default());
+    let weak = |mode: &str| -> mlua::Result<mlua::RegistryKey> {
+        let t = lua.create_table()?;
+        let meta = lua.create_table()?;
+        meta.raw_set("__mode", mode)?;
+        t.set_metatable(Some(meta))?;
+        lua.create_registry_value(t)
+    };
+    if let (Ok(tables), Ok(ids)) = (weak("v"), weak("k")) {
+        lua.set_app_data(Converted {
+            held: Default::default(),
+            tables,
+            ids,
+            swept: std::cell::Cell::new(0),
+        });
+    }
 }
-#[derive(Default)]
+/// A VM's converted values, by the identity of their contents. `held` keeps
+/// each value alive while it is cached, so an address is never reused for
+/// other contents while a table is filed under it; it lets go of a value
+/// nothing else holds. The tables themselves are held weakly: one the
+/// script no longer holds is collected, and converted again if read again.
 struct Converted {
-    entries: std::cell::RefCell<std::collections::VecDeque<(usize, Value, mlua::RegistryKey)>>,
+    held: std::cell::RefCell<HashMap<usize, Value>>,
+    /// id → table, weak values.
+    tables: mlua::RegistryKey,
+    /// table → id, weak keys: a read-only table given back (a computed
+    /// returning a row it read) is its value again, without a walk.
+    ids: mlua::RegistryKey,
+    /// How many were held after the last sweep.
+    swept: std::cell::Cell<usize>,
 }
 fn identity(value: &Value) -> usize {
     match value {
@@ -545,49 +675,89 @@ fn identity(value: &Value) -> usize {
         _ => 0,
     }
 }
-fn cached(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
-    let id = identity(value);
-    // (The VM registers its cache when it starts: `install_cache`.)
-    if lua.app_data_ref::<Converted>().is_none() {
+fn id_key(id: usize) -> mlua::Value {
+    mlua::Value::LightUserData(mlua::LightUserData(id as *mut std::ffi::c_void))
+}
+/// As script data, read-only, its large parts shared with every other
+/// conversion of them.
+fn shared_lua(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
+    if !large(value) {
         return to_lua(value, lua, true);
     }
-    let hit = lua.app_data_ref::<Converted>().and_then(|cache| {
-        let entries = cache.entries.borrow();
-        entries
-            .iter()
-            .find(|(entry, _, _)| *entry == id)
-            .map(|(_, _, key)| lua.registry_value::<mlua::Value>(key))
-    });
-    if let Some(table) = hit {
-        return table;
-    }
-    let table = to_lua(value, lua, true)?;
-    let key = lua.create_registry_value(table.clone())?;
-    let evicted: Vec<mlua::RegistryKey> = {
-        let cache = lua.app_data_ref::<Converted>().expect("made above");
-        let mut entries = cache.entries.borrow_mut();
-        // A value only the cache still holds was replaced (a state set
-        // anew): nothing can look it up again, so its table goes now
-        // rather than when 64 newer ones push it out. A list of every
-        // process, replaced each sample, would otherwise keep 64 copies.
-        let mut evicted = Vec::new();
-        for entry in std::mem::take(&mut *entries) {
-            if only_cached(&entry.1) {
-                evicted.push(entry.2);
-            } else {
-                entries.push_back(entry);
-            }
-        }
-        entries.push_back((id, value.clone(), key));
-        if entries.len() > CACHED_MAX {
-            evicted.extend(entries.pop_front().map(|(_, _, key)| key));
-        }
-        evicted
+    // (The VM registers its cache when it starts: `install_cache`.)
+    let Some(cache) = lua.app_data_ref::<Converted>() else {
+        return to_lua(value, lua, true);
     };
-    for key in evicted {
-        lua.remove_registry_value(key)?;
+    let id = identity(value);
+    let tables: Table = lua.registry_value(&cache.tables)?;
+    if let mlua::Value::Table(t) = tables.raw_get::<mlua::Value>(id_key(id))? {
+        return Ok(mlua::Value::Table(t));
     }
-    Ok(table)
+    drop(cache);
+    CONVERTED.set(CONVERTED.get() + 1);
+    let table = match value {
+        Value::List(items) => {
+            let table = lua.create_table_with_capacity(items.len(), 0)?;
+            for (i, item) in items.iter().enumerate() {
+                table.raw_set(i + 1, shared_lua(item, lua)?)?;
+            }
+            table
+        }
+        Value::Map(fields) => {
+            let table = lua.create_table_with_capacity(0, fields.len())?;
+            for (key, value) in fields.iter() {
+                table.raw_set(&**key, shared_lua(value, lua)?)?;
+            }
+            table
+        }
+        _ => unreachable!("large values are lists and tables"),
+    };
+    table.set_readonly(true);
+    let cache = lua.app_data_ref::<Converted>().expect("checked above");
+    tables.raw_set(id_key(id), &table)?;
+    let ids: Table = lua.registry_value(&cache.ids)?;
+    ids.raw_set(&table, id_key(id))?;
+    let size = {
+        let mut held = cache.held.borrow_mut();
+        held.insert(id, value.clone());
+        held.len()
+    };
+    // Sweep as the cache doubles: amortized, each conversion pays a little.
+    if size >= (cache.swept.get() * 2).max(256) {
+        let gone: Vec<usize> = {
+            let mut held = cache.held.borrow_mut();
+            let gone: Vec<usize> = held
+                .iter()
+                .filter(|(_, v)| only_cached(v))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &gone {
+                held.remove(id);
+            }
+            cache.swept.set(held.len());
+            gone
+        };
+        for id in gone {
+            // Its address may be reused now: nothing may find it by it.
+            if let mlua::Value::Table(t) = tables.raw_get::<mlua::Value>(id_key(id))? {
+                ids.raw_set(t, mlua::Value::Nil)?;
+            }
+            tables.raw_set(id_key(id), mlua::Value::Nil)?;
+        }
+    }
+    Ok(mlua::Value::Table(table))
+}
+/// The value a read-only table converted from a cached value came from.
+fn converted_from(t: &Table, lua: &Lua) -> Option<Value> {
+    if !t.is_readonly() {
+        return None;
+    }
+    let cache = lua.app_data_ref::<Converted>()?;
+    let ids: Table = lua.registry_value(&cache.ids).ok()?;
+    let mlua::Value::LightUserData(id) = ids.raw_get::<mlua::Value>(t).ok()? else {
+        return None;
+    };
+    cache.held.borrow().get(&(id.0 as usize)).cloned()
 }
 /// Whether the cache holds the only reference to `value`'s contents.
 fn only_cached(value: &Value) -> bool {
@@ -631,6 +801,36 @@ fn path_of(value: mlua::Value) -> mlua::Result<Vec<PathKey>> {
             Ok(path)
         }
         other => Ok(vec![step(other)?]),
+    }
+}
+
+/// Shared state (`ui.shared`) as Rust holds it: a signal whose `set`
+/// reconciles (`Value::reconcile`), so a model republished whole keeps the
+/// parts that did not change, and what reads them does no work for them.
+/// It derefs to the signal for reading (`get`, `with`) and observing.
+#[derive(Clone)]
+pub struct Shared(pub(crate) Signal<Value>);
+impl Shared {
+    /// Sets the value, keeping the current one's parts where they are
+    /// equal; whether anything changed.
+    pub fn set(&self, value: Value) -> bool {
+        let next = self.0.with_untracked(|old| value.reconcile(old));
+        self.0.set(next)
+    }
+    /// The signal itself (its `set` replaces without reconciling).
+    pub fn signal(&self) -> Signal<Value> {
+        self.0.clone()
+    }
+}
+impl std::ops::Deref for Shared {
+    type Target = Signal<Value>;
+    fn deref(&self) -> &Signal<Value> {
+        &self.0
+    }
+}
+impl From<Shared> for Signal<Value> {
+    fn from(shared: Shared) -> Self {
+        shared.0
     }
 }
 

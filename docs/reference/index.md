@@ -5,7 +5,7 @@ One page per element and API group of [zgui-script](../scripting.md). Each gives
 | Page | |
 | --- | --- |
 | [Containers](containers.md) | `column`, `row`, `div`, `overlay`, `grid` |
-| [Text](text.md) | `text`, `rich`, `span` |
+| [Text](text.md) | `text`, `rich`, `span`, `markdown` |
 | [Controls](controls.md) | `button`, `input`, `textarea`, `checkbox`, `slider`, `progress` |
 | [Images and canvas](media.md) | `image`, `svg`, `canvas`, `path`, `linear`, `bitmap`, `shader` |
 | [Scrolling](scrolling.md) | `scroll`, `scroll_x`, `list` |

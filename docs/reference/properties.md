@@ -94,7 +94,7 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | --- | --- | --- | --- |
 | `bg_image` | `string` | | a PNG or JPEG path (relative to the script), state or function: drawn over `bg`, under the border and children, cut by the corners |
 | `bg_fit` | `"cover" \| "contain" \| "fill" \| "none" \| "scale_down"` | `"cover"` | a literal only |
-| `mask` | `Bitmap \| { bitmap, w, h, x, y }` | | the content shows through `ui.bitmap`'s alpha, drawn at `w`×`h` (the bitmap's size) from (`x`, `y`); animate `maskX`, `maskY` |
+| `mask` | `Bitmap \| { bitmap, w, h, x, y, sweep }` | | the content shows through `ui.bitmap`'s alpha, drawn at `w`×`h` (the bitmap's size) from (`x`, `y`); animate `maskX`, `maskY`, or `sweep = { x, y, duration, frame_rate }` to have the engine move it by (`x`, `y`) every `duration` ms, over and over, with no script per step |
 | `bg_shader` | `Shader` | | `ui.shader(wgsl, { fps })` fills the box per pixel (see [Images and canvas](media.md)) |
 | `shader_params` | `{ Color \| { number } }` | zeros | up to four vec4s: colors (0 to 1) or lists of numbers; animate `shaderTime`, `shaderParam0` to `shaderParam15` |
 | `clip_inset` | `Sides` | | paints only inside the box shrunk by `{ top, right, bottom, left }` (CSS `clip-path: inset()`); animate `clipTop`, `clipRight`, `clipBottom`, `clipLeft` |

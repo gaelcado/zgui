@@ -955,6 +955,9 @@ struct LayerPresent {
     /// Frames come at the display's full rate (`GpuRenderer::set_full_rate`):
     /// a third surface is kept for them, and the layer queues them.
     full_rate: bool,
+    /// Since full-rate frames stopped, until when the video layer stays
+    /// (`VIDEO_LINGER`); `None` while they come, or once it went.
+    video_until: Option<std::time::Instant>,
     /// When the window last changed size. Frames show on the plain layer
     /// until `RESIZE_SETTLE` after it (`Layer::show_plain`).
     resized_at: Option<std::time::Instant>,
@@ -1006,6 +1009,9 @@ const LAYER_HISTORY: usize = 8;
 /// resize's frames land with its window sizes before queueing resumes.
 #[cfg(target_os = "macos")]
 const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long the video layer outlasts full-rate frames (`LayerPresent::video_until`).
+#[cfg(target_os = "macos")]
+const VIDEO_LINGER: std::time::Duration = std::time::Duration::from_secs(1);
 /// A pass's pipelines for each shading, and the one clearing a region.
 struct PickedPipelines {
     full: wgpu::RenderPipeline,
@@ -5342,6 +5348,15 @@ impl GpuRenderer {
             .resized_at
             .is_some_and(|at| at.elapsed() < RESIZE_SETTLE)
             || present.plain_only
+            // Slower frames than the display's (a 30 fps shimmer, a clock)
+            // are a plain layer's contents: the video layer queues frames
+            // on threads of its own, a cost worth paying only for a full
+            // rate. It stays a second after one, so a pause in a scroll
+            // does not drop and rebuild it.
+            || (!present.full_rate
+                && present
+                    .video_until
+                    .is_none_or(|until| std::time::Instant::now() >= until))
             || present.with_natives
             || present
                 .plain_until
@@ -5392,6 +5407,11 @@ impl GpuRenderer {
     pub fn set_full_rate(&mut self, #[allow(unused)] full: bool) {
         #[cfg(target_os = "macos")]
         if let Some(present) = &mut self.layer_present {
+            if present.full_rate && !full {
+                present.video_until = Some(std::time::Instant::now() + VIDEO_LINGER);
+            } else if full {
+                present.video_until = None;
+            }
             present.full_rate = full;
         }
     }

@@ -82,12 +82,22 @@ pub(crate) enum ThemeSpec {
     State(Signal<Value>),
     Computed(Function),
 }
-/// An alpha mask over a node's content; the offset animates (`maskX`).
+/// An alpha mask over a node's content; the offset animates (`maskX`), or
+/// sweeps on its own (`sweep`).
 #[derive(Clone)]
 pub(crate) struct Mask {
     pub image: Arc<zgui::image::ImageData>,
     pub size: (f32, f32),
     pub offset: (f32, f32),
+    pub sweep: Option<Sweep>,
+}
+/// A mask moving `by` from its offset every `period`, over and over, at
+/// `rate` steps a second at most (`NodeHandle::sweep_mask`).
+#[derive(Clone)]
+pub(crate) struct Sweep {
+    pub by: (f32, f32),
+    pub period: std::time::Duration,
+    pub rate: f64,
 }
 /// A web view's page, controller and handlers.
 pub(crate) struct WebSpec {
@@ -455,6 +465,8 @@ impl Node {
             // An icon's tint may be a theme token: it reads the scope.
             || matches!(self.kind, Kind::Svg { .. })
                 && self.props.iter().any(|(p, _)| *p == Prop::Tint)
+            // A sweeping mask runs on the component's frame clock.
+            || self.mask.as_ref().is_some_and(|m| m.sweep.is_some())
     }
     /// The element kind selectors match (`button`, `text`…).
     pub fn tag(&self) -> &'static str {
@@ -1698,10 +1710,33 @@ fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Result<Node> 
                     get("h", bitmap.height() as f32)?,
                 );
                 let offset = (get("x", 0.)?, get("y", 0.)?);
+                let sweep = match &t {
+                    Some(t) => match t.get::<Option<mlua::Table>>("sweep")? {
+                        Some(sweep) => {
+                            let num = |key: &str, default: f64| -> mlua::Result<f64> {
+                                Ok(sweep.get::<Option<f64>>(key)?.unwrap_or(default))
+                            };
+                            let ms = num("duration", 2000.)?;
+                            if !(ms.is_finite() && ms > 0.) {
+                                return Err(mlua::Error::runtime(
+                                    "a mask's `sweep` takes a duration in milliseconds above 0",
+                                ));
+                            }
+                            Some(Sweep {
+                                by: (num("x", 0.)? as f32, num("y", 0.)? as f32),
+                                period: std::time::Duration::from_secs_f64(ms / 1000.),
+                                rate: num("frame_rate", 60.)?,
+                            })
+                        }
+                        None => None,
+                    },
+                    None => None,
+                };
                 node.mask = Some(Mask {
                     image: bitmap,
                     size,
                     offset,
+                    sweep,
                 });
             }
             "layout_id" => node.layout_id = Some(lua.unpack::<String>(value)?.into()),
@@ -2754,6 +2789,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     ui.set("variants", lua.create_function(crate::variants::define)?)?;
     ui.set("raw", lua.create_function(crate::design::raw)?)?;
+    ui.set("markdown", lua.create_function(crate::markdown::script)?)?;
     ui.set(
         "on_mount",
         lua.create_function(|lua, f: Function| {

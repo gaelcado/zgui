@@ -215,7 +215,7 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, vm: &Rc<Vm>, low: &Rc<Lower
     let open = low.runtime.signal(false);
     let shown = std::rc::Rc::new(std::cell::Cell::new(false));
     let timers = crate::node::env(&vm.lua).ok().map(|env| env.timers.clone());
-    // Its fade (Capy's: in over 140 ms, out over 100, both easing out; none
+    // Its fade (in over 140 ms, out over 100, both easing out; none
     // when it takes over from another at once).
     let fade = low.runtime.signal(0_f32);
     let fading: Rc<std::cell::RefCell<Option<crate::timers::Stop>>> = Rc::default();
@@ -522,6 +522,17 @@ fn with_slot(lua: &mlua::Lua, props: &mlua::Table, context: &Value) -> mlua::Res
     Ok(copy)
 }
 
+/// A row of a `ui.each` as the key pass last saw it.
+struct EachRow {
+    /// Its item, to tell when it changed (rows built again then).
+    last: Value,
+    /// Bumped when the item changes: a new identity, so a new row.
+    generation: u64,
+    /// A live row's item, as the state its builder was given.
+    item: Option<Signal<Value>>,
+    /// Seen in this pass.
+    seen: bool,
+}
 pub(crate) fn build_scoped(
     vm: &Rc<Vm>,
     cx: &mut Context,
@@ -909,19 +920,28 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             motion: None,
         } => {
             // Rows are keyed by the script's `key` (they keep their state as
-            // the list reorders), else by position and value. The key pass
-            // notes each row's index for the build that follows it.
-            let indices: Rc<std::cell::RefCell<HashMap<String, usize>>> = Rc::default();
+            // the list reorders), else by position. A row whose item changes
+            // under its key is built again, unless its builder takes a third
+            // parameter: then it gets its item as state, kept current, and
+            // updates in place (a streaming message's row, its text growing).
+            // The key pass notes each row's index for the build that follows.
+            let live = builder.info().num_params >= 3;
+            let rows: Rc<std::cell::RefCell<HashMap<String, EachRow>>> = Rc::default();
+            let noted: Rc<std::cell::RefCell<HashMap<String, (usize, String)>>> = Rc::default();
             let (keys_from, items) = (items.clone(), items.clone());
-            let (key_fn, key_vm, noted) = (key.clone(), vm.clone(), indices.clone());
+            let (key_fn, key_vm) = (key.clone(), vm.clone());
+            let (rows_in_keys, noted_in_keys) = (rows.clone(), noted.clone());
+            let runtime = vm.runtime.clone();
             let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
             keyed(
                 move || {
                     keys_from.with(|list| {
-                        let mut noted = noted.borrow_mut();
+                        let mut noted = noted_in_keys.borrow_mut();
                         noted.clear();
+                        let mut rows = rows_in_keys.borrow_mut();
                         let mut seen: HashMap<String, usize> = HashMap::new();
-                        list.list()
+                        let identities = list
+                            .list()
                             .iter()
                             .enumerate()
                             .map(|(i, item)| {
@@ -933,22 +953,73 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                                         },
                                         |k| k.to_string(),
                                     ),
-                                    None => format!("{i}:{item:?}"),
+                                    None => i.to_string(),
                                 };
                                 let n = seen.entry(base.clone()).or_default();
                                 *n += 1;
-                                let identity = format!("{base}#{n}");
-                                noted.insert(identity.clone(), i);
+                                let row = format!("{base}#{n}");
+                                let identity = match rows.get_mut(&row) {
+                                    Some(state) if live => {
+                                        state.seen = true;
+                                        if let Some(signal) = &state.item {
+                                            let item = item.clone();
+                                            let signal = signal.clone();
+                                            runtime.untracked(|| signal.set(item));
+                                        }
+                                        row.clone()
+                                    }
+                                    Some(state) => {
+                                        state.seen = true;
+                                        if state.last != *item {
+                                            state.last = item.clone();
+                                            state.generation += 1;
+                                        }
+                                        format!("{row}@{}", state.generation)
+                                    }
+                                    None => {
+                                        rows.insert(
+                                            row.clone(),
+                                            EachRow {
+                                                last: item.clone(),
+                                                generation: 0,
+                                                item: None,
+                                                seen: true,
+                                            },
+                                        );
+                                        if live {
+                                            row.clone()
+                                        } else {
+                                            format!("{row}@0")
+                                        }
+                                    }
+                                };
+                                noted.insert(identity.clone(), (i, row));
                                 identity
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        // Rows gone from the list go from here too.
+                        rows.retain(|_, state| std::mem::take(&mut state.seen));
+                        identities
                     })
                 },
                 move |identity, cx| {
-                    let index = indices.borrow().get(&identity).copied().unwrap_or(0);
+                    let (index, row) = noted.borrow().get(&identity).cloned().unwrap_or_default();
                     let item = items
                         .with_untracked(|list| list.list().get(index).cloned().unwrap_or_default());
-                    build_scoped(&vm, cx, &low, &builder, (item, index + 1))
+                    if !live {
+                        return build_scoped(&vm, cx, &low, &builder, (item, index + 1));
+                    }
+                    let signal = vm.runtime.signal(item.clone());
+                    if let Some(state) = rows.borrow_mut().get_mut(&row) {
+                        state.item = Some(signal.clone());
+                    }
+                    build_scoped(
+                        &vm,
+                        cx,
+                        &low,
+                        &builder,
+                        (item, index + 1, crate::value::State(signal)),
+                    )
                 },
             )
         }
@@ -1105,6 +1176,14 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
         view = view
             .mask(mask.image.clone(), mask.size)
             .mask_offset(mask.offset.0, mask.offset.1);
+        // The engine moves a sweeping mask itself, frame by frame.
+        if let Some(sweep) = mask.sweep.clone() {
+            let cx = need(&mut cx);
+            let (tasks, frames) = (cx.tasks(), cx.frames());
+            view = view.on_mount(move |mounted| {
+                tasks.spawn(mounted.sweep_mask(frames.clone(), sweep.by, sweep.period, sweep.rate));
+            });
+        }
     }
     if !node.children.is_empty() {
         let flow = flow(node);
@@ -1446,13 +1525,12 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                     vm.report(e);
                 }
             }
-            if let (Some(f), Some(bounds)) = (resize.clone(), mounted.observe_bounds()) {
+            if let (Some(f), Some(sizes)) = (resize.clone(), mounted.observe_size()) {
                 // Size changes only: moving does not report.
                 let (vm, element, runtime) = (vm.clone(), element.clone(), vm.runtime.clone());
                 let last = std::cell::Cell::new(None::<(f32, f32)>);
                 let effect = runtime.effect(move || {
-                    let b = bounds.get();
-                    let size = (b.width, b.height);
+                    let size = sizes.get();
                     // Nothing to report before the first layout.
                     if last.get().is_none() && size == (0., 0.) {
                         return;
@@ -1460,10 +1538,11 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                     if last.replace(Some(size)) == Some(size) {
                         return;
                     }
+                    let (w, h) = size;
                     let call = || -> mlua::Result<()> {
                         let size = vm.lua.create_table()?;
-                        size.set("w", b.width)?;
-                        size.set("h", b.height)?;
+                        size.set("w", w)?;
+                        size.set("h", h)?;
                         let el = vm.lua.create_userdata(ElementUd(element.clone()))?;
                         vm.call::<()>(&f, (size, el))
                     };
@@ -1480,7 +1559,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 // back into the layout that reported it.
                 let timers = crate::node::env(&vm.lua).ok().map(|env| env.timers.clone());
                 let (vm, element, runtime) = (vm.clone(), element.clone(), vm.runtime.clone());
-                let bounds = mounted.observe_bounds();
+                let sizes = mounted.observe_size();
                 let latest = Rc::new(std::cell::Cell::new(None::<bool>));
                 let told = Rc::new(std::cell::Cell::new(None::<bool>));
                 let pending: Rc<std::cell::RefCell<Option<crate::timers::Stop>>> = Rc::default();
@@ -1505,10 +1584,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
                 let effect = runtime.effect(move || {
                     let on = shown.get();
                     // Nothing to report before the first layout.
-                    if latest.get().is_none()
-                        && bounds
-                            .as_ref()
-                            .is_some_and(|b| b.get().width == 0. && b.get().height == 0.)
+                    if latest.get().is_none() && sizes.as_ref().is_some_and(|s| s.get() == (0., 0.))
                     {
                         return;
                     }
@@ -1669,14 +1745,13 @@ fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>)
         .app_data_ref::<crate::node::Env>()
         .map(|env| env.engine.clone());
     let inner = inner.on_mount(move |handle| {
-        let (Some(bounds), Some(engine)) = (handle.observe_bounds(), engine) else {
+        let (Some(sizes), Some(engine)) = (handle.observe_size(), engine) else {
             return;
         };
         let last: std::cell::Cell<Option<(f32, f32)>> = Default::default();
         let runtime = engine.runtime.clone();
         let effect = runtime.effect(move || {
-            let b = bounds.get();
-            let size = (b.width, b.height);
+            let size = sizes.get();
             if size.0 <= 0. && size.1 <= 0. && last.get().is_none() {
                 return;
             }

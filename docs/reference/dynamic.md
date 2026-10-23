@@ -5,7 +5,7 @@ Parts of the tree that follow state. A script describes its tree once; these fun
 ```luau
 ui.show(cond: boolean | Readable<unknown> | (() -> unknown), node: Node, otherwise: Node?) -> Node
 ui.switch(value: string | Readable<unknown> | (() -> unknown), cases: { [CaseKey]: Node }, default: Node?) -> Node
-ui.each(list: State<{ any }>, build: (item: any, index: number) -> Node, opts: EachOptions?) -> Node
+ui.each(list: State<{ any }>, build: (item: any, index: number, row: State<any>) -> Node, opts: EachOptions?) -> Node
 ui.presence(value: string | Readable<unknown> | (() -> unknown), build: (value: any) -> Node, opts: PresenceOptions?) -> Node
 ```
 
@@ -13,7 +13,7 @@ ui.presence(value: string | Readable<unknown> | (() -> unknown), build: (value: 
 | --- | --- |
 | `show` | `node` while `cond` is truthy (a state, a function of state, or a boolean), else `otherwise` or nothing |
 | `switch` | the case whose key equals `value` (or its text: a case `[1]` matches `"1"`), else `default` or nothing |
-| `each` | `build(item, index)` for each item of a list state, `index` from 1; rows that come, go and move can animate |
+| `each` | `build(item, index)` for each item of a list state, `index` from 1; a row whose item changes is built again, or, if `build` takes a third parameter, gets its item as state and updates in place; rows that come, go and move can animate |
 | `presence` | what `build(value)` makes of the current value; when it changes, the old content leaves (playing `exit`) while the new enters (`enter`). `nil` shows nothing |
 
 `show` and `switch` build the node they show when it appears, from the node you gave: the nodes are descriptions, so state they create inside a component is fresh each time. `each` rows and `presence` content are built by your function, which owns what it creates (`ui.computed`, `ui.effect`, `ui.use_state`): they end when the row or content goes.
@@ -24,7 +24,7 @@ ui.presence(value: string | Readable<unknown> | (() -> unknown), build: (value: 
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
-| `key` (`each`) | `(item: any) -> string \| number` | position and value | a row's identity: rows with the same key keep their state, element and place when the list reorders |
+| `key` (`each`) | `(item: any) -> string \| number` | position | a row's identity: rows with the same key keep their state, element and place when the list reorders |
 | `animate` (`each`) | `boolean \| Easing \| { duration: number?, ease: Easing?, bounce: number?, spring: AnimeEase? }` | off | rows the list moves slide from where they were: `true` is a spring (bounce .1, 400 ms); an ease name or `{ duration, ease }` (350 ms unless given); `{ bounce, duration }` a spring of that bounce; `{ spring = anime.spring { … } }` |
 | `enter` | `ElementParams` | none | anime.js parameters played on what appears (`{ opacity = { 0, 1 }, duration = 200 }`) |
 | `exit` | `ElementParams` | none | played on what leaves; it leaves the flow where it was, as large as it was, and unmounts when the animation completes |
@@ -118,4 +118,5 @@ return ui.column {
 - `presence` keeps content while its value stays equal: a new value builds new content, the same value does not rebuild it.
 - A `presence` box showing nothing is not there for the pointer: a sheet's full-window box (`absolute`, every inset 0) put away leaves presses, drops and the terminals and pages under it alone. Showing content, the box is the content's.
 - `show`, `switch` and `presence` lay out as what they show, as if it stood in their place: its `grow`, `self`, percentages and absolute insets reach the parent. `each` (and `slot`) is a box of its own that lays its rows out as its parent would (a row's `direction`, `gap`, `items`, `justify` and wrapping), stretched across a column. An absolutely positioned row positions against the nearest `relative` ancestor, which `each`'s box is not: mark the one you mean.
+- A row stays while its key does. When its item changes, a two-parameter `build` runs again for that row (the others stay as they are); a `build` taking a third parameter, `function(item, i, row)`, runs once and gets `row`, a state that follows the item, so the row's own computeds, functions and nested `each` update in place: a reply streaming into a transcript grows by its last block, not by building the reply again. With the host keeping what did not change ([`Shared`](state.md#shared-state-from-rust)), a list of a thousand rows that changes in one costs one row's work.
 - `each`'s row function gets the item as `any`: annotate it (`function(task: Task, i)`) to have it checked ([why](index.md#checking)).

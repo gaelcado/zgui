@@ -3622,6 +3622,16 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_bounds(self.node))
     }
+    /// The node's laid-out size (its border box), republished after each
+    /// layout that changes it: for what depends on a size alone (a
+    /// ResizeObserver), at no cost when only something above it moves.
+    pub fn observe_size(&self) -> Option<Signal<(f32, f32)>> {
+        let ui = self.ui.upgrade()?;
+        ui.scene
+            .borrow()
+            .contains(self.node)
+            .then(|| ui.observe_size(self.node))
+    }
     /// Whether any of the node shows (inside every clip and viewport above
     /// it), republished after each frame's layout: for building what only
     /// matters on screen.
@@ -3631,6 +3641,51 @@ impl NodeHandle {
             .borrow()
             .contains(self.node)
             .then(|| ui.observe_visibility(self.node))
+    }
+    /// Sweep the node's mask (`Styled::mask`) from where its style puts it
+    /// by `by`, over and over every `period`, at `max_rate` steps a second
+    /// at most (a text shimmer's bright band). The scene moves the mask
+    /// itself on the window's frame clock: no style pass, layout or script
+    /// runs, and only the masked node composites again. While none of the
+    /// node shows it steps 4 times a second; it ends when the node goes.
+    /// Spawn it from the component's tasks.
+    pub fn sweep_mask(
+        &self,
+        frames: crate::frame::FrameClock,
+        by: (f32, f32),
+        period: std::time::Duration,
+        max_rate: f64,
+    ) -> impl std::future::Future<Output = ()> + 'static {
+        let (ui, node) = (self.ui.clone(), self.node);
+        async move {
+            let period = period.as_secs_f64().max(1e-3);
+            let start = frames.next().max_rate(max_rate).await.time;
+            let mut from = None;
+            let mut shown = true;
+            loop {
+                let frame = frames
+                    .next()
+                    // Unseen, it only looks for showing again.
+                    .max_rate(if shown { max_rate } else { 4. })
+                    .await;
+                let Some(ui) = ui.upgrade() else { return };
+                let mut scene = ui.scene.borrow_mut();
+                if !scene.contains(node) {
+                    return;
+                }
+                shown = scene.visible_bounds(node).is_some();
+                let Some(mut mask) = scene.mask(node).cloned() else {
+                    continue;
+                };
+                // The style's offset is where each sweep starts; a restyle
+                // puts it back there.
+                let origin = *from.get_or_insert(mask.offset);
+                let t =
+                    (frame.time.saturating_duration_since(start).as_secs_f64() % period) / period;
+                mask.offset = (origin.0 + by.0 * t as f32, origin.1 + by.1 * t as f32);
+                scene.set_mask(node, Some(mask));
+            }
+        }
     }
     /// Run `f` once after the next frame's layout, before that frame is
     /// drawn, whether or not anything moved: for reading where a change just

@@ -1,4 +1,4 @@
-# Text: text, rich, span
+# Text: text, rich, span, markdown
 
 `ui.text` shows one string in one style; `ui.rich` shows runs of differently styled text (`ui.span`s) as one paragraph. Both follow state without calling the script when their text is a template, and call it again only for a function.
 
@@ -101,6 +101,52 @@ return ui.column {
 		" ",
 		ui.span { "({count} so far)", color = "#5ea5ff", underline = true, on_click = ui.add(count) },
 	},
+}
+```
+
+## Markdown
+
+```luau
+ui.markdown(text: string, opts: MarkdownOptions?) -> { MarkdownBlock }
+```
+
+`ui.markdown` parses markdown (CommonMark with tables, strikethrough and task lists; raw HTML dropped) into blocks for a script to draw its own way. A block has `t`: `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`), `ul` and `ol` (`start`, `items`: each item a list of blocks), `quote` (`b`: blocks), `hr`, `table` (`head`: cells, `rows`: rows of cells, a cell being runs) and `img` (`src`, `alt`). A tight list item's text is a `p` with `tight`. A run is `{ x = text, b?, i?, c? (code), s? (strike), a? (link), f? (a file) }`.
+
+| Option | Type | Default | |
+|---|---|---|---|
+| `key` | `string` | none | names a text that grows (a reply streaming in): each call parses only its new end, and its earlier blocks are the very tables of the last call, so a `ui.each` over them builds only the blocks that changed. A marker left open at the end (`**bold`, a link's address half there) shows closed until the closer arrives, so the text does not restyle and reflow when it does; such a link's `a` is `"zgui:pending-link"` (style it, but it goes nowhere yet) |
+| `breaks` | `boolean` | `false` | single newlines break lines, as people's messages show them |
+| `paths` | `boolean` | `false` | repository paths (`src/main.rs:12`), code spans that are a path whole and relative links that read as one are files: runs with `f` |
+
+Without a `key`, the same text gives the same blocks. Rust hosts parse with `zgui_script::markdown::parse` and stream with `zgui_script::markdown::Incremental`, which take a code block hook too (coloured lines, say).
+
+```lua
+local reply = ui.state("reply", "A **streaming** reply.\n\n- one\n- two")
+
+local function runs(list: { any }): Node
+	local props: RichProps = { wrap = true }
+	for _, r in list do
+		table.insert(props, ui.span { r.x, literal = true, weight = if r.b then 600 else nil })
+	end
+	return ui.rich(props)
+end
+
+local blocks = ui.computed(function()
+	return ui.markdown(reply:get(), { key = "reply" })
+end)
+
+return ui.column {
+	gap = 8,
+	ui.each(blocks, function(b: MarkdownBlock)
+		if b.t == "ul" then
+			local items: { Child } = {}
+			for _, item in b.items do
+				table.insert(items, runs(item[1].s))
+			end
+			return ui.column { gap = 4, items }
+		end
+		return runs(b.s or {})
+	end),
 }
 ```
 

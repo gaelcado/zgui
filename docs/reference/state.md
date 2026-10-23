@@ -36,12 +36,16 @@ ui.write_file(file: File | string, text: string) -> Promise
 | Function | Kept by | |
 | --- | --- | --- |
 | `ui.state(key, initial)` | the script (or module) and `key` | private to the script; a reload gets the same state back, `initial` only counts the first time |
-| `ui.shared(key, initial)` | `key`, for the whole host | shared with Rust (`ScriptHost::shared`) and every script and plugin |
+| `ui.shared(key, initial)` | `key`, for the whole host | shared with Rust (`ScriptHost::shared`, see below) and every script and plugin |
 | `ui.persist(key, initial)` | the script (or module) and `key`, on disk | as `ui.state`, and saved for the next run: each key a JSON file in the host's storage (`ScriptHost::app_id` or `storage`), written within 250 ms of a change, off the main thread. Without storage it lasts until the app quits, with a warning |
 | `ui.use_state(initial)` | the component instance | a new state per instance; only inside a component's function (or an `each` row, `presence` content, a `list` row) |
 | `ui.computed(f)` | what built it | derived: `f` runs now and again when what it reads changes; its value is the state's |
 
 State holds `nil`, booleans, numbers, strings, lists, string-keyed tables and elements (`state:set(el)`; Rust sees `Value::Element`, `null` as JSON). Not functions, not refs (keep the ref itself, or store `ref:get()`), and not a table that is both a list and has string keys.
+
+### Shared state from Rust
+
+`ScriptHost::shared(key, initial)` gives Rust a `Shared`: read it as the signal it derefs to, and publish with `set`, which reconciles: the new value keeps the current one's parts wherever they are equal (list items that are tables with an `id` are matched by it, others by position), so a model rebuilt and republished whole on every change (a transcript as a reply streams) is the same value everywhere it did not change. Equal throughout, nothing is notified. Scripts get the same read-only tables for the parts that stayed, converted once (large values are converted in parts and kept while the value lives), `ui.each` skips their rows at a pointer's glance, and a table read from state and written back is its value again without a walk. `Shared::signal()` is the plain signal, whose `set` replaces without reconciling.
 
 The type is the initial value's: `ui.state("count", 0)` is a `State<number>`. Give `nil` and empty tables a type:
 

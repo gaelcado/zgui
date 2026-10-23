@@ -36,6 +36,7 @@ mod element;
 mod file_events;
 mod io;
 mod lower;
+pub mod markdown;
 mod motion;
 mod node;
 mod persist;
@@ -52,7 +53,7 @@ pub use calls::{Request, Response};
 pub use command::Command;
 pub use design::DesignLint;
 pub use persist::app_data_dir;
-pub use value::{ElementHandle, PathKey, Store, Value};
+pub use value::{ElementHandle, PathKey, Shared, Store, Value, tables_converted};
 
 use mlua::{Lua, VmState};
 use std::{
@@ -1010,8 +1011,11 @@ impl ScriptHost {
     }
     /// State shared by the application and every script (`ui.shared`). Rust
     /// can publish model data here and observe what scripts write.
-    pub fn shared(&self, key: &str, initial: impl Into<Value>) -> Signal<Value> {
-        self.0.shared.state(key, initial.into())
+    /// Its `set` keeps the parts of the value that did not change (see
+    /// [`Shared`]): publish a whole model each time, and only what changed
+    /// costs anything.
+    pub fn shared(&self, key: &str, initial: impl Into<Value>) -> Shared {
+        Shared(self.0.shared.state(key, initial.into()))
     }
     /// The app commands scripts declare (`ui.command`), in declaration
     /// order, as of the last successful load: show them as menu items.
@@ -1684,6 +1688,7 @@ impl ScriptHost {
             .or_insert_with(|| Rc::new(Store::new(&self.0.runtime)))
             .clone();
         value::install_cache(&lua);
+        markdown::install(&lua);
         lua.set_app_data(node::Env {
             vm: Rc::downgrade(&vm),
             store,

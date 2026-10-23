@@ -2049,3 +2049,42 @@ return ui.textarea {{ id = "code", value = text, line_numbers = true, w = 300, h
     };
     assert!(text_x > editor.x + 30., "{text_x} vs {editor:?}");
 }
+
+#[test]
+fn each_rows_follow_their_items_under_a_key() {
+    // Keyed rows: a builder taking two parameters is built again when its
+    // item changes; one taking the row as state (a third) updates in place.
+    let mut h = common::Harness::inline(
+        r##"local items = ui.state("items", { { id = "a", text = "one" }, { id = "b", text = "two" } })
+        local builds = ui.state("builds", 0)
+        local live_builds = ui.state("live_builds", 0)
+        local function key(it) return it.id end
+        return ui.column {
+            ui.each(items, function(it)
+                builds:set(builds:peek() + 1)
+                return ui.text { id = "plain-" .. it.id, it.text, literal = true }
+            end, { key = key }),
+            ui.each(items, function(it, _, row)
+                live_builds:set(live_builds:peek() + 1)
+                return ui.text { id = "live-" .. it.id, function() return row:get().text end }
+            end, { key = key }),
+            ui.text { id = "counts", "{builds} {live_builds}" },
+            ui.button { id = "edit", w = 10, h = 10, on_click = function()
+                items:set_key({ 2, "text" }, "TWO")
+            end },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    h.settle();
+    assert_eq!(h.text("counts"), "2 2");
+    h.click("edit");
+    h.ui.prepare_frame();
+    h.settle();
+    assert_eq!(h.text("plain-b"), "TWO", "the changed row is built again");
+    assert_eq!(h.text("live-b"), "TWO", "the live row follows its item");
+    assert_eq!(
+        h.text("counts"),
+        "3 2",
+        "only the changed plain row was built again"
+    );
+}

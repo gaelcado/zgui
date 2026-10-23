@@ -125,6 +125,81 @@ fn updates_share_what_they_do_not_touch() {
 }
 
 #[test]
+fn republished_values_keep_what_did_not_change_and_its_tables() {
+    // A model Rust publishes whole each time (a transcript as a turn
+    // streams): the rows that did not change stay the same values, and
+    // scripts get the same tables for them, converted once.
+    let mut h = Harness::new(|runtime| {
+        ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local doc = ui.shared("doc", nil)
+            local picked = ui.shared("picked", nil)
+            local seen = ui.state("seen", "")
+            local prev = nil
+            ui.effect(function()
+                local d = doc:get()
+                if d == nil then return end
+                local row
+                for _, r in d.rows do
+                    if r.id == "b" then row = r end
+                end
+                local word = if prev == nil then "new" elseif rawequal(prev, row) then "same" else "changed"
+                seen:set(seen:peek() .. word .. " ")
+                prev = row
+                -- A row read is its value again, written back.
+                picked:set(row)
+            end)
+            return ui.text { id = "seen", "{seen}" }"#,
+        )
+    });
+    let row = |id: &str, text: &str| {
+        // Large enough to be converted once and kept (16 values deep).
+        let words: Vec<Value> = (0..16)
+            .map(|i| Value::from(format!("{text}{i}").as_str()))
+            .collect();
+        Value::Map(
+            [
+                ("id".into(), Value::from(id)),
+                ("words".into(), Value::List(words.into())),
+            ]
+            .into(),
+        )
+    };
+    let doc_of = |rows: Vec<Value>| Value::Map([("rows".into(), Value::List(rows.into()))].into());
+    let doc = h.host.shared("doc", Value::Nil);
+    let picked = h.host.shared("picked", Value::Nil);
+    let rows_of = |v: &Value| v.field("rows").unwrap().list().to_vec();
+    let ptr = |v: &Value| match v {
+        Value::Map(m) => Rc::as_ptr(m) as *const u8 as usize,
+        _ => 0,
+    };
+    doc.set(doc_of(vec![row("a", "x"), row("b", "y")]));
+    h.settle();
+    let first = rows_of(&doc.with_untracked(Clone::clone));
+    // All new values, equal to the old: nothing changes at all.
+    assert!(!doc.set(doc_of(vec![row("a", "x"), row("b", "y")])));
+    // A row inserted above: `b` is matched by its id and kept.
+    doc.set(doc_of(vec![row("z", "w"), row("a", "x"), row("b", "y")]));
+    h.settle();
+    let second = rows_of(&doc.with_untracked(Clone::clone));
+    assert_eq!(ptr(&second[1]), ptr(&first[0]), "`a` kept");
+    assert_eq!(ptr(&second[2]), ptr(&first[1]), "`b` kept");
+    assert_eq!(
+        ptr(&picked.with_untracked(Clone::clone)),
+        ptr(&first[1]),
+        "the table read is `b` again"
+    );
+    doc.set(doc_of(vec![
+        row("z", "w"),
+        row("a", "x"),
+        row("b", "changed"),
+    ]));
+    h.settle();
+    assert_eq!(h.text("seen"), "new same changed ");
+}
+
+#[test]
 fn state_values_are_read_only_and_say_how_to_change_them() {
     let h = Harness::inline(
         r#"local doc = ui.state("doc", { a = 1 })

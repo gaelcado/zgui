@@ -426,6 +426,8 @@ struct UiStorage {
     /// nearest focusable ancestor of a removed focused node (`Ui::remove`).
     refocus: Cell<Option<NodeId>>,
     content_sizes: RefCell<HashMap<NodeId, Signal<(f32, f32)>>>,
+    /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
+    observed_sizes: RefCell<HashMap<NodeId, Signal<(f32, f32)>>>,
     observed_bounds: RefCell<HashMap<NodeId, Signal<Rect>>>,
     observed_visibility: RefCell<HashMap<NodeId, Signal<bool>>>,
     /// Run once after the next frame preparation's layout.
@@ -447,12 +449,13 @@ pub enum WindowGesture {
     DoubleClick,
 }
 type LayoutListener = Rc<RefCell<Box<dyn FnMut()>>>;
+/// A handle to a `Ui` that does not keep it alive (`Ui::downgrade`).
 #[derive(Clone)]
-pub(crate) struct WeakUi {
+pub struct WeakUi {
     storage: Weak<UiStorage>,
 }
 impl WeakUi {
-    pub(crate) fn upgrade(&self) -> Option<Ui> {
+    pub fn upgrade(&self) -> Option<Ui> {
         self.storage.upgrade().map(Ui::from_storage)
     }
 }
@@ -567,6 +570,7 @@ impl Ui {
             preparing_frame: Cell::new(false),
             refocus: Cell::new(None),
             content_sizes: RefCell::new(HashMap::new()),
+            observed_sizes: RefCell::new(HashMap::new()),
             observed_bounds: RefCell::new(HashMap::new()),
             observed_visibility: RefCell::new(HashMap::new()),
             after_layout: RefCell::new(Vec::new()),
@@ -628,7 +632,8 @@ impl Ui {
     pub(crate) fn shared(&self) -> Self {
         Self::from_storage(self.storage.clone())
     }
-    pub(crate) fn downgrade(&self) -> WeakUi {
+    /// A handle that does not keep the document alive.
+    pub fn downgrade(&self) -> WeakUi {
         WeakUi {
             storage: Rc::downgrade(&self.storage),
         }
@@ -1124,6 +1129,34 @@ impl Ui {
         self.storage.editor_layout_revision.set(None);
         signal
     }
+    /// Observe the node's laid-out size (its border box), published after
+    /// each layout that runs: unlike `observe_bounds`, nothing an ancestor
+    /// does (scrolling, translating) costs it anything. The registration
+    /// belongs to the node and goes with it.
+    /// How many nodes each geometry observer list holds (content sizes,
+    /// sizes, bounds, visibility): for diagnostics, and tests that what
+    /// unmounts lets go.
+    pub fn observer_counts(&self) -> [usize; 4] {
+        [
+            self.storage.content_sizes.borrow().len(),
+            self.storage.observed_sizes.borrow().len(),
+            self.storage.observed_bounds.borrow().len(),
+            self.storage.observed_visibility.borrow().len(),
+        ]
+    }
+    pub(crate) fn observe_size(&self, node: NodeId) -> Signal<(f32, f32)> {
+        if let Some(signal) = self.storage.observed_sizes.borrow().get(&node) {
+            return signal.clone();
+        }
+        let bounds = self.scene.borrow().layout_bounds(node);
+        let signal = self.signal((bounds.width, bounds.height));
+        self.storage
+            .observed_sizes
+            .borrow_mut()
+            .insert(node, signal.clone());
+        self.storage.editor_layout_revision.set(None);
+        signal
+    }
     /// Observe world bounds, including ancestor translations without layout work.
     /// Like content-size observations, registrations are owned by their nodes.
     pub(crate) fn observe_bounds(&self, node: NodeId) -> Signal<Rect> {
@@ -1270,14 +1303,20 @@ impl Ui {
             let (sizes, bounds): (Vec<_>, Vec<_>) = {
                 let scene = self.scene.borrow();
                 let sizes = if layout_changed {
-                    self.storage
-                        .content_sizes
-                        .borrow()
+                    let content = self.storage.content_sizes.borrow();
+                    let own = self.storage.observed_sizes.borrow();
+                    content
                         .iter()
                         .filter(|(node, _)| scene.contains(**node))
                         .map(|(node, signal)| {
                             (*node, signal.clone(), allocated_content_size(&scene, *node))
                         })
+                        .chain(own.iter().filter(|(node, _)| scene.contains(**node)).map(
+                            |(node, signal)| {
+                                let b = scene.layout_bounds(*node);
+                                (*node, signal.clone(), (b.width, b.height))
+                            },
+                        ))
                         .collect()
                 } else {
                     Vec::new()
@@ -1583,6 +1622,7 @@ impl Ui {
         self.scene.borrow_mut().remove(node);
         for id in ids {
             self.storage.content_sizes.borrow_mut().remove(&id);
+            self.storage.observed_sizes.borrow_mut().remove(&id);
             self.storage.observed_bounds.borrow_mut().remove(&id);
             self.storage.observed_visibility.borrow_mut().remove(&id);
             if !self.storage.layout_listeners.borrow().is_empty() {
@@ -1598,6 +1638,7 @@ impl Ui {
         crate::shrink_sparse(&mut self.storage.owned.borrow_mut());
         crate::shrink_sparse(&mut self.storage.editors.borrow_mut());
         crate::shrink_sparse(&mut self.storage.content_sizes.borrow_mut());
+        crate::shrink_sparse(&mut self.storage.observed_sizes.borrow_mut());
         crate::shrink_sparse(&mut self.storage.observed_bounds.borrow_mut());
         drop(owned);
         drop(editors);
@@ -3088,7 +3129,8 @@ mod ownership_tests {
 }
 
 fn allocated_content_size(scene: &Scene, node: NodeId) -> (f32, f32) {
-    let bounds = scene.bounds(node);
+    // Its own box: a size, whatever moved it.
+    let bounds = scene.layout_bounds(node);
     let padding = scene.content_insets(node);
     (
         (bounds.width - padding.left - padding.right).max(0.),

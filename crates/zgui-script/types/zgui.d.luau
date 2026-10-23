@@ -546,6 +546,16 @@ export type LineJoin = "miter" | "round" | "bevel"
 export type LineOptions = { cap: LineCap?, join: LineJoin?, dash: { number }?, dash_offset: number?, [number]: never }
 -- `draw` strokes a fraction of the path (`0.5`) or a span of it
 -- (`{ start, end }`), as anime.js draws SVG lines.
+export type MarkdownOptions = {
+	-- Names a text that grows (a streaming reply): parsed incrementally.
+	key: string?,
+	-- Single newlines break lines, as people's messages show them.
+	breaks: boolean?,
+	-- Repository paths (`src/main.rs:12`) are files: runs with `f`.
+	paths: boolean?,
+}
+export type MarkdownBlock = { t: string, [string]: any }
+
 export type StrokeOptions = {
 	cap: LineCap?,
 	join: LineJoin?,
@@ -1076,7 +1086,7 @@ export type NodeProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -1124,7 +1134,12 @@ export type NodeProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 }
-export type MaskOptions = { [number]: Bitmap, w: number?, h: number?, x: number?, y: number? }
+export type MaskOptions = { [number]: Bitmap, w: number?, h: number?, x: number?, y: number?, sweep: MaskSweep? }
+-- The mask moving `x`, `y` points from where it starts, over and over every
+-- `duration` ms, at `frame_rate` steps a second at most (60): the engine
+-- moves it on its own frame clock, with no script, style pass or layout
+-- per step, compositing only the masked node again (a text shimmer).
+export type MaskSweep = { x: number?, y: number?, duration: number?, frame_rate: number? }
 
 -- Every element's properties, without children: an unknown key is an
 -- error (`[number]: never` makes Luau check them).
@@ -1301,7 +1316,7 @@ export type Props = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -1524,7 +1539,7 @@ export type ContainerProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -1746,7 +1761,7 @@ export type ScrollProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -1973,7 +1988,7 @@ export type TextProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -2240,7 +2255,7 @@ export type RichProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -2463,7 +2478,7 @@ export type ImageProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -2694,7 +2709,7 @@ export type SvgProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -2919,7 +2934,7 @@ export type CanvasProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -3143,7 +3158,7 @@ export type CheckboxProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -3367,7 +3382,7 @@ export type InputProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -3604,7 +3619,7 @@ export type ProgressProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -3828,7 +3843,7 @@ export type SliderProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -4056,7 +4071,7 @@ export type ListProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -4305,7 +4320,7 @@ export type LayerProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -4530,7 +4545,7 @@ export type ModalProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -4764,7 +4779,7 @@ export type PopoverProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -4997,7 +5012,7 @@ export type MenuItemProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -5222,7 +5237,7 @@ export type SubmenuProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -5450,7 +5465,7 @@ export type WebViewProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -5696,7 +5711,7 @@ export type TerminalProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -5920,7 +5935,7 @@ export type SlotProps = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -6149,7 +6164,7 @@ export type EachOptions = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -6381,7 +6396,7 @@ export type PresenceOptions = {
 	layout_enter: boolean?,
 	layout_clip: boolean?,
 	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
-	-- `{ bitmap, w = …, h = …, x = …, y = … }`.
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
 	mask: (Bitmap | MaskOptions)?,
 	bg_shader: Shader?,
 	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
@@ -6545,8 +6560,10 @@ declare ui: {
 	-- A row per item of a list state; `build` gets the item and its index
 	-- (from 1). The item is `any`: annotate it to check it,
 	-- `function(tab: Tab, i)` (Luau infers a generic callback's parameter
-	-- from its uses, which misfires).
-	each: (list: State<{ any }>, build: (item: any, index: number) -> Node, opts: EachOptions?) -> Node,
+	-- from its uses, which misfires). A row whose item changes is built
+	-- again; a `build` taking a third parameter gets the row's item as
+	-- state instead, kept current, and its row updates in place.
+	each: (list: State<{ any }>, build: (item: any, index: number, row: State<any>) -> Node, opts: EachOptions?) -> Node,
 	-- What `build` makes of the value, entering and exiting as it changes;
 	-- nil shows nothing. The value is `any`, as `each`'s item is.
 	presence: (value: string | Readable<unknown> | (() -> unknown), build: (value: any) -> Node, opts: PresenceOptions?) -> Node,
@@ -6574,6 +6591,11 @@ declare ui: {
 	variants: <D>(definition: D) -> (choice: VariantChoice<D, Readable<any> | (() -> any)>) -> Variants,
 	-- A style value the design lint lets through, with the reason.
 	raw: <T>(value: T, reason: string) -> T,
+	-- Markdown parsed into blocks (`t`: p, h, code, ul, ol, quote, hr,
+	-- table, img; runs `{ x, b?, i?, c?, s?, a?, f? }`). With `key` (a
+	-- reply's id), text growing under it parses only its new end, and its
+	-- earlier blocks are the same tables as before.
+	markdown: (text: string, opts: MarkdownOptions?) -> { MarkdownBlock },
 	effect: (f: () -> ...unknown) -> (),
 	-- One update for many writes; returns what `f` returns.
 	batch: <R...>(f: () -> R...) -> R...,

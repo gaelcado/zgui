@@ -27,10 +27,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use zgui::{
-    reactive::{Runtime, Signal},
-    timer::sleep,
-};
+use zgui::{reactive::Runtime, timer::sleep};
 use zgui_desktop::{Application, FontData, Glass, Titlebar, WindowOptions};
 use zgui_script::{ScriptHost, Value};
 
@@ -236,11 +233,11 @@ struct Sampler {
     runtime: Runtime,
     tracks: Rc<RefCell<HashMap<i32, Track>>>,
     /// `{ pid, name, cpu, gpu, mem, smooth }` for every live process.
-    procs: Signal<Value>,
+    procs: zgui_script::Shared,
     /// `{ count, cpu, gpu }`: the whole machine.
-    summary: Signal<Value>,
+    summary: zgui_script::Shared,
     /// The pids the script's panels show (it writes this).
-    watch: Signal<Value>,
+    watch: zgui_script::Shared,
 }
 impl Sampler {
     fn watched(&self) -> HashSet<i32> {

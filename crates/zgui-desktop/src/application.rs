@@ -110,6 +110,7 @@ enum Event {
 #[derive(Debug)]
 enum WindowCommand {
     Bounds(crate::WindowBounds),
+    PointerPassthrough(bool),
     Fullscreen(bool),
     Decorations(bool),
     MinSize(Option<(f64, f64)>),
@@ -151,6 +152,7 @@ impl WindowState {
             WindowCommand::Bounds(bounds) => options.bounds = Some(*bounds),
             WindowCommand::Fullscreen(value) => options.fullscreen = *value,
             WindowCommand::Decorations(value) => options.decorations = *value,
+            WindowCommand::PointerPassthrough(_) => {}
             WindowCommand::MinSize(value) => options.min_size = *value,
             WindowCommand::Drag
             | WindowCommand::RefreshInfo
@@ -230,6 +232,12 @@ impl WindowHandle {
     }
     pub fn set_decorations(&self, decorations: bool) {
         self.command(WindowCommand::Decorations(decorations));
+    }
+    /// Let the real pointer pass through to whatever lies behind the window
+    /// (a tool's window that must not hear the person's mouse); input
+    /// dispatched to it in code still arrives.
+    pub fn set_pointer_passthrough(&self, passthrough: bool) {
+        self.command(WindowCommand::PointerPassthrough(passthrough));
     }
     pub fn set_min_inner_size(&self, size: Option<(f64, f64)>) {
         if size.is_none_or(|(w, h)| valid_window_size(w, h)) {
@@ -316,9 +324,18 @@ impl WindowHandle {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
+    /// Repaint the whole window on its next frame.
     pub fn request_redraw(&self) {
         if !self.closed.load(Ordering::Acquire) {
             let _ = self.proxy.send_event(Event::Redraw(self.token));
+        }
+    }
+    /// Run the window's loop once: what changed since (input dispatched
+    /// from elsewhere, state set off the loop) is laid out and painted as
+    /// a frame of its own would be, its damage alone.
+    pub fn wake(&self) {
+        if !self.closed.load(Ordering::Acquire) {
+            let _ = self.proxy.send_event(Event::Wake(self.token));
         }
     }
 }
@@ -1749,6 +1766,9 @@ impl Host {
                 let _ = (entries, x, y);
             }
             WindowCommand::Decorations(value) => window.set_decorations(value),
+            WindowCommand::PointerPassthrough(value) => {
+                let _ = window.set_cursor_hittest(!value);
+            }
             WindowCommand::MinSize(value) => {
                 window.set_min_inner_size(value.map(|(w, h)| LogicalSize::new(w, h)))
             }
