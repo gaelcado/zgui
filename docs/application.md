@@ -84,7 +84,13 @@ architecture. Rows retain their state while mounted; removing an offscreen row
 disposes its owned subscriptions and tasks. See [virtual lists](composition.md)
 for complete signatures, anchoring and cache costs.
 
-The lower-level `ScrollView::mount(ui, parent, width, height)` returns a clipped viewport, a `content` node, and signals for offset, extent, and viewport size. Set its content height explicitly as data changes. Scroll offsets clamp when content or viewport dimensions change. Moving content changes a retained transform; it does not relayout every child. Nested wheel scrolling chains to a parent when the inner scroll view cannot move farther.
+The lower-level `ScrollView::mount(ui, parent, width, height)` returns a clipped viewport, a `content` node, and signals for offset, extent, and viewport size. Set its content height explicitly as data changes. Scroll offsets clamp when content or viewport dimensions change. Moving content changes a retained transform; it does not relayout every child. Nested wheel scrolling chains to a parent when the inner scroll view cannot
+move farther, at the start of a gesture. Once a view scrolls, the gesture
+latches to it, as on macOS. The rest of the gesture along that axis, momentum
+included, goes to that view alone until a 300 ms pause, so it neither chains
+outward at the edge nor jumps to an inner view that slides under the pointer.
+A view takes only its own axis of a diagonal swipe and passes the other on, so
+a vertical swipe over a horizontal carousel still scrolls the page.
 
 The keyboard scrolls as a page does when nothing has focus. This covers scroll
 views, scrollable areas and virtual lists. Space and Shift+Space, Page Up/Down
