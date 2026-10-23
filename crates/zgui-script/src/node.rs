@@ -664,6 +664,8 @@ pub(crate) enum Kind {
     Checkbox {
         label: String,
         value: Signal<Value>,
+        /// `mixed = state`: neither on nor off while true.
+        mixed: Option<Signal<Value>>,
     },
     Input {
         label: String,
@@ -1574,6 +1576,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "initial",
     "placeholder",
     "placeholder_color",
+    "mixed",
     "select_on_focus",
     "secure",
     "spellcheck",
@@ -2518,7 +2521,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     };
     ui.set(
         "checkbox",
-        widget(|label, value, _| Ok(Kind::Checkbox { label, value }))?,
+        widget(|label, value, table| {
+            let mixed = match table.get::<mlua::Value>("mixed")? {
+                mlua::Value::Nil => None,
+                state => Some(expect_state(&state, "`mixed`")?),
+            };
+            Ok(Kind::Checkbox {
+                label,
+                value,
+                mixed,
+            })
+        })?,
     )?;
     for (name, always_multiline) in [("input", false), ("textarea", true)] {
         ui.set(
