@@ -1,0 +1,196 @@
+{
+	"name": "shades-of-purple",
+	"type": "dark",
+	"extends": "zgui-dark",
+	"tokens": {
+		"background": "#2d2b55",
+		"surface": {
+			"sunken": "#1e1e3f",
+			"base": "#222244",
+			"raised": "#393668",
+			"overlay": "#27264d"
+		},
+		"text": {
+			"primary": "#ffffff",
+			"secondary": "#b8afea",
+			"tertiary": "#8d84c7",
+			"disabled": "#ffffff61"
+		},
+		"border": "#ffffff1a",
+		"border.subtle": "#ffffff0f",
+		"border.strong": "#ffffff2e",
+		"accent": "#fad000",
+		"accent.hover": "#fbdd47",
+		"accent.text": "#000000",
+		"danger": "#ec3a37",
+		"warning": "#fad000",
+		"success": "#3ad900",
+		"info": "#fad000",
+		"selection": "#fad00059",
+		"selection.item": "#ebebeb1c",
+		"focus.ring": "{border.strong}",
+		"hover": "#ffffff1c",
+		"pressed": "#fad0002e",
+		"scrollbar": {
+			"thumb": "#ffffff4c",
+			"thumb.active": "#ffffff8c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#222244cc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#393668b8",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#1e1e3f",
+			"dialog": "#232246",
+			"input.border": "#bdc7d117",
+			"solid": "#ebebef",
+			"on_solid": "#000000",
+			"danger.muted": "#f1716f",
+			"danger.strong": "#da3633",
+			"danger.text": "#ffffff",
+			"danger.hover": "#c9322f",
+			"danger.pressed": "#b72d2b",
+			"info.strong": "#8a7200",
+			"info.text": "#ffffff",
+			"info.hover": "#7f6900",
+			"info.pressed": "#746000",
+			"warning.strong": "#fad000",
+			"warning.text": "#000000",
+			"warning.hover": "#fad414",
+			"warning.pressed": "#fbd829",
+			"success.strong": "#3ad900",
+			"success.text": "#000000",
+			"success.hover": "#4adc14",
+			"success.pressed": "#5adf29",
+			"warning.muted": "#fbdc40",
+			"success.muted": "#6be240",
+			"accent": {
+				"wash": "#fad00038",
+				"selection": "#fad00059"
+			},
+			"ink": {
+				"1": "#ffffff0a",
+				"2": "#ffffff0f",
+				"3": "#ffffff14",
+				"4": "#ffffff1c",
+				"5": "#ffffff29",
+				"6": "#ffffff38"
+			},
+			"diff": {
+				"add": "#3ad900",
+				"delete": "#ec3a37",
+				"hunk": "#fad00014"
+			},
+			"cursor": "#ffffff66",
+			"scrim": "#00000099",
+			"code.wash": "#fad00038",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#ffffff1c",
+				"hover": "#ffffff0d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#d4d4dd",
+			"solid.pressed": "#c5c5d0"
+		}
+	},
+	"_source": {
+		"family": "shades-of-purple",
+		"name": "Shades of Purple",
+		"treatment": "Opaque",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

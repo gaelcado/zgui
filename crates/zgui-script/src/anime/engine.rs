@@ -13,7 +13,8 @@ use crate::{Vm, element::Element};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    future::poll_fn,
+    future::{Future, poll_fn},
+    pin::pin,
     rc::{Rc, Weak},
     task::{Poll, Waker},
     time::Instant,
@@ -919,6 +920,8 @@ impl Engine {
             clips.push(clip.clone());
         }
         drop(clips);
+        // Something new may be seen: look at the display's rate again.
+        self.unseen.set(false);
         self.wake.notify();
     }
     pub fn wake(&self) {
@@ -1051,7 +1054,28 @@ impl Engine {
                     (a, b) => a.or(b),
                 };
                 let frame = match rate {
-                    Some(hz) => frames.next().max_rate(hz).await,
+                    // A capped wait (unseen loops, `frameRate`) gives way to
+                    // what starts playing meanwhile: a clip started under it
+                    // would otherwise wait for the slow frame and land in
+                    // one step. It begins from the next frame instead.
+                    Some(hz) => {
+                        let mut capped = pin!(frames.next().max_rate(hz));
+                        let mut started = pin!(self.wake.wait());
+                        let raced = poll_fn(|cx| {
+                            if let Poll::Ready(frame) = capped.as_mut().poll(cx) {
+                                return Poll::Ready(Some(frame));
+                            }
+                            started.as_mut().poll(cx).map(|()| None)
+                        })
+                        .await;
+                        match raced {
+                            Some(frame) => frame,
+                            None => {
+                                last = None;
+                                continue;
+                            }
+                        }
+                    }
                     None => frames.next().await,
                 };
                 let dt = last.map_or(0., |l| (frame.time - l).as_secs_f64() * 1000.);

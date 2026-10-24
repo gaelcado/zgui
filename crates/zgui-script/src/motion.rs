@@ -76,7 +76,7 @@ fn ease_of(value: mlua::Value, what: &str) -> mlua::Result<Option<Ease>> {
 
 /// `animate = true | "outQuint" | anime.spring {...} | { duration, ease } |
 /// { bounce, duration } | { spring = anime.spring {...} }`.
-fn timing_of(value: mlua::Value) -> mlua::Result<Option<Timing>> {
+pub(crate) fn timing_of(value: mlua::Value) -> mlua::Result<Option<Timing>> {
     Ok(match value {
         mlua::Value::Nil | mlua::Value::Boolean(false) => None,
         mlua::Value::Boolean(true) => Some(Timing::default()),

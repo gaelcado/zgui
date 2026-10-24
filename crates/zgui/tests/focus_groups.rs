@@ -176,3 +176,41 @@ fn a_virtual_lists_rows_are_one_tab_stop() {
     tab(&mut ui);
     assert_eq!(focused(&ui, &view).as_deref(), Some("after"));
 }
+
+#[test]
+fn tabs_and_menus_go_round_a_toolbar_stops() {
+    let strip = |role: Role| {
+        row()
+            .role(role)
+            .child(button_named("a"))
+            .child(button_named("b"))
+            .child(button_named("c"))
+    };
+    for (role, wraps) in [(Role::TabList, true), (Role::Toolbar, false)] {
+        let mut ui = Ui::new(500., 300.);
+        let view = ui.mount(column().child(strip(role)));
+        ui.prepare_frame();
+        tab(&mut ui);
+        press(&mut ui, Key::End, false);
+        press(&mut ui, Key::ArrowRight, false);
+        let expected = if wraps { "a" } else { "c" };
+        assert_eq!(focused(&ui, &view).as_deref(), Some(expected), "{role:?}");
+        press(&mut ui, Key::Home, false);
+        press(&mut ui, Key::ArrowLeft, false);
+        let expected = if wraps { "c" } else { "a" };
+        assert_eq!(focused(&ui, &view).as_deref(), Some(expected), "{role:?}");
+    }
+    // Any group can be told to.
+    let mut ui = Ui::new(500., 300.);
+    let view = ui.mount(
+        column()
+            .focus_group(zgui::input::FocusGroup::Vertical)
+            .focus_wrap(true)
+            .child(button_named("a"))
+            .child(button_named("b")),
+    );
+    ui.prepare_frame();
+    tab(&mut ui);
+    press(&mut ui, Key::ArrowUp, false);
+    assert_eq!(focused(&ui, &view).as_deref(), Some("b"));
+}

@@ -1,7 +1,8 @@
 //! The machine beyond the window, through the host's platform
 //! (`zgui::platform`, which a desktop window provides): `ui.clipboard`,
 //! file dialogs (`ui.open_files`, `ui.save_file`) and the files the user
-//! picked in them (`ui.read_file`, `ui.write_file`). A script reaches only
+//! picked in them (`ui.read_file`, `ui.write_file`), and the trackpad's
+//! haptics (`ui.haptic`). A script reaches only
 //! files the user chose, as a web page does; reads and writes run off the
 //! main thread. A plugin gets none of it unless its host grants it.
 use crate::{
@@ -10,18 +11,25 @@ use crate::{
 };
 use mlua::{Lua, Table};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashSet,
     path::{Path, PathBuf},
     rc::Rc,
 };
-use zgui::platform::{FilePicker, PlatformService};
+use zgui::platform::{FilePicker, Haptic, PlatformService};
 
 /// The window's platform, once the host's view mounts in one.
 pub(crate) type SharedPlatform = Rc<RefCell<Option<PlatformService>>>;
 /// The files the user picked in this host's dialogs: the only ones scripts
 /// may read or write.
 pub(crate) type Picked = Rc<RefCell<HashSet<PathBuf>>>;
+/// The haptics scripts asked for (`ui.haptic`), felt or not: what a test
+/// reads (`ScriptHost::haptics`), as no headless trackpad taps.
+#[derive(Default)]
+pub(crate) struct Felt {
+    pub(crate) count: Cell<u64>,
+    pub(crate) last: Cell<Option<Haptic>>,
+}
 
 fn platform(shared: &SharedPlatform, what: &str) -> mlua::Result<PlatformService> {
     shared.borrow().clone().ok_or_else(|| {
@@ -123,17 +131,37 @@ fn off_thread(
     Ok(PromiseUd(promise))
 }
 
-/// Installs `ui.clipboard`, `ui.open_files`, `ui.save_file`, `ui.read_file`
-/// and `ui.write_file`. `clipboard` and `files` are false for a plugin the
-/// host did not grant them.
+/// Installs `ui.clipboard`, `ui.open_files`, `ui.save_file`, `ui.read_file`,
+/// `ui.write_file` and `ui.haptic`. `clipboard` and `files` are false for a
+/// plugin the host did not grant them.
 pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
     shared: SharedPlatform,
     picked: Picked,
+    felt: Rc<Felt>,
     clipboard: bool,
     files: bool,
 ) -> mlua::Result<()> {
+    {
+        let shared = shared.clone();
+        ui.set(
+            "haptic",
+            lua.create_function(move |_, name: Option<String>| {
+                let name = name.as_deref().unwrap_or("level");
+                let haptic = Haptic::from_name(name).ok_or_else(|| {
+                    mlua::Error::runtime(format!(
+                        "ui.haptic takes \"level\", \"alignment\" or \"generic\", not {name:?}"
+                    ))
+                })?;
+                felt.count.set(felt.count.get() + 1);
+                felt.last.set(Some(haptic));
+                // Headless, or off macOS, nothing taps: not an error.
+                let platform = shared.borrow().clone();
+                Ok(platform.is_some_and(|p| p.0.haptic(haptic)))
+            })?,
+        )?;
+    }
     let board = lua.create_table()?;
     {
         let shared = shared.clone();

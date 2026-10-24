@@ -90,6 +90,12 @@ pub fn accelerator(text: &str) -> Option<MenuAccelerator> {
 /// { "title": "Mail", "width": 1100, "height": 720, "min_width": 640,
 ///   "min_height": 400, "titlebar": "inset", "glass": true, "app_id": "mail" }
 /// ```
+///
+/// `"glass": "plain"` is the blur alone, for an app that tints it itself.
+///
+/// ```json
+/// { "glass": "plain" }
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
     pub title: String,
@@ -99,7 +105,10 @@ pub struct AppConfig {
     /// `"standard"`, `"inset"` (content under a transparent title bar) or
     /// `"hidden"`.
     pub titlebar: zgui_desktop::Titlebar,
-    pub glass: bool,
+    /// The blurred desktop behind the window: `true` for the default glass,
+    /// `"plain"` for the blur alone (no desktop tint or saturation), for an
+    /// app laying its own tint over it.
+    pub glass: Option<zgui_desktop::Glass>,
     /// Where `ui.persist` keeps its data (the app's data directory).
     pub app_id: String,
 }
@@ -119,7 +128,7 @@ impl AppConfig {
             height: 640.,
             min_size: None,
             titlebar: zgui_desktop::Titlebar::Standard,
-            glass: false,
+            glass: None,
             app_id: name,
         };
         let path = dir.join("zgui.json");
@@ -187,10 +196,12 @@ impl AppConfig {
             }
         };
         config.glass = match object.get("glass") {
-            None => false,
+            None => None,
+            Some(v) if v.as_str() == Some("plain") => Some(zgui_desktop::Glass::default().plain()),
             Some(v) => v
                 .as_bool()
-                .ok_or_else(|| fail("`glass` is not a boolean".into()))?,
+                .ok_or_else(|| fail("`glass` is a boolean or \"plain\"".into()))?
+                .then(zgui_desktop::Glass::default),
         };
         if let Some(id) = string("app_id")? {
             config.app_id = id;
@@ -224,7 +235,7 @@ pub fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         height: config.height,
         min_size: config.min_size,
         titlebar: config.titlebar,
-        glass: config.glass.then(zgui_desktop::Glass::default),
+        glass: config.glass,
         ..Default::default()
     };
     Application::new().window(options).run(move |cx| {
@@ -331,6 +342,12 @@ mod tests {
             ("Mail", 1100., Some((600., 400.)))
         );
         assert_eq!(config.titlebar, zgui_desktop::Titlebar::Inset);
+        assert_eq!(config.glass, None);
+        std::fs::write(dir.join("zgui.json"), r#"{ "glass": "plain" }"#).unwrap();
+        let config = AppConfig::for_script(&script).unwrap();
+        assert_eq!(config.glass, Some(zgui_desktop::Glass::default().plain()));
+        std::fs::write(dir.join("zgui.json"), r#"{ "glass": "clear" }"#).unwrap();
+        assert!(AppConfig::for_script(&script).is_err());
         std::fs::write(dir.join("zgui.json"), r#"{ "widht": 3 }"#).unwrap();
         let error = AppConfig::for_script(&script).unwrap_err();
         assert!(error.contains("unknown key `widht`"), "{error}");

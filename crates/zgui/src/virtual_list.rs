@@ -114,7 +114,7 @@ pub enum HeightError {
 impl std::fmt::Display for HeightError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidHeight => f.write_str("row height must be positive and finite"),
+            Self::InvalidHeight => f.write_str("row height must be finite and not negative"),
             Self::Bounds { index, count } => write!(f, "row {index} is outside {count} rows"),
             Self::Capacity => f.write_str("height index allocation exceeds available capacity"),
         }
@@ -164,7 +164,9 @@ impl HeightIndex {
         Self::try_new(count, estimate).expect("valid height index")
     }
     pub fn try_new(count: usize, estimate: f32) -> Result<Self, HeightError> {
-        Self::validate(estimate)?;
+        if !(estimate.is_finite() && estimate > 0.) {
+            return Err(HeightError::InvalidHeight);
+        }
         let mut index = Self {
             heights: Vec::new(),
             tree: Vec::new(),
@@ -174,8 +176,11 @@ impl HeightIndex {
         index.resize(count)?;
         Ok(index)
     }
+    /// A row may be folded away to nothing (a collapsed section's rows,
+    /// kept in place so unfolding can ease them back); the estimate given
+    /// unsized rows may not.
     fn validate(height: f32) -> Result<(), HeightError> {
-        if height.is_finite() && height > 0. {
+        if height.is_finite() && height >= 0. {
             Ok(())
         } else {
             Err(HeightError::InvalidHeight)
@@ -465,16 +470,42 @@ mod height_index_tests {
         assert_eq!(empty.rows(0..usize::MAX).count(), 0);
     }
     #[test]
+    fn rows_folded_to_nothing_take_no_space() {
+        let mut index = HeightIndex::new(0, 20.);
+        index.replace([20., 0., 0., 0., 30.]).unwrap();
+        assert_eq!(index.content_height(), 50.);
+        assert_eq!(index.row_offset(4), 20.);
+        // The row at an offset is the one with height there, past the folded.
+        assert_eq!(index.row_at(20.), Some(4));
+        assert_eq!(index.row_at(19.), Some(0));
+        assert_eq!(
+            index.rows(0..5).collect::<Vec<_>>(),
+            [
+                (0, 0., 20.),
+                (1, 20., 0.),
+                (2, 20., 0.),
+                (3, 20., 0.),
+                (4, 20., 30.)
+            ]
+        );
+        assert!(index.set_height(4, 0.).unwrap());
+        assert_eq!(index.content_height(), 20.);
+    }
+    #[test]
     fn resize_preserves_rows_and_equal_updates_and_errors_are_nonmutating() {
         let mut index = HeightIndex::new(3, 12.);
         assert!(index.set_height(1, 30.).unwrap());
         assert!(!index.set_height(1, 30.).unwrap());
-        for invalid in [0., -1., f32::NAN, f32::INFINITY] {
+        for invalid in [-1., f32::NAN, f32::INFINITY] {
             assert_eq!(
                 index.set_height(1, invalid),
                 Err(HeightError::InvalidHeight)
             );
         }
+        assert_eq!(
+            HeightIndex::try_new(3, 0.).err(),
+            Some(HeightError::InvalidHeight)
+        );
         assert_eq!(
             index.set_height(3, 10.),
             Err(HeightError::Bounds { index: 3, count: 3 })

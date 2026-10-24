@@ -25,6 +25,8 @@ pub struct Tooltip {
     content: Content,
     placement: Option<Placement>,
     interactive: bool,
+    /// How long the pointer rests before it shows (300 ms unless set).
+    delay: Option<Duration>,
 }
 enum Content {
     Text(String),
@@ -41,6 +43,7 @@ impl From<String> for Tooltip {
             content: Content::Text(text),
             placement: None,
             interactive: false,
+            delay: None,
         }
     }
 }
@@ -50,6 +53,7 @@ impl From<View> for Tooltip {
             content: Content::View(Box::new(view)),
             placement: None,
             interactive: false,
+            delay: None,
         }
     }
 }
@@ -64,6 +68,13 @@ impl Tooltip {
     /// typing goes to its fields, and Escape closes it.
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+    /// How long the pointer rests on the view before it shows: 300 ms
+    /// unless set (a hover card waits longer). Within a second of another
+    /// it still shows at once.
+    pub fn delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
         self
     }
 }
@@ -149,7 +160,9 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             content,
             placement,
             interactive,
+            delay,
         } = tip;
+        let delay = delay.unwrap_or(Duration::from_millis(300));
         let content = match content {
             Content::View(view) => *view,
             Content::Text(text) => crate::compose::column()
@@ -309,9 +322,7 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                             } else {
                                 let set = set.clone();
                                 *waiting.borrow_mut() =
-                                    after(&runner, Duration::from_millis(300), move || {
-                                        set(true, false)
-                                    });
+                                    after(&runner, delay, move || set(true, false));
                             }
                         }
                         InputEvent::PointerLeave if cx.target == cx.current_target => {

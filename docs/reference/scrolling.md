@@ -16,7 +16,8 @@ ui.list(props: ListProps) -> Node
 | --- | --- | --- | --- |
 | children | `Child` | none | |
 | `offset` | `State<number>` | its own | the scroll position in points, both ways: scrolling writes it, setting it scrolls (clamped) |
-| `follow` | `boolean` | `false` | stays at the end while the content grows, until scrolled away from it (a transcript, a log) |
+| `follow` | `boolean \| State<boolean>` | `false` | stays at the end while the content grows, until scrolled away from it (a transcript, a log); a state (or a computed): only while it holds, so a chat follows a streaming reply while a block opened afterwards extends below, the view staying put |
+| `at_end` | `State<boolean>` | | the scroll writes whether it shows its end, within half a point, only when that changes: a "scroll to bottom" pill shows while it is `false`, and `offset:set(math.huge)` goes to the end |
 | `scrollbar` | `boolean` | `false` | an interactive scrollbar over the trailing edge: drag it, click its track to page; overlay style (hidden until scrolling) where the system has overlay scrollbars |
 | `w`, `h` | `Length` | `320` by `240` when nothing else sizes it | a stretching parent, `grow`, `w`/`h` or `w_full` size it instead |
 | `gap`, `items`, `p`… | | | lay out the content as a column's (a row's for `scroll_x`) |
@@ -34,13 +35,14 @@ The content fills the viewport's width (`scroll`) or height (`scroll_x`) and is 
 | `heights` | `{ number }`, a state of one, or a function returning one | none | each row's own height instead, in order; the count is its length |
 | `sticky` | `{ number }`, a state of one, or a function returning one | none | with `heights`: rows (from 1) that stick to the top while the rows after them scroll past, each pushed up by the next (section headers, a diff's file headers); the one in charge is built again over the list, as any row is |
 | `sticky_top` | `number` | `0` | how far below the top the sticky rows stick (CSS's sticky `top`): what scrolls above them still shows, so cover it if it shouldn't |
+| `animate` | as `each`'s | off | with `heights`: a change that keeps the count eases the rows from the heights they show to the new ones, in Rust (no script per frame). Neighbouring rows that grow, or shrink, together move as one body clipped at its foot: a section's rows unfold one under another and fold from the last. A change of count lands at once |
 | `overscan` | `number` | `2` | rows built beyond each edge of the view |
 | `offset` | `State<number>` | its own | the scroll position in points, as `scroll`'s |
 | `scrollbar` | `boolean` | `false` | an interactive scrollbar, as `scroll`'s |
 | `keyboard` | `boolean` | `false` | its rows are one Tab stop, landing on the row last focused, and the arrows, Page Up/Down, Home and End move focus through every row (mounting it), as a list box's do. A row with `role = "option"` (or `"listitem"`) takes the focus itself, so its `on_focus` can open it (selection following focus); other controls in a row keep their own keys |
 | `w`, `h` | `Length` | `320`, `240` | |
 
-With `heights`, rows differ in height but are still never measured: the list knows where each starts, so a changed list (a section folded, rows inserted) re-lays out without building anything offscreen. A host can publish the heights as a shared value (`ScriptHost::shared`), and the script never copies them.
+With `heights`, rows differ in height but are still never measured: the list knows where each starts, so a changed list (a section folded, rows inserted) re-lays out without building anything offscreen. A row of height 0 takes no space and is not built: a folded section can keep its rows at 0, so the count holds and `animate` eases them away and back (clip what a row draws, `overflow = "hidden"`, if it should not spill while it shrinks). A host can publish the heights as a shared value (`ScriptHost::shared`), and the script never copies them.
 
 A row is built when it scrolls into view and dropped when it leaves; it owns what it makes, as a [component](state.md#components) does: its `ui.use_state`, effects and computed values end with it.
 

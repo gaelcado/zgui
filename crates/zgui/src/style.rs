@@ -685,6 +685,12 @@ pub trait Styled: Sized {
         self.styles_mut().layout_options_mut().display = Some(crate::layout::Display::None);
         self
     }
+    /// Undo a `hidden` it is laid over (a hover or variant showing what the
+    /// base hides): the display goes back to the default.
+    fn shown(mut self) -> Self {
+        self.styles_mut().layout_options_mut().shown = Some(true);
+        self
+    }
     fn visible(mut self) -> Self {
         self.styles_mut().layout_options_mut().visible = Some(true);
         self

@@ -51,6 +51,15 @@ pub(crate) fn create(ui: &mut Ui, owner: NodeId, parent: NodeId) -> Portal {
         visible: ui.signal(false),
     }
 }
+/// An exit: given the `done` to call once it has played.
+pub(crate) type Exit = std::rc::Rc<dyn Fn(std::rc::Rc<dyn Fn()>)>;
+/// What runs as an overlay opens (`View::on_open`) and how it closes
+/// (`View::exit`: it stays drawn, inert, until the exit says it is done).
+#[derive(Clone, Default)]
+pub(crate) struct Transition {
+    pub open: Option<std::rc::Rc<dyn Fn()>>,
+    pub exit: Option<Exit>,
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn activate(
     ui: &mut Ui,
@@ -71,6 +80,7 @@ pub(crate) fn activate(
     autofocus: bool,
     // A non-modal layer (`View::layer`).
     layer: bool,
+    transition: Transition,
 ) {
     if layer {
         ui.input.set_layer(portal.overlay, true);
@@ -153,6 +163,12 @@ pub(crate) fn activate(
         .collect::<Vec<_>>();
     let weak = ui.downgrade();
     let visible = portal.visible.clone();
+    // Whether it showed at the last pass, whether it is drawn while its exit
+    // plays, and which opening or closing is the latest (an exit's `done`
+    // from before a reopening does nothing).
+    let shown = std::rc::Rc::new(std::cell::Cell::new(false));
+    let exiting = std::rc::Rc::new(std::cell::Cell::new(false));
+    let generation = std::rc::Rc::new(std::cell::Cell::new(0_u64));
     ui.bind(owner, move || {
         let blocked = disabled.iter().any(|disabled| disabled.get());
         let requested = open.get();
@@ -167,13 +183,53 @@ pub(crate) fn activate(
         if !ui.scene.borrow().contains(overlay) {
             return;
         }
+        let was = shown.replace(desired);
+        if desired != was {
+            generation.set(generation.get() + 1);
+        }
+        // Closing through an exit: drawn (and inert) until it is done.
+        let exit = if was && !desired {
+            transition.exit.clone()
+        } else {
+            None
+        };
+        exiting.set(exit.is_some() || (exiting.get() && !desired && !was));
+        if desired {
+            exiting.set(false);
+        }
         ui.scene.borrow_mut().set_effects(
             overlay,
             Effects {
-                opacity: if desired { 1. } else { 0. },
+                opacity: if desired || exiting.get() { 1. } else { 0. },
                 ..Default::default()
             },
         );
+        if let Some(exit) = exit {
+            let (weak, exiting, generation) = (weak.clone(), exiting.clone(), generation.clone());
+            let at = generation.get();
+            let done: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(move || {
+                if generation.get() != at || !exiting.replace(false) {
+                    return;
+                }
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                let mut scene = ui.scene.borrow_mut();
+                if scene.contains(overlay) {
+                    let mut effects = scene.effects(overlay);
+                    effects.opacity = 0.;
+                    scene.set_effects(overlay, effects);
+                }
+            });
+            // After this pass: the exit may start an animation, or finish
+            // at once.
+            ui.runtime.untracked(|| exit(done));
+        } else if desired
+            && !was
+            && let Some(open) = &transition.open
+        {
+            ui.runtime.untracked(|| open());
+        }
         ui.input.set_options(
             overlay,
             NodeInput {

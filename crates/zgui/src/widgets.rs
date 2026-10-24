@@ -38,6 +38,8 @@ pub struct EditorHandle {
     typography: Rc<RefCell<(Color, f32, FontStyle)>>,
     wrap: Rc<Cell<bool>>,
     line_numbers: Rc<Cell<bool>>,
+    /// The box's height follows its text's (`set_auto_height`).
+    auto_height: Rc<Cell<bool>>,
     preferred_x: Rc<Cell<Option<f32>>>,
     text: NodeId,
     scene: Rc<RefCell<Scene>>,
@@ -59,6 +61,81 @@ struct EditorHint {
     /// Misspelled words (`View::spellcheck`), as byte ranges: marked with a
     /// dotted line. Usually none.
     misspelled: RefCell<Vec<std::ops::Range<usize>>>,
+    /// References drawn as chips (`set_chips`): the characters that start
+    /// one, and the chip's fill; and the chips the text holds, which stay
+    /// chips when the space after one goes.
+    chips: RefCell<Option<(String, Color)>>,
+    known_chips: RefCell<std::collections::HashSet<String>>,
+    /// `set_fits`: written whether the text fits on one line, and how much
+    /// narrower than the editor that line is.
+    fits: RefCell<Option<(Signal<bool>, f32)>>,
+}
+/// The room a one-line row needs at least: narrower, a composer opens out
+/// (composer.rs MIN_COMPACT_INPUT_WIDTH).
+pub const FITS_MIN_WIDTH: f32 = 200.;
+/// How far under the room a line must fall before it fits again
+/// (composer.rs COLLAPSE_HYSTERESIS): opening out and folding back share
+/// no boundary, so a width right at it cannot flip back and forth.
+pub const FITS_HYSTERESIS: f32 = 32.;
+/// Whether text `width` points wide (`None`: it has a line break) fits a
+/// line `room` wide, given whether it fitted before (`set_fits`).
+pub fn line_fits(fitted: bool, width: Option<f32>, room: f32) -> bool {
+    let Some(width) = width else {
+        return false;
+    };
+    if room < FITS_MIN_WIDTH {
+        return false;
+    }
+    if fitted {
+        width <= room
+    } else {
+        width < room - FITS_HYSTERESIS
+    }
+}
+impl EditorHint {
+    /// The chips in `text`: its finished references, and those that were
+    /// chips before (the space after one deleted).
+    fn chips_in(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        let Some((triggers, _)) = &*self.chips.borrow() else {
+            return Vec::new();
+        };
+        let known = self.known_chips.borrow();
+        chip_ranges(text, triggers)
+            .into_iter()
+            .filter(|(range, finished)| *finished || known.contains(&text[range.clone()]))
+            .map(|(range, _)| range)
+            .collect()
+    }
+}
+/// The references in `text` (UTF-8 byte ranges): a word that starts with
+/// one of `triggers` (at the start, after a space or an opening bracket)
+/// and holds more than the trigger; and whether it is finished (a space or
+/// a line break follows it, as a completion's pick leaves one).
+pub(crate) fn chip_ranges(text: &str, triggers: &str) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut previous: Option<char> = None;
+    for (at, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if let Some(from) = start.take()
+                && at > from + 1
+            {
+                out.push((from..at, true));
+            }
+        } else if start.is_none()
+            && triggers.contains(c)
+            && previous.is_none_or(|p| p.is_whitespace() || "([{<".contains(p))
+        {
+            start = Some(at);
+        }
+        previous = Some(c);
+    }
+    if let Some(from) = start
+        && text.len() > from + 1
+    {
+        out.push((from..text.len(), false));
+    }
+    out
 }
 impl EditorHandle {
     /// The selection as UTF-8 byte offsets into the committed text,
@@ -89,6 +166,29 @@ impl EditorHandle {
             return;
         }
         *self.hint.misspelled.borrow_mut() = ranges;
+        self.refresh();
+    }
+    /// Draw finished references (a word starting with one of `triggers`,
+    /// followed by a space: `@path `) as chips filled with `fill`, and
+    /// delete each whole: a backspace at a chip's end takes all of it, a
+    /// forward delete at its start too. `None` draws none.
+    pub fn set_chips(&self, chips: Option<(&str, Color)>) {
+        let chips = chips.map(|(t, c)| (t.to_owned(), c));
+        if *self.hint.chips.borrow() == chips {
+            return;
+        }
+        *self.hint.chips.borrow_mut() = chips;
+        self.refresh();
+    }
+    /// Write into `fits` whether the text fits on one line `inset` points
+    /// narrower than the editor's text box: a
+    /// composer folding into one row while its draft is short and opening
+    /// out as it grows. A line break never fits, nor a line narrower than
+    /// `FITS_MIN_WIDTH`; once it does not fit, it must fall
+    /// `FITS_HYSTERESIS` under the width before it does again. The signal
+    /// is written only when that changes.
+    pub fn set_fits(&self, fits: Signal<bool>, inset: f32) {
+        *self.hint.fits.borrow_mut() = Some((fits, inset));
         self.refresh();
     }
     /// The misspelled word the selection is in (or the caret touches).
@@ -180,6 +280,16 @@ impl EditorHandle {
     pub fn set_line_numbers(&self, numbered: bool) {
         let numbered = numbered && self.multiline;
         if self.line_numbers.replace(numbered) != numbered {
+            self.refresh();
+        }
+    }
+    /// Grow and shrink a multiline editor's box with its text, as a chat
+    /// composer does: its height is the text's (wrapped at its width) and
+    /// its padding, held between its `min_height` and `max_height`, past
+    /// which the text scrolls. Single-line controls keep theirs.
+    pub fn set_auto_height(&self, auto: bool) {
+        let auto = auto && self.multiline;
+        if self.auto_height.replace(auto) != auto {
             self.refresh();
         }
     }
@@ -441,6 +551,8 @@ struct UiStorage {
     mount_theme: RefCell<Option<Rc<ThemeScope>>>,
     text_geometry_revision: Signal<u64>,
     presented: Signal<bool>,
+    /// The modifier keys held now (`Ui::set_held_keys`).
+    held_keys: Signal<crate::input::Modifiers>,
     /// Where popups may show (`Ui::set_popup_screens`).
     popup_screens: Signal<Vec<Rect>>,
     /// Open signals of anchored popups, by their popup roots
@@ -640,6 +752,7 @@ impl Ui {
             mount_theme: RefCell::new(None),
             text_geometry_revision: runtime.signal(0),
             presented: runtime.signal(true),
+            held_keys: runtime.signal(crate::input::Modifiers::default()),
             overlay_scrollbars: runtime.signal(false),
             popup_screens: runtime.signal(Vec::new()),
             popups: RefCell::new(Vec::new()),
@@ -1415,6 +1528,20 @@ impl Ui {
     /// Headless hosts default to presented; hidden/suspended hosts should set false.
     pub fn set_presented(&self, presented: bool) {
         self.storage.presented.set(presented);
+    }
+    /// The modifier keys held down now, as the host last said: none while
+    /// its window is at the back. A view reads it (`HeldKeys`, provided to
+    /// every view mounted here) to show what a held key offers, as a
+    /// sidebar shows ⌘1 to ⌘9 while ⌘ is down.
+    pub fn held_keys(&self) -> Signal<crate::input::Modifiers> {
+        self.storage.held_keys.clone()
+    }
+    /// The host's word on the modifier keys held (each change of them, and
+    /// none as its window goes to the back).
+    pub fn set_held_keys(&self, held: crate::input::Modifiers) {
+        if self.storage.held_keys.with_untracked(|now| *now != held) {
+            self.storage.held_keys.set(held);
+        }
     }
     /// Draw scrollbars as macOS's overlay ones (and GTK's) are: hidden until
     /// the user scrolls their view, then fading out a second after it stops,
@@ -2201,6 +2328,9 @@ impl Ui {
                 Transform { x: 8., y: 6. }
             },
         );
+        // References as chips (`set_chips`), under the selection and text.
+        let chip_layer = self.container(viewport, Layout::Overlay, Style::default());
+        let chip_nodes: Rc<RefCell<Vec<NodeId>>> = Rc::default();
         let selection_layer = self.container(viewport, Layout::Overlay, Style::default());
         // Line numbers (`set_line_numbers`): a clipped column beside the
         // viewport, which moves right to make room.
@@ -2208,6 +2338,8 @@ impl Ui {
         let number_nodes: Rc<RefCell<Vec<NodeId>>> = Rc::default();
         let line_numbers = Rc::new(Cell::new(false));
         let draw_numbers = line_numbers.clone();
+        let auto_height = Rc::new(Cell::new(false));
+        let draw_auto_height = auto_height.clone();
         let mut initial = value.get();
         if let std::borrow::Cow::Owned(canonical) = normalize_text(&initial, multiline) {
             initial = canonical;
@@ -2434,6 +2566,37 @@ impl Ui {
                 }
             }
             let (tw, th) = layout.size();
+            // Written after the layout (what follows it may read the scene).
+            let mut fits_now = None;
+            if let Some((fits, inset)) = draw_hint.fits.borrow().clone() {
+                let text = e.text();
+                // An empty draft is no width: nothing to shape.
+                let width = (!text.contains('\n')).then(|| {
+                    if text.is_empty() {
+                        0.
+                    } else {
+                        s.measure_text_with_font(text, size, None, &font).0
+                    }
+                });
+                let room = inner_width - inset;
+                let was = fits.with_untracked(|f| *f);
+                let now = line_fits(was, width, room);
+                if was != now {
+                    fits_now = Some((fits, now));
+                }
+            }
+            // Auto height: the box asks for the text's; layout holds it
+            // between its min and max, and lays the text out again in the
+            // box it gets (the next refresh asks for the same: it settles).
+            if draw_auto_height.get() {
+                let want = th + padding.top + padding.bottom;
+                let mut style = s.style(root).clone();
+                if style.height.is_none_or(|h| (h - want).abs() > 0.25) {
+                    style.height = Some(want);
+                    style.height_percent = None;
+                    s.set_style(root, style);
+                }
+            }
             let limit = (
                 if draw_wrap.get() {
                     0.
@@ -2513,6 +2676,59 @@ impl Ui {
             } else {
                 Vec::new()
             };
+            // Chips: a rounded fill behind each finished reference, 2 wider
+            // each side than its text, the line's height.
+            let ranges = draw_hint.chips_in(e.text());
+            *draw_hint.known_chips.borrow_mut() = ranges
+                .iter()
+                .map(|r| e.text()[r.clone()].to_owned())
+                .collect();
+            let chips: Vec<_> = match &*draw_hint.chips.borrow() {
+                Some((_, fill)) if !draw_hint.secure.get() => ranges
+                    .into_iter()
+                    .flat_map(|range| layout.selection(range))
+                    .filter_map(|r| {
+                        let y = r.y - scroll.1;
+                        (y + r.height > 0. && y < inner_height).then_some((
+                            r.x - scroll.0 - 2.,
+                            y + 1.,
+                            r.width + 4.,
+                            (r.height - 2.).max(0.),
+                            *fill,
+                        ))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let mut drawn = chip_nodes.borrow_mut();
+            while drawn.len() > chips.len() {
+                s.remove(drawn.pop().unwrap());
+            }
+            while drawn.len() < chips.len() {
+                drawn.push(s.append(
+                    chip_layer,
+                    NodeKind::Rect(Color(0, 0, 0, 0)),
+                    Style::default(),
+                ));
+            }
+            for (id, (x, y, w, h, fill)) in drawn.iter().zip(chips) {
+                let kind = NodeKind::Quad(crate::scene::QuadStyle {
+                    fill,
+                    radius: 5.,
+                    border_color: Color(0, 0, 0, 0),
+                    border_width: 0.,
+                    shadow: None,
+                    decoration: None,
+                    border_over: false,
+                    outline: None,
+                });
+                if *s.kind(*id) != kind {
+                    s.set_kind(*id, kind);
+                }
+                s.set_style(*id, fixed(w, h));
+                s.set_transform(*id, Transform { x, y });
+            }
+            drop(drawn);
             let mut nodes = selection_nodes.borrow_mut();
             while nodes.len() > rects.len() {
                 s.remove(nodes.pop().unwrap());
@@ -2675,6 +2891,15 @@ impl Ui {
                 draw_read_only.get(),
             );
             semantics.set_placeholder(root, placeholder.as_ref().map(|(hint, _)| hint.as_ref()));
+            // After this layout: what follows it (a composer flipping its
+            // row) rebuilds around the editor, which must not be mid-refresh.
+            if let Some((fits, now)) = fits_now
+                && let Some(storage) = draw_storage.upgrade()
+            {
+                storage.after_layout.borrow_mut().push(Box::new(move || {
+                    fits.set(now);
+                }));
+            }
         });
         // Geometry refresh may make an existing stationary drag scrollable.
         // The weak callback avoids refresh -> arm -> tick -> refresh ownership cycles.
@@ -2700,6 +2925,7 @@ impl Ui {
             typography: typography.clone(),
             wrap: wrap.clone(),
             line_numbers: line_numbers.clone(),
+            auto_height: auto_height.clone(),
             preferred_x: preferred_x.clone(),
             text,
             scene: self.scene.clone(),
@@ -2926,6 +3152,7 @@ impl Ui {
         };
         *interaction_refresh.borrow_mut() = Some(Rc::downgrade(&arm));
         let draw = refresh.clone();
+        let key_hint = hint.clone();
         self.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Target {
                 return;
@@ -3401,6 +3628,27 @@ impl Ui {
                             }
                             Key::Delete if cfg!(target_os = "macos") && modifiers.meta => {
                                 changed = e.delete_to_line_end();
+                            }
+                            // A chip goes whole: from its end backward, from
+                            // its start forward.
+                            Key::Backspace | Key::Delete
+                                if let Some(chip) = {
+                                    let sel = e.selection();
+                                    (sel.anchor == sel.focus)
+                                        .then(|| key_hint.chips_in(e.text()))
+                                        .and_then(|chips| {
+                                            chips.into_iter().find(|r| {
+                                                if matches!(key, Key::Backspace) {
+                                                    r.end == sel.focus
+                                                } else {
+                                                    r.start == sel.focus
+                                                }
+                                            })
+                                        })
+                                } =>
+                            {
+                                e.set_selection(chip.start, chip.end);
+                                changed = e.delete_backward(false);
                             }
                             Key::Backspace => {
                                 changed = e.delete_backward(word);

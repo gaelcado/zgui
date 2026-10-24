@@ -8,6 +8,7 @@ on_press: (((e: PointerEvent) -> ()) | Action)?
 on_release: (((e: PointerEvent) -> ()) | Action)?
 on_hover: (((inside: boolean) -> ()) | Action)?
 on_pointer_move: (((e: PointerEvent) -> ()) | Action)?
+on_press_move: (((e: PointerEvent) -> ()) | Action)?
 on_key: (((e: KeyEvent) -> boolean?) | Action)?
 on_key_up: (((key: string) -> ()) | Action)?
 on_focus: (Handler | Action)?
@@ -34,6 +35,7 @@ on_drop: ((payload: any, e: DragPoint) -> ())?
 | `on_release` | the same | the primary button comes up |
 | `on_hover` | `true`, then `false` | once when the pointer comes inside the node or anything in it, once when it is outside all of them (the DOM's `mouseenter` and `mouseleave`); leaving the window, the window going to the back, and the pointer moving onto a page or a terminal count as leaving |
 | `on_pointer_move` | `{ x, y, local_x, local_y }` | the pointer moves over it (or anywhere, while it holds the pointer) |
+| `on_press_move` | the same | the pointer moves while a primary press that began on it is held, wherever it goes (it keeps the pointer until release): a divider's drag, with nothing run as the pointer merely passes over |
 | `on_key` | `{ key, code, shift, ctrl, alt, meta, repeat, editing }` (`code`: the physical key, as the DOM's `KeyboardEvent.code`, `"KeyA"`, `"Digit1"`; `editing`: a text field holds focus, so a bare-key shortcut gives way) | a key goes down while it, or a node inside it, has focus. Return `true` to consume the key: the default action and the ancestors' handlers do not see it |
 | `on_key_up` | the key's name | the key comes up |
 | `on_focus`, `on_blur` | nothing | it takes or loses keyboard focus |
@@ -48,6 +50,8 @@ on_drop: ((payload: any, e: DragPoint) -> ())?
 | `on_drag_over` | the payload, `{ x, y, local_x, local_y, w, h }` | an accepted drag moves over it |
 | `on_drag_leave` | the payload | the drag leaves it |
 | `on_drop` | the payload, `{ x, y, local_x, local_y, w, h }` | an accepted drag is released over it |
+
+`ui.keys` is the modifier keys held now, `{ shift, ctrl, alt, meta }`, as a state: the window says each change of them (none while it is at the back), so what a held key offers can show while it is down, without a key handler (a sidebar's ⌘1 to ⌘9 beside its rows, bound to a `ui.computed` of it). A Rust view reads the same from `Ui::held_keys`, which the desktop host keeps.
 
 `x` and `y` are in points from the window's top left, `local_x` and `local_y` from the node's, `w` and `h` its size. Key names are the character typed (`"a"`, `"A"`, `"/"`), `" "` for Space, `"F1"` to `"F35"`, or one of `"Tab"`, `"Enter"`, `"Escape"`, `"Backspace"`, `"Delete"`, `"ArrowLeft"`, `"ArrowRight"`, `"ArrowUp"`, `"ArrowDown"`, `"Home"`, `"End"`, `"PageUp"`, `"PageDown"`, `"Insert"`.
 

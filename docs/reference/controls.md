@@ -46,6 +46,9 @@ A text editor bound to a string state: selection, undo, clipboard and IME includ
 | `shrink` | `number` | `1` | a row too narrow for it shrinks it, to nothing if need be (it scrolls its text); `shrink = 0` holds it |
 | `wrap` | `boolean` | `false` | `textarea`: wrap long lines rather than scroll them |
 | `line_numbers` | `boolean` | `false` | `textarea`: number the lines in a gutter at the left, the caret's brighter (a code editor); only the lines in view are built |
+| `auto_height` | `boolean` | `false` | `textarea`: as tall as its text (wrapped at its width) and its padding, held between `min_h` and `max_h`, past which it scrolls: a chat composer growing line by line, without the script measuring anything. `layout = "height"` on a box around it eases the growth |
+| `chips`, `chip_color` | `string`, color | none | finished references as chips: a word starting with one of the `chips` characters and followed by a space (`"@"`: `@src/main.rs `, as a completion's pick leaves it) sits on a rounded fill in `chip_color` (the selection's unless set), and a backspace at its end (a delete at its start) takes it whole; the engine finds and draws them, no script per key |
+| `fits`, `fits_inset` | `State<boolean>`, `number` | none | written whether the text fits on one line `fits_inset` points narrower than the text box: a composer folds into one row while its draft is short and opens out as it grows. A line break never fits, nor a line under 200 wide; once it does not fit it must fall 32 under before it fits again (no flip-flop at the edge). Written only when that changes, by the engine |
 
 Its element (`on_mount`, a [ref](state.md#refs)) selects text: `el:select_all()`, `el:set_selection(a, b)`, `local a, b = el:selection()`, in characters ([events](events.md#elements)).
 

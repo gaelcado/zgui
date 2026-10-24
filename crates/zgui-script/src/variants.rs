@@ -39,10 +39,11 @@ pub(crate) type Lits = Vec<(Prop, Lit)>;
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct Layer {
     pub props: Lits,
-    pub interaction: [Lits; 4],
+    pub interaction: [Lits; 5],
 }
-/// The interaction tables' names, in `Layer::interaction`'s order.
-pub(crate) const INTERACTION: [&str; 4] = ["hover", "active", "focus", "disabled"];
+/// The interaction tables' names, in `Layer::interaction`'s order: zgui's
+/// four interaction styles, then the hover group's.
+pub(crate) const INTERACTION: [&str; 5] = ["hover", "active", "focus", "disabled", "group_hover"];
 
 struct Axis {
     name: Rc<str>,
@@ -66,6 +67,8 @@ pub(crate) struct Recipe {
     props: Vec<Prop>,
     /// Whether some layer sets interaction styles.
     interacts: bool,
+    /// Whether some layer sets `group_hover` styles.
+    group_hovers: bool,
     /// What each choice resolves to, made the first time it is chosen.
     resolved: RefCell<HashMap<Box<[u16]>, Rc<Layer>>>,
 }
@@ -262,6 +265,7 @@ pub(crate) fn define(lua: &Lua, definition: Table) -> mlua::Result<RecipeUd> {
         compound: Vec::new(),
         props: Vec::new(),
         interacts: false,
+        group_hovers: false,
         resolved: RefCell::default(),
     };
     if let Some(defaults) = definition.get::<Option<Table>>("defaults")? {
@@ -322,6 +326,7 @@ pub(crate) fn define(lua: &Lua, definition: Table) -> mlua::Result<RecipeUd> {
             }
         }
         recipe.interacts |= layer.interaction.iter().any(|s| !s.is_empty());
+        recipe.group_hovers |= !layer.interaction[4].is_empty();
     }
     warn_overlaps(lua, &recipe);
     Ok(RecipeUd(Rc::new(recipe)))
@@ -432,6 +437,9 @@ impl Selection {
     }
     pub(crate) fn interacts(&self) -> bool {
         self.recipe.interacts
+    }
+    pub(crate) fn recipe_group_hovers(&self) -> bool {
+        self.recipe.group_hovers
     }
     /// The choice now, reading (and so following) the states choosing it.
     pub(crate) fn key(&self) -> Box<[u16]> {

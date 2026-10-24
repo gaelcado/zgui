@@ -217,11 +217,13 @@ normalized value through `FontStyle::letter_spacing`.
 
 ## Interaction and reactive styles
 
-Styles resolve in this order: base fluent properties, `reactive_style`, hover, active, focus, disabled. Later patches take precedence only for fields they specify. While disabled, hover, active, and focus patches are excluded. Removing a state or a dynamic property restores the underlying style; it does not leave stale values behind.
+Styles resolve in this order: base fluent properties, `reactive_style`, group hover, hover, active, focus, disabled. Later patches take precedence only for fields they specify. While disabled, hover, active, and focus patches are excluded. Removing a state or a dynamic property restores the underlying style; it does not leave stale values behind.
 
 `.disabled(true)` and `.disabled_when(|| signal.get())` disable interaction and update accessibility. `.disabled_style(...)` controls appearance; supplying that patch alone does not disable a view. Focus is cleared when a focused subtree becomes disabled. Buttons support pointer and keyboard activation.
 
 A view is hovered while the pointer is over it or anything inside it, as the DOM's `mouseenter` and `mouseleave` decide: `hover` styles hold while the pointer moves between its children, and its `on_event` listener hears one `PointerEnter` when the pointer comes inside and one `PointerLeave` when it is outside it and all its descendants, each at the target phase (they do not bubble). Overlapping siblings follow hit order: where a positioned sibling covers another, only it (and its ancestors) is hovered. Leaving the window, the window going to the back and the pointer moving onto a native view that takes input (a web page, a terminal) all leave whatever was hovered. Tracking costs a walk up from the new hit target when it changes and nothing when it does not.
+
+`.hover_group()` makes a view a hover group (Tailwind's `group`), and `.group_hover(|s| ..)` styles a descendant while its nearest group is hovered (`group-hover:`): a row's close button shows as the pointer enters anywhere in the row, with no listener or state in the app. `.group_hover_when(|| ..)` takes styles that follow what they read (a variant chosen by state). They lie over the base and the reactive style and under the view's own hover, active and focus styles; outside a group they never apply. A group's hover changes restyle only the views that set group hover styles in it.
 
 ### Input placeholders
 

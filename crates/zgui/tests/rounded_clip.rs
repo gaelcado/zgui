@@ -388,18 +388,18 @@ fn fade_overflow_shows_only_the_bands_content_runs_past() {
 }
 
 #[test]
-fn fade_overflow_measures_a_scroll_views_content() {
+fn fade_overflow_looks_through_a_scroll_views_viewport() {
     let mut ui = Ui::new(400., 300.);
-    let offset = ui.signal(0_f32);
+    let offset = ui.signal(0.);
     let view = ui.mount(
         column().child(
-            zgui::compose::scroll(offset.clone())
+            scroll(offset.clone())
                 .id("view")
                 .w(200.)
                 .h(100.)
                 .fade_edges(14., 18.)
                 .fade_overflow(true)
-                .child(column().id("list").h(300.).child(div().id("row").h(20.))),
+                .child(column().h(300.).child(div().id("row").h(20.))),
         ),
     );
     let bands = |ui: &mut Ui| {
@@ -414,9 +414,45 @@ fn fade_overflow_measures_a_scroll_views_content() {
             .unwrap();
         item.mask().map(|(_, bands)| bands)
     };
-    // The scrolled content sits under the scroll view's own viewport: its
-    // overflow counts all the same.
     assert_eq!(bands(&mut ui), Some([0., 0., 18., 0.]));
     offset.set(5.);
     assert_eq!(bands(&mut ui), Some([5., 0., 18., 0.]));
+    offset.set(400.);
+    assert_eq!(bands(&mut ui), Some([14., 0., 0., 0.]));
+}
+
+#[test]
+fn fade_overflow_measures_an_editors_text_inside_its_padding() {
+    let mut ui = Ui::new(400., 300.);
+    let value = ui.signal("line\n".repeat(30));
+    let view = ui.mount(
+        column().child(
+            text_area("notes", value)
+                .id("notes")
+                .w(200.)
+                .h(60.)
+                .p(6.)
+                .fade_edges(12., 12.)
+                .fade_overflow(true),
+        ),
+    );
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    let root = view.find("notes").unwrap();
+    let scene = ui.scene.borrow();
+    let mut inside = vec![root];
+    let mut i = 0;
+    while i < inside.len() {
+        inside.extend_from_slice(scene.children(inside[i]));
+        i += 1;
+    }
+    let bands: Vec<_> = scene
+        .layer_items(None)
+        .into_iter()
+        .filter(|item| item.id != root && inside.contains(&item.id))
+        .filter_map(|item| item.mask().map(|(_, bands)| bands))
+        .collect();
+    // At the start, the text runs past the bottom only.
+    assert!(!bands.is_empty());
+    assert!(bands.iter().all(|b| *b == [0., 0., 12., 0.]));
 }

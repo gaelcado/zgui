@@ -115,6 +115,8 @@ pub(crate) struct Environment {
     measure: crate::rich_text::TextMeasure,
     /// The theme scope styles in this subtree resolve tokens from.
     pub(crate) theme: Rc<crate::theme::ThemeScope>,
+    /// The nearest `hover_group` view's hover, for `group_hover` styles.
+    hover_group: Option<Signal<bool>>,
 }
 /// Mount-time component context. State is allocated once; there are no positional hooks.
 pub struct Context {
@@ -273,6 +275,8 @@ enum Kind {
 }
 type EventListener = Box<dyn FnMut(&mut EventContext)>;
 
+/// `View::fits`'s inset, followed.
+type FitsInset = Box<dyn FnMut() -> f32>;
 /// A mount description, consumed into owned retained nodes and subscriptions.
 /// `.child`/`.children` compose views; `.style` and fluent methods apply to their root.
 /// A view's overlay options (`View::placement`, `modal_placement`,
@@ -290,6 +294,8 @@ struct PortalOptions {
     lazy: bool,
     /// `View::open_over`: the id of the item over the trigger.
     over: Option<Rc<dyn Fn() -> String>>,
+    /// `View::on_open`, `View::exit`: what runs as it opens and closes.
+    transition: crate::compose_modal::Transition,
 }
 pub struct View {
     kind: Kind,
@@ -297,6 +303,11 @@ pub struct View {
     children: Vec<View>,
     variants: Variants,
     reactive_style: Option<Box<dyn FnMut() -> Styles>>,
+    /// Whether descendants' `group_hover` styles follow this view's hover.
+    hover_group: bool,
+    /// Styles laid over this view's own while its nearest `hover_group`
+    /// ancestor is hovered.
+    group_hover: Option<Box<dyn FnMut() -> Styles>>,
     disabled: Option<Box<dyn FnMut() -> bool>>,
     read_only: Option<Box<dyn FnMut() -> bool>>,
     click: Option<Box<dyn FnMut(crate::input::Modifiers)>>,
@@ -313,7 +324,8 @@ pub struct View {
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
     id: Option<String>,
     scrollbar: Option<bool>,
-    follow_end: Option<bool>,
+    follow_end: Option<Follow>,
+    at_end: Option<Signal<bool>>,
     animation: Option<animation::Animated>,
     keyboard_navigation: Option<bool>,
     dismiss_backdrop: Option<bool>,
@@ -336,6 +348,12 @@ pub struct View {
     secure: Option<bool>,
     spellcheck: Option<Box<dyn FnMut() -> bool>>,
     line_numbers: Option<bool>,
+    auto_height: Option<bool>,
+    /// `View::fits`: written whether the text fits one line, that line's
+    /// inset (followed).
+    fits: Option<(Signal<bool>, FitsInset)>,
+    /// `View::chips`: the triggers, and the chips' fill, followed.
+    chips: Option<(String, Box<dyn FnMut() -> crate::scene::Color>)>,
     window_drag: bool,
     /// `View::selectable`.
     selectable: Option<bool>,
@@ -420,6 +438,8 @@ impl View {
             children: Vec::new(),
             variants: Variants::default(),
             reactive_style: None,
+            hover_group: false,
+            group_hover: None,
             disabled: None,
             read_only: None,
             click: None,
@@ -434,6 +454,7 @@ impl View {
             id: None,
             scrollbar: None,
             follow_end: None,
+            at_end: None,
             animation: None,
             keyboard_navigation: None,
             dismiss_backdrop: None,
@@ -453,6 +474,9 @@ impl View {
             secure: None,
             spellcheck: None,
             line_numbers: None,
+            auto_height: None,
+            chips: None,
+            fits: None,
             window_drag: false,
             selectable: None,
             selection_style: None,
@@ -490,7 +514,21 @@ impl View {
     /// Keep a scroll viewport at its end while its content grows, as long as
     /// it was at the end (a chat transcript); scrolling away releases it.
     pub fn follow_end(mut self, follow: bool) -> Self {
-        self.follow_end = Some(follow);
+        self.follow_end = Some(Follow::Always(follow));
+        self
+    }
+    /// `follow_end` while `follow` holds (a chat while a reply streams):
+    /// growth moves a pinned view only then; otherwise what grows extends
+    /// below, the view staying where it is.
+    pub fn follow_end_when(mut self, follow: Signal<bool>) -> Self {
+        self.follow_end = Some(Follow::When(follow));
+        self
+    }
+    /// Writes whether a scroll viewport is at its end (within half a
+    /// point): a "scroll to bottom" pill shows while it is not. The signal
+    /// changes only when that does, so nothing runs while scrolling.
+    pub fn at_end(mut self, at_end: Signal<bool>) -> Self {
+        self.at_end = Some(at_end);
         self
     }
     /// Enable bounded keyboard row navigation on a virtual list.
@@ -532,6 +570,21 @@ impl View {
     /// in the accessibility tree before then.
     pub fn lazy(mut self) -> Self {
         self.portal.get_or_insert_default().lazy = true;
+        self
+    }
+    /// Run `f` each time a modal, popover or menu opens, once its panel is
+    /// shown (an entrance animation on it).
+    pub fn on_open(mut self, f: impl Fn() + 'static) -> Self {
+        self.portal.get_or_insert_default().transition.open = Some(Rc::new(f));
+        self
+    }
+    /// Close a modal, popover or menu through an exit: as it closes it takes
+    /// no input and gives focus back at once, but stays drawn while `f`
+    /// plays (an exit animation), until `f` calls the `done` it is given;
+    /// then it hides. Opening again in the meantime keeps it shown and makes
+    /// that `done` do nothing.
+    pub fn exit(mut self, f: impl Fn(Rc<dyn Fn()>) + 'static) -> Self {
+        self.portal.get_or_insert_default().transition.exit = Some(Rc::new(f));
         self
     }
     /// Whether a modal, popover or menu focuses its first control as it
@@ -684,6 +737,28 @@ impl View {
         self.variants.hover = Some(Box::new(style(Styles::new())));
         self
     }
+    /// Makes this view a hover group (Tailwind's `group`): descendants'
+    /// `group_hover` styles hold while the pointer is over it or anything
+    /// inside it. A row reveals its close button this way, with no state.
+    pub fn hover_group(mut self) -> Self {
+        self.hover_group = true;
+        self
+    }
+    /// Styles laid over this view's own while its nearest `hover_group`
+    /// ancestor is hovered (CSS `.group:hover .child`), under its own
+    /// `hover`, `active`, `focus` and `disabled` styles. Outside a group
+    /// they never apply.
+    pub fn group_hover(self, style: impl FnOnce(Styles) -> Styles) -> Self {
+        let style = style(Styles::new());
+        self.group_hover_when(move || style.clone())
+    }
+    /// `group_hover`, followed: `style` runs in the view's style effect
+    /// while the group is hovered, so it follows what it reads (a variant
+    /// chosen by state).
+    pub fn group_hover_when(mut self, style: impl FnMut() -> Styles + 'static) -> Self {
+        self.group_hover = Some(Box::new(style));
+        self
+    }
     pub fn active(mut self, style: impl FnOnce(Styles) -> Styles) -> Self {
         self.variants.active = Some(Box::new(style(Styles::new())));
         self
@@ -781,6 +856,12 @@ impl View {
     /// widgets behave: Tab lands on the one last focused, or the selected
     /// one (`selected_when`). A `ListBox` is vertical, a `Toolbar` or
     /// `TabList` horizontal, without asking.
+    /// Whether its focus group's arrows go round past its ends: tab lists
+    /// and menus do unless told, other groups only when told.
+    pub fn focus_wrap(mut self, wrap: bool) -> Self {
+        self.accessibility_mut().focus_wrap = Some(wrap);
+        self
+    }
     pub fn focus_group(mut self, axis: crate::input::FocusGroup) -> Self {
         self.accessibility_mut().focus_group = Some(axis);
         self
@@ -867,6 +948,34 @@ impl View {
         self.line_numbers = Some(numbered);
         self
     }
+    /// A multiline editor's height follows its text, between its
+    /// `min_h` and `max_h`, past which it scrolls (see
+    /// `EditorHandle::set_auto_height`). Only editor roots accept this.
+    pub fn auto_height(mut self, auto: bool) -> Self {
+        self.auto_height = Some(auto);
+        self
+    }
+    /// Write into `fits` whether an editor's text fits on one line
+    /// `inset()` points narrower than its text box (followed), with
+    /// Zeron's hysteresis (see `EditorHandle::set_fits`): a composer's one
+    /// row while its draft is short. Only editor roots accept this.
+    pub fn fits(mut self, fits: Signal<bool>, inset: impl FnMut() -> f32 + 'static) -> Self {
+        self.fits = Some((fits, Box::new(inset)));
+        self
+    }
+    /// An editor's finished references as chips: a word starting with one
+    /// of `triggers` and followed by a space (`@src/main.rs `, as a
+    /// completion leaves it) sits on a rounded fill of `color` (followed),
+    /// and a backspace at its end (a delete at its start) takes it whole
+    /// (see `EditorHandle::set_chips`). Only editor roots accept this.
+    pub fn chips(
+        mut self,
+        triggers: impl Into<String>,
+        color: impl FnMut() -> crate::scene::Color + 'static,
+    ) -> Self {
+        self.chips = Some((triggers.into(), Box::new(color)));
+        self
+    }
     /// Make the view a window drag region, like CSS's
     /// `-webkit-app-region: drag`: a primary press on it, or on anything
     /// inside it that does not take input itself, moves the window, and a
@@ -946,6 +1055,9 @@ impl View {
         if self.scrollbar.is_some() {
             inner.scrollbar = self.scrollbar;
         }
+        if self.at_end.is_some() {
+            inner.at_end = self.at_end;
+        }
         if self.follow_end.is_some() {
             inner.follow_end = self.follow_end;
         }
@@ -967,6 +1079,17 @@ impl View {
             inner.focusable = self.focusable;
         }
         inner.contents |= self.contents;
+        inner.hover_group |= self.hover_group;
+        if let Some(mut outer) = self.group_hover {
+            inner.group_hover = Some(match inner.group_hover.take() {
+                Some(mut original) => Box::new(move || {
+                    let mut style = original();
+                    style.merge(&outer());
+                    style
+                }),
+                None => outer,
+            });
+        }
         if self.pointer_events.is_some() {
             inner.pointer_events = self.pointer_events;
         }
@@ -1054,6 +1177,15 @@ impl View {
         }
         if self.line_numbers.is_some() {
             inner.line_numbers = self.line_numbers;
+        }
+        if self.auto_height.is_some() {
+            inner.auto_height = self.auto_height;
+        }
+        if self.chips.is_some() {
+            inner.chips = self.chips;
+        }
+        if self.fits.is_some() {
+            inner.fits = self.fits;
         }
         inner.window_drag |= self.window_drag;
         if self.selectable.is_some() {
@@ -2159,10 +2291,18 @@ fn mount_portal_panel(
     // A submenu leaves the pointer to its parent menu (moving over its other
     // items closes it); the parent's backdrop dismisses both.
     let dismiss_backdrop = view.dismiss_backdrop.take().unwrap_or(!is_submenu);
-    let (placement, modal_placement, autofocus, over) =
-        view.portal.take().map_or((None, None, None, None), |p| {
-            (p.placement, p.modal_placement, p.autofocus, p.over)
-        });
+    let (placement, modal_placement, autofocus, over, transition) =
+        view.portal
+            .take()
+            .map_or((None, None, None, None, Default::default()), |p| {
+                (
+                    p.placement,
+                    p.modal_placement,
+                    p.autofocus,
+                    p.over,
+                    p.transition,
+                )
+            });
     let placement = placement.unwrap_or_default();
     let panel_focusable = view.focusable.unwrap_or(true);
     let layout_target = is_menu.then(|| ui.signal(None));
@@ -2278,6 +2418,7 @@ fn mount_portal_panel(
         is_submenu,
         autofocus.unwrap_or(true),
         is_layer,
+        transition,
     );
     // A pop-up button's menu opens with its chosen item (`open_over`)
     // highlighted, rather than its first.
@@ -2413,7 +2554,10 @@ fn mount_element(
         "scrollbar is only supported on scroll, scroll_x, and virtual_list views"
     );
     let scrollbar = view.scrollbar.unwrap_or(false);
-    let follow_end = view.follow_end.unwrap_or(false);
+    let follow_end = ScrollEnd {
+        follow: view.follow_end.take().unwrap_or(Follow::Always(false)),
+        at_end: view.at_end.take(),
+    };
     // Decorated/padded text gets an actual layout box. Plain text stays a single
     // node, keeping common reactive labels small. Dynamic/state styles may add
     // decoration later, so reserve that box at mount rather than remount on hover.
@@ -2479,7 +2623,7 @@ struct Opened {
     scroll_offset: Option<(Signal<f32>, bool)>,
     scroll_nodes: Option<(NodeId, NodeId)>,
     scrollbar: bool,
-    follow_end: bool,
+    follow_end: ScrollEnd,
     compute: Option<Box<dyn FnMut() -> String>>,
     region: Option<RegionBuilder>,
     focusable: bool,
@@ -2498,10 +2642,26 @@ fn open_element(
     mut environment: Environment,
     keyboard_navigation: bool,
     scrollbar: bool,
-    follow_end: bool,
+    follow_end: ScrollEnd,
 ) -> Opened {
     let is_scroll = matches!(kind, Kind::Scroll { .. });
     let mut scroll_offset = None;
+    // Group hover styles ride on the dynamic style, over the base and under
+    // the interaction styles, following the nearest group's hover.
+    if let Some(mut group) = view.group_hover.take()
+        && let Some(hovered) = environment.hover_group.clone()
+    {
+        let mut dynamic = view.reactive_style.take();
+        view.reactive_style = Some(Box::new(move || {
+            let mut styles = dynamic
+                .as_mut()
+                .map_or_else(Styles::new, |compute| compute());
+            if hovered.get() {
+                styles.merge(&group());
+            }
+            styles
+        }));
+    }
     let is_image = matches!(kind, Kind::Image { .. });
     #[cfg(target_os = "macos")]
     let is_image = is_image || matches!(kind, Kind::NativeSurface { .. });
@@ -2535,6 +2695,18 @@ fn open_element(
     assert!(
         view.line_numbers.is_none() || is_editor,
         "line_numbers is only supported on editor views"
+    );
+    assert!(
+        view.auto_height.is_none() || is_editor,
+        "auto_height is only supported on editor views"
+    );
+    assert!(
+        view.chips.is_none() || is_editor,
+        "chips is only supported on editor views"
+    );
+    assert!(
+        view.fits.is_none() || is_editor,
+        "fits is only supported on editor views"
     );
     if is_editor {
         assert!(
@@ -2830,6 +3002,21 @@ fn open_element(
     };
     if view.contents {
         ui.scene.borrow_mut().set_contents(root, true);
+    }
+    if view.hover_group {
+        let hovered = ui.signal(false);
+        let set = hovered.clone();
+        ui.on_event(root, false, move |cx| {
+            let inside = match cx.event {
+                InputEvent::PointerEnter => true,
+                InputEvent::PointerLeave => false,
+                _ => return,
+            };
+            if cx.phase != EventPhase::Capture && set.with_untracked(|was| *was != inside) {
+                set.set(inside);
+            }
+        });
+        environment.hover_group = Some(hovered);
     }
     match view.selectable {
         Some(true) => crate::selection::mount_root(
@@ -3341,6 +3528,17 @@ fn open_element(
         if let Some(numbered) = view.line_numbers {
             editor.set_line_numbers(numbered);
         }
+        if let Some(auto) = view.auto_height {
+            editor.set_auto_height(auto);
+        }
+        if let Some((fits, mut inset)) = view.fits.take() {
+            let editor = editor.clone();
+            ui.bind(root, move || editor.set_fits(fits.clone(), inset()));
+        }
+        if let Some((triggers, mut color)) = view.chips.take() {
+            let editor = editor.clone();
+            ui.bind(root, move || editor.set_chips(Some((&triggers, color()))));
+        }
         let (mut text, mut color) = (view.placeholder.take(), view.placeholder_color.take());
         if text.is_some() {
             let editor = editor.clone();
@@ -3587,6 +3785,26 @@ fn mount_window_drag(ui: &mut Ui, region: NodeId) {
         });
     });
 }
+/// Whether a scroll viewport stays at its end as its content grows: always
+/// (or never), or while a signal holds.
+enum Follow {
+    Always(bool),
+    When(Signal<bool>),
+}
+impl Follow {
+    fn get(&self) -> bool {
+        match self {
+            Follow::Always(on) => *on,
+            Follow::When(on) => on.get(),
+        }
+    }
+}
+/// What a scroll viewport does at its end: `follow_end`, and the
+/// `at_end` signal it writes.
+struct ScrollEnd {
+    follow: Follow,
+    at_end: Option<Signal<bool>>,
+}
 #[allow(clippy::too_many_arguments)]
 fn mount_scroll(
     ui: &mut Ui,
@@ -3596,7 +3814,7 @@ fn mount_scroll(
     offset: Signal<f32>,
     horizontal: bool,
     scrollbar: bool,
-    follow_end: bool,
+    follow_end: ScrollEnd,
 ) {
     use crate::scene::{Style, Transform};
     let main_size = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
@@ -3726,22 +3944,52 @@ fn mount_scroll(
     // end. Only growth moves a pinned view; a new offset (a wheel, a script)
     // is taken as it is and decides whether the view stays pinned.
     let (applied, pinned) = (std::cell::Cell::new(0_f32), std::cell::Cell::new(true));
+    // A pinned view stays pinned as the viewport resizes (its content
+    // rewrapping), whether or not it follows growth now.
+    // The content rewraps a frame after the resize: the pass that sees it
+    // grow follows too.
+    let (across, along) = (
+        std::cell::Cell::new(None::<f32>),
+        std::cell::Cell::new(0_f32),
+    );
+    let rewrap = std::cell::Cell::new(false);
+    let stays = !matches!(follow_end.follow, Follow::Always(false));
     ui.bind(root, move || {
         let (width, height) = size.get();
-        let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
+        let full = main_size(extent.get());
+        let limit = (full - main_size((width, height))).max(0.);
         let requested = offset.get();
+        let cross = if horizontal { height } else { width };
+        let resized = across.replace(Some(cross)).is_some_and(|was| was != cross);
+        let grew = along.replace(full) != full;
+        if resized && stays {
+            rewrap.set(true);
+        }
+        let rewrapping = rewrap.get();
+        if rewrapping && grew && !resized || requested != applied.get() {
+            rewrap.set(false);
+        }
+        let follow = follow_end.follow.get() || rewrapping;
         let position = if requested.is_nan() {
             0.
-        } else if follow_end && pinned.get() && requested == applied.get() {
+        } else if follow && pinned.get() && requested == applied.get() {
             limit
         } else {
             requested.clamp(0., limit)
         };
-        if follow_end {
-            applied.set(position);
-            pinned.set(position >= limit - 0.5);
+        applied.set(position);
+        pinned.set(position >= limit - 0.5);
+        if let Some(at_end) = &follow_end.at_end {
+            let at = position >= limit - 0.5;
+            if at_end.with_untracked(|was| *was != at) {
+                at_end.set(at);
+            }
         }
-        if requested != position {
+        // Asked for the end (`f32::INFINITY`) before there is any room to
+        // scroll (the content not laid out yet): the ask stands until there
+        // is, rather than settling at the top.
+        let awaiting_end = requested == f32::INFINITY && limit <= 0.;
+        if requested != position && !awaiting_end {
             offset.set(position);
         }
         let mut scene = scene.borrow_mut();
@@ -4202,6 +4450,7 @@ pub(crate) struct Accessibility {
     description: Option<String>,
     hidden: bool,
     focus_group: Option<crate::input::FocusGroup>,
+    focus_wrap: Option<bool>,
 }
 fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility) {
     let Accessibility {
@@ -4212,6 +4461,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility) 
         description,
         hidden,
         focus_group,
+        focus_wrap,
     } = accessibility;
     // Composite widgets keep one Tab stop, as a browser's do.
     let focus_group = focus_group.or(match role {
@@ -4221,6 +4471,9 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility) 
     });
     if let Some(axis) = focus_group {
         ui.input.set_focus_group(root, Some(axis));
+        // Tabs and menus go round, as ARIA's do; a list box stops.
+        let wrap = focus_wrap.unwrap_or(matches!(role, Some(Role::TabList | Role::Menu)));
+        ui.input.set_focus_wrap(root, wrap);
         // Its children mounted first: one already selected is its stop.
         let selected = {
             let scene = ui.scene.borrow();
@@ -4317,6 +4570,18 @@ pub struct NodeHandle {
 impl NodeHandle {
     pub fn node(&self) -> NodeId {
         self.node
+    }
+    /// Make the node and everything in it inert (HTML's `inert`): the
+    /// pointer passes through to what is under it, listeners or not, as for
+    /// content on its way out.
+    pub fn set_inert(&self, inert: bool) {
+        if let Some(ui) = self.ui.upgrade() {
+            let mut options = ui.input.options(self.node).unwrap_or_default();
+            if options.inert != inert {
+                options.inert = inert;
+                ui.input.set_options(self.node, options);
+            }
+        }
     }
     pub(crate) fn weak_ui(&self) -> WeakUi {
         self.ui.clone()
@@ -4540,14 +4805,17 @@ impl Ui {
             font: Default::default(),
             family: Some(tok::FONT_SANS.into()),
         });
+        let mut services = ServiceScope::new();
+        services.provide(crate::input::HeldKeys(self.held_keys()));
         let environment = Environment {
-            services: ServiceScope::new(),
+            services,
             typography,
             registry: registry.clone(),
             portal: None,
             menu: None,
             measure: self.scene.borrow().text_measure(),
             theme,
+            hover_group: None,
         };
         let runtime = self.runtime.clone();
         let mut ui = self.shared();

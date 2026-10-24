@@ -312,6 +312,7 @@ fn parse_at(text: &str, offset: usize, options: &Options) -> Vec<Top> {
         code: None,
         heading: None,
         image: None,
+        task: None,
         options,
     };
     let mut tops = Vec::new();
@@ -575,6 +576,8 @@ struct Builder<'a> {
     code: Option<(String, String)>,
     heading: Option<u8>,
     image: Option<(String, String)>,
+    /// A task item's box (`- [x]`), for its first paragraph's `task`.
+    task: Option<bool>,
     options: &'a Options,
 }
 
@@ -651,12 +654,12 @@ impl Builder<'_> {
             return;
         }
         let runs = self.take_runs();
+        let mut fields = vec![("t", "p".into()), ("s", runs), ("tight", Value::Bool(true))];
+        if let Some(done) = self.task.take() {
+            fields.push(("task", Value::Bool(done)));
+        }
         if let Some(Frame::Blocks(blocks)) = self.frames.last_mut() {
-            blocks.push(map(vec![
-                ("t", "p".into()),
-                ("s", runs),
-                ("tight", Value::Bool(true)),
-            ]));
+            blocks.push(map(fields));
         }
     }
 
@@ -740,7 +743,11 @@ impl Builder<'_> {
             Event::End(end) => match end {
                 TagEnd::Paragraph => {
                     let runs = self.take_runs();
-                    self.block(map(vec![("t", "p".into()), ("s", runs)]));
+                    let mut fields = vec![("t", "p".into()), ("s", runs)];
+                    if let Some(done) = self.task.take() {
+                        fields.push(("task", Value::Bool(done)));
+                    }
+                    self.block(map(fields));
                 }
                 TagEnd::Heading(_) => {
                     let runs = self.take_runs();
@@ -863,7 +870,9 @@ impl Builder<'_> {
             Event::HardBreak => self.push_text("\n", false),
             Event::Rule => self.block(map(vec![("t", "hr".into())])),
             Event::Html(_) | Event::InlineHtml(_) => {}
-            Event::TaskListMarker(done) => self.push_text(if done { "☑ " } else { "☐ " }, false),
+            // The item's box is its first paragraph's `task`, drawn by the
+            // script; its text stays the item's own.
+            Event::TaskListMarker(done) => self.task = Some(done),
             Event::FootnoteReference(name) => self.push_text(&format!("[{name}]"), false),
         }
     }
@@ -992,6 +1001,22 @@ mod tests {
         let first = items[0].list();
         assert_eq!(kinds(first), ["p", "ul"]);
         assert!(first[0].field("tight").is_some());
+    }
+
+    #[test]
+    fn task_items_carry_their_box_not_a_glyph() {
+        let blocks = parse("- [x] done\n- [ ] open\n- plain", &plain());
+        let items = blocks[0].field("items").unwrap().list();
+        let task = |i: usize| items[i].list()[0].field("task").cloned();
+        assert!(matches!(task(0), Some(Value::Bool(true))));
+        assert!(matches!(task(1), Some(Value::Bool(false))));
+        assert!(task(2).is_none(), "a plain item has no box");
+        let runs = items[0].list()[0].field("s").unwrap().list();
+        let text = runs[0].field("x").unwrap();
+        assert!(
+            matches!(text, Value::Str(t) if &**t == "done"),
+            "the text alone"
+        );
     }
 
     #[test]

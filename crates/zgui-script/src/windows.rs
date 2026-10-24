@@ -85,6 +85,18 @@ impl Windows {
 /// `ui.window.controls` read.
 pub(crate) const TITLEBAR_AREA: &str = "zgui.window.titlebar_area";
 pub(crate) const CONTROLS: &str = "zgui.window.controls";
+/// The shared key holding the modifier keys held (`ui.keys`).
+pub(crate) const KEYS: &str = "zgui.keys";
+
+/// `ui.keys`'s value: `{ shift, ctrl, alt, meta }`.
+pub(crate) fn keys(held: zgui::input::Modifiers) -> Value {
+    Value::Map(Rc::from([
+        (Rc::from("alt"), Value::Bool(held.alt)),
+        (Rc::from("ctrl"), Value::Bool(held.control)),
+        (Rc::from("meta"), Value::Bool(held.meta)),
+        (Rc::from("shift"), Value::Bool(held.shift)),
+    ]))
+}
 
 /// Installs `ui.window`: called, it declares a window; its
 /// `titlebar_area` and `controls` are the app's own window's.
@@ -100,6 +112,10 @@ pub(crate) fn install(
         State(shared.state(TITLEBAR_AREA, Value::Nil)),
     )?;
     window.set("controls", State(shared.state(CONTROLS, Value::Nil)))?;
+    ui.set(
+        "keys",
+        State(shared.state(KEYS, keys(zgui::input::Modifiers::default()))),
+    )?;
     let meta = lua.create_table()?;
     meta.set(
         "__call",

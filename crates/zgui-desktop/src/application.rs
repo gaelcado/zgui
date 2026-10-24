@@ -2462,6 +2462,8 @@ impl Host {
                     alt: s.alt_key(),
                     meta: s.super_key(),
                 };
+                // What a held key offers shows while it is down.
+                self.context.ui.set_held_keys(self.modifiers);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(self.scale_factor);
@@ -2653,6 +2655,8 @@ impl Host {
                 // Menus and popovers close as their window or the app
                 // loses focus, as AppKit's do.
                 self.context.ui.dismiss_popups();
+                // Keys held as it went to the back are not held here.
+                self.context.ui.set_held_keys(Modifiers::default());
                 self.deactivate()
             }
             WindowEvent::ThemeChanged(appearance) => {

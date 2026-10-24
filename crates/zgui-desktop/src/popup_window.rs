@@ -110,6 +110,26 @@ mod other {
     pub(crate) fn warm(_: &zgui_gpu::GpuContext, _: f32) {}
 }
 
+/// Whether popup root `root`'s panel (what the root holds) paints a shadow
+/// of its own. Its window then casts none: AppKit would shadow (or, since
+/// macOS 26, rim) the painted shadow's soft edge, not the panel's box.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn paints_shadow(scene: &zgui::scene::Scene, root: zgui::scene::NodeId) -> bool {
+    use zgui::scene::NodeKind;
+    let Some(&panel) = scene.children(root).first() else {
+        return false;
+    };
+    let (NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }) = scene.kind(panel) else {
+        return false;
+    };
+    let decorated = quad
+        .decoration
+        .as_ref()
+        .and_then(|d| d.shadows.as_ref())
+        .is_some_and(|shadows| !shadows.is_empty());
+    quad.shadow.is_some() || decorated
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::PopupInput;
@@ -929,7 +949,12 @@ mod macos {
                     panel.window.setLevel(NSPopUpMenuWindowLevel);
                     panel.window.orderFront(None);
                 }
-                if new || moved {
+                // A panel with a shadow of its own casts no window shadow.
+                let casts = !super::paints_shadow(scene, root);
+                if panel.window.hasShadow() != casts {
+                    panel.window.setHasShadow(casts);
+                }
+                if casts && (new || moved) {
                     // Its rim (macOS 26 menus have no drop shadow, only a
                     // rim) follows what it shows.
                     panel.window.invalidateShadow();
@@ -950,5 +975,56 @@ mod macos {
                 release(panel);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zgui::scene::{BoxShadow, Color, Layout, NodeKind, QuadStyle, Scene, Style, Transform};
+
+    #[test]
+    fn a_panel_painting_its_own_shadow_casts_no_window_shadow() {
+        let mut scene = Scene::new(400., 300.);
+        let root = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style::default(),
+        );
+        let quad = QuadStyle {
+            fill: Color(30, 30, 30, 200),
+            radius: 12.,
+            ..Default::default()
+        };
+        let panel = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Column,
+                quad: quad.clone(),
+            },
+            Style::default(),
+        );
+        assert!(
+            !super::paints_shadow(&scene, root),
+            "a plain panel: the system's"
+        );
+        scene.set_kind(
+            panel,
+            NodeKind::Panel {
+                layout: Layout::Column,
+                quad: QuadStyle {
+                    shadow: Some(BoxShadow {
+                        color: Color(0, 0, 0, 120),
+                        offset: Transform { x: 0., y: 12. },
+                        blur_radius: 20.,
+                        spread: 0.,
+                    }),
+                    ..quad
+                },
+            },
+        );
+        assert!(
+            super::paints_shadow(&scene, root),
+            "its own: none from AppKit"
+        );
     }
 }

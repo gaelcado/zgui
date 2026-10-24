@@ -5008,30 +5008,41 @@ impl Scene {
         for index in 0..self.overflow_fades.len() {
             let (id, before) = self.overflow_fades[index];
             let node = self.node(id);
-            let own = node.bounds;
-            // What scrolls may sit a level or two down (a scroll view's
-            // viewport fills it and holds the moving content): look past
-            // a lone child as large as the node, adding up translations.
-            let (mut holder, mut shift) = (node, Transform::default());
-            while let [only] = holder.children[..] {
-                let child = self.node(only);
-                let same = (child.bounds.x - own.x).abs() < 0.5
-                    && (child.bounds.y - own.y).abs() < 0.5
-                    && (child.bounds.width - own.width).abs() < 0.5
-                    && (child.bounds.height - own.height).abs() < 0.5;
-                if !same || child.children.is_empty() {
+            // What scrolls may sit under wrappers: a scroll view's viewport,
+            // the node's own size, or an editor's padded box, which clips.
+            // Look through a lone child that is either (empty siblings, such
+            // as an editor's overlays, aside), and measure what is in the
+            // last one against that box.
+            let (mut frame, mut shift) = (node.bounds, Transform::default());
+            let mut kids = node.children.as_slice();
+            loop {
+                let mut sized = kids.iter().filter(|kid| {
+                    let bounds = self.node(**kid).bounds;
+                    bounds.width > 0. && bounds.height > 0.
+                });
+                let (Some(only), None) = (sized.next(), sized.next()) else {
+                    break;
+                };
+                let child = self.node(*only);
+                if child.bounds != frame && clip_axes(&child.style) != (true, true) {
                     break;
                 }
-                shift.x += child.transform.x;
-                shift.y += child.transform.y;
-                holder = child;
+                shift = Transform {
+                    x: shift.x + child.transform.x,
+                    y: shift.y + child.transform.y,
+                };
+                frame = child.bounds.translated(shift);
+                kids = child.children.as_slice();
             }
-            let reach = holder
-                .children
+            let own = frame;
+            let reach = kids
                 .iter()
                 .map(|child| {
                     let child = self.node(*child);
-                    child.bounds.translated(child.transform).translated(shift)
+                    child.bounds.translated(Transform {
+                        x: shift.x + child.transform.x,
+                        y: shift.y + child.transform.y,
+                    })
                 })
                 .reduce(Rect::union);
             let [top, bottom] = node.style.fade_edges;

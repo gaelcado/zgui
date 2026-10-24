@@ -1,0 +1,196 @@
+{
+	"name": "tokyo-night-light",
+	"type": "light",
+	"extends": "zgui-light",
+	"tokens": {
+		"background": "#d5d6db",
+		"surface": {
+			"sunken": "#d5d6db",
+			"base": "#cbccd1",
+			"raised": "#bfc0c6",
+			"overlay": "#e0e1e6"
+		},
+		"text": {
+			"primary": "#343b59",
+			"secondary": "#485e7d",
+			"tertiary": "#5a6378",
+			"disabled": "#343b5961"
+		},
+		"border": "#0000001f",
+		"border.subtle": "#00000012",
+		"border.strong": "#00000038",
+		"accent": "#34548a",
+		"accent.hover": "#516b99",
+		"accent.text": "#ffffff",
+		"danger": "#8c4351",
+		"warning": "#8f5e15",
+		"success": "#33635c",
+		"info": "#34548a",
+		"selection": "#34548a3d",
+		"selection.item": "#1a1a1a0f",
+		"focus.ring": "{border.strong}",
+		"hover": "#0000000f",
+		"pressed": "#34548a1a",
+		"scrollbar": {
+			"thumb": "#343b594c",
+			"thumb.active": "#343b598c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#cbccd1cc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#e1e2e7",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#e1e2e7",
+			"dialog": "#e0e1e6",
+			"input.border": "#4352601a",
+			"solid": "#232328",
+			"on_solid": "#ffffff",
+			"danger.muted": "#734153",
+			"danger.strong": "#8c4351",
+			"danger.text": "#ffffff",
+			"danger.hover": "#813e4b",
+			"danger.pressed": "#763844",
+			"info.strong": "#34548a",
+			"info.text": "#ffffff",
+			"info.hover": "#304d7f",
+			"info.pressed": "#2c4774",
+			"warning.strong": "#8f5e15",
+			"warning.text": "#ffffff",
+			"warning.hover": "#845613",
+			"warning.pressed": "#784f12",
+			"success.strong": "#33635c",
+			"success.text": "#ffffff",
+			"success.hover": "#2f5b55",
+			"success.pressed": "#2b534d",
+			"warning.muted": "#785526",
+			"success.muted": "#33595b",
+			"accent": {
+				"wash": "#34548a1f",
+				"selection": "#34548a3d"
+			},
+			"ink": {
+				"1": "#0000000a",
+				"2": "#0000000f",
+				"3": "#00000014",
+				"4": "#0000001c",
+				"5": "#00000029",
+				"6": "#00000038"
+			},
+			"diff": {
+				"add": "#33635c",
+				"delete": "#8c4351",
+				"hunk": "#34548a12"
+			},
+			"cursor": "#343b598c",
+			"scrim": "#00000099",
+			"code.wash": "#34548a1f",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#0000001c",
+				"hover": "#0000000d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#38383d",
+			"solid.pressed": "#47474c"
+		}
+	},
+	"_source": {
+		"family": "tokyo-night",
+		"name": "Tokyo Night Light",
+		"treatment": "Opaque",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

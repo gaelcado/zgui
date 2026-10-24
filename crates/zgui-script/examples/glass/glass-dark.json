@@ -1,0 +1,42 @@
+{
+	// Rex's glass: the window's blur alone (zgui.json's "plain" glass) under
+	// a neutral grey, never a hue of the theme's, so the wallpaper's colour
+	// comes through desaturated. The sidebar sits on that glass and is the
+	// brightest surface; the content is a darker well inset into it, edged
+	// with a dark hairline outside and a light one inside.
+	"name": "glass-dark",
+	"type": "dark",
+	"extends": "zgui-dark",
+	"tokens": {
+		"glass.tint": "#2b2c31b3",
+		"text": {
+			"primary": "#ffffffeb",
+			"secondary": "#ffffffa3",
+			"tertiary": "#ffffff66",
+			"disabled": "#ffffff38"
+		},
+		"hover": "#ffffff0d",
+		"pressed": "#ffffff17",
+		"border": "#ffffff1f",
+		"border.subtle": "#ffffff12",
+		"border.strong": "#ffffff2e",
+		"accent": "#9fb4ff",
+		"surface.overlay": "#2a2b30f2",
+		"shell": {
+			"well": "#101115a6",
+			"edge": "#08090ccc",
+			"selected": "#ffffff17",
+			"selected_line": "#ffffff0f",
+			"hover": "#ffffff0b",
+			"tile": "#ffffff12",
+			"field": "#0000002e",
+			"field_line": "#ffffff14",
+			"bubble": "#ffffff14",
+			"shadow": "0 8 24 0 #00000059",
+			"inner": "0 0 0 2 #ffffff1c",
+			"inner_dim": "0 0 0 2 #ffffff0d",
+			"send": "#ffffffeb",
+			"on_send": "#16171b"
+		}
+	}
+}

@@ -231,3 +231,51 @@ fn editor_target_hook_intercepts_text_and_deletion_before_builtin_editing() {
     ui.dispatch(InputEvent::Text("x".into()));
     assert_eq!(value.get(), "stable");
 }
+
+#[test]
+fn an_inert_node_lets_the_pointer_through_listeners_and_all() {
+    let mut ui = Ui::new(200., 100.);
+    let (under, over) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    let (u, o) = (under.clone(), over.clone());
+    let leaving: Rc<RefCell<Option<zgui::compose::NodeHandle>>> = Rc::default();
+    let keep = leaving.clone();
+    let _view = ui.mount(
+        overlay()
+            .size(200., 100.)
+            .child(
+                button()
+                    .id("under")
+                    .size(200., 100.)
+                    .on_click(move || u.set(u.get() + 1)),
+            )
+            .child(
+                div()
+                    .size(200., 100.)
+                    .on_mount(move |handle| *keep.borrow_mut() = Some(handle))
+                    .child(
+                        button()
+                            .id("over")
+                            .size(200., 100.)
+                            .on_click(move || o.set(o.get() + 1)),
+                    ),
+            ),
+    );
+    let click = |ui: &mut Ui| {
+        ui.dispatch(InputEvent::PointerDown {
+            x: 100.,
+            y: 50.,
+            button: zgui::input::PointerButton::Primary,
+        });
+        ui.dispatch(InputEvent::PointerUp {
+            x: 100.,
+            y: 50.,
+            button: zgui::input::PointerButton::Primary,
+        });
+    };
+    ui.prepare_frame();
+    click(&mut ui);
+    assert_eq!((under.get(), over.get()), (0, 1), "the top button takes it");
+    leaving.borrow().as_ref().unwrap().set_inert(true);
+    click(&mut ui);
+    assert_eq!((under.get(), over.get()), (1, 1), "through what is inert");
+}

@@ -9,6 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The modifier keys held now (`Ui::held_keys`), provided to every view a
+/// `Ui` mounts: what a held key offers can show while it is down.
+#[derive(Clone)]
+pub struct HeldKeys(pub crate::reactive::Signal<Modifiers>);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
     pub shift: bool,
@@ -332,6 +337,9 @@ pub struct NodeInput {
     pub pass_through: bool,
     pub disabled: bool,
     pub tab_index: i32,
+    /// HTML's `inert`: the pointer passes through the node and everything
+    /// in it, listeners or not (content on its way out).
+    pub inert: bool,
 }
 type Callback = Rc<RefCell<dyn FnMut(&mut EventContext)>>;
 struct Entry {
@@ -355,6 +363,9 @@ struct Group {
     /// None: one Tab stop whose arrows its owner handles (a virtual list).
     axis: Option<FocusGroup>,
     current: Option<NodeId>,
+    /// Past its last member the arrows go round to its first, and back
+    /// (ARIA's tabs and menus); a list box stops at its ends.
+    wrap: bool,
 }
 struct FocusScope {
     root: NodeId,
@@ -1396,12 +1407,15 @@ impl InputDispatcher {
         let mut s = self.state.borrow_mut();
         match axis {
             Some(axis) => {
-                let current = s.groups.get(&root).and_then(|g| g.current);
+                let old = s.groups.get(&root);
+                let current = old.and_then(|g| g.current);
+                let wrap = old.is_some_and(|g| g.wrap);
                 s.groups.insert(
                     root,
                     Group {
                         axis: Some(axis),
                         current,
+                        wrap,
                     },
                 );
             }
@@ -1421,8 +1435,16 @@ impl InputDispatcher {
             Group {
                 axis: None,
                 current,
+                wrap: false,
             },
         );
+    }
+    /// Whether `root`'s focus group goes round past its ends (set after
+    /// `set_focus_group`).
+    pub fn set_focus_wrap(&self, root: NodeId, wrap: bool) {
+        if let Some(group) = self.state.borrow_mut().groups.get_mut(&root) {
+            group.wrap = wrap;
+        }
     }
     /// Make `member` the one its focus group's Tab stop lands on: the
     /// selected option, the active tab.
@@ -1463,7 +1485,11 @@ impl InputDispatcher {
     fn group_step(&self, scene: &Scene, key: &Key) -> Option<NodeId> {
         let focused = self.focused()?;
         let group = self.group_of(scene, focused)?;
-        let axis = self.state.borrow().groups.get(&group)?.axis?;
+        let (axis, wrap) = {
+            let s = self.state.borrow();
+            let g = s.groups.get(&group)?;
+            (g.axis?, g.wrap)
+        };
         enum Step {
             Back,
             On,
@@ -1490,8 +1516,14 @@ impl InputDispatcher {
             .collect();
         let at = members.iter().position(|id| *id == focused)?;
         match step {
-            Step::Back => at.checked_sub(1).map(|i| members[i]),
-            Step::On => members.get(at + 1).copied(),
+            Step::Back => at
+                .checked_sub(1)
+                .map(|i| members[i])
+                .or_else(|| wrap.then(|| members.last().copied()).flatten()),
+            Step::On => members
+                .get(at + 1)
+                .copied()
+                .or_else(|| wrap.then(|| members.first().copied()).flatten()),
             Step::First => members.first().copied(),
             Step::Last => members.last().copied(),
         }
@@ -1581,6 +1613,14 @@ impl InputDispatcher {
     fn hit_target(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
         let mut fallback = None;
         'hits: for hit in scene.hit_test_all(x, y) {
+            // Inside something inert: as if it were not there.
+            let mut up = Some(hit);
+            while let Some(id) = up {
+                if self.options(id).is_some_and(|options| options.inert) {
+                    continue 'hits;
+                }
+                up = scene.parent(id);
+            }
             let mut node = Some(hit);
             while let Some(id) = node {
                 let options = self.options(id);

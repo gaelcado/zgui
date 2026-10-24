@@ -141,3 +141,100 @@ fn disabled_scroll_blocks_input_and_unmount_releases_observers() {
     ui.prepare_frame();
     assert_eq!(offset.get(), 900.);
 }
+
+#[test]
+fn at_end_says_whether_the_view_shows_the_end() {
+    let mut ui = Ui::new(600., 400.);
+    let offset = ui.signal(0.);
+    let at_end = ui.signal(true);
+    let grown = ui.signal(false);
+    let read = grown.clone();
+    ui.mount(
+        scroll(offset.clone())
+            .w(200.)
+            .h(100.)
+            .at_end(at_end.clone())
+            .child(div().h(80.))
+            .child(switch(
+                move || read.get(),
+                |grown, _| div().h(if grown { 120. } else { 10. }),
+            )),
+    );
+    ui.prepare_frame();
+    assert!(at_end.get(), "content shorter than the view: at the end");
+    grown.set(true);
+    ui.prepare_frame();
+    assert!(!at_end.get(), "the content ran past");
+    // Setting the offset past the end scrolls to it: a jump pill's click.
+    offset.set(f32::INFINITY);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 100.);
+    assert!(at_end.get());
+    wheel(&mut ui, 50., 50., -30.);
+    ui.prepare_frame();
+    assert!(!at_end.get(), "scrolled back up");
+}
+
+#[test]
+fn a_scroll_follows_its_end_while_a_signal_holds_and_stays_pinned_through_a_resize() {
+    let mut ui = Ui::new(600., 400.);
+    let offset = ui.signal(0.);
+    let follow = ui.signal(false);
+    let extra = ui.signal(0.);
+    let width = ui.signal(220.);
+    let (read_extra, read_width) = (extra.clone(), width.clone());
+    let _view = ui.mount(
+        scroll(offset.clone())
+            .h(100.)
+            .reactive_style(move || Styles::new().w(read_width.get()))
+            .follow_end_when(follow.clone())
+            .child(div().h(300.))
+            .child(div().reactive_style(move || Styles::new().h(read_extra.get()))),
+    );
+    ui.prepare_frame();
+    offset.set(10000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 200., "at the end");
+    // Not following: what grows extends below, the view staying put.
+    extra.set(50.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 200.);
+    // Following: growth keeps the end in view.
+    offset.set(10000.);
+    ui.prepare_frame();
+    follow.set(true);
+    extra.set(80.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 280.);
+    // Not following, a pinned view stays pinned as a resize grows it.
+    follow.set(false);
+    width.set(180.);
+    ui.prepare_frame();
+    extra.set(120.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 320., "pinned through the resize");
+    // And the rewrap spent, growth extends below again.
+    extra.set(150.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 320.);
+}
+
+#[test]
+fn an_end_asked_for_before_the_content_is_there_waits_for_it() {
+    let mut ui = Ui::new(600., 400.);
+    // The end, asked for as the view mounts with nothing to scroll yet.
+    let offset = ui.signal(f32::INFINITY);
+    let tall = ui.signal(0.);
+    let read = tall.clone();
+    let _view = ui.mount(
+        scroll(offset.clone())
+            .w(200.)
+            .h(100.)
+            .child(div().reactive_style(move || Styles::new().h(read.get()))),
+    );
+    ui.prepare_frame();
+    assert_eq!(offset.get(), f32::INFINITY, "still asked for");
+    tall.set(300.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 200., "at the end once there is one");
+}

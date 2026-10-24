@@ -557,7 +557,8 @@ fn invalid_and_equal_height_writes_do_not_notify_reactive_consumers() {
     assert_eq!(notifications.get(), 1);
     assert!(!heights.set_height(1, 20.).unwrap());
     assert!(!heights.resize(3).unwrap());
-    for invalid in [0., -1., f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+    // Zero is a height (a row folded away); these are not.
+    for invalid in [-1., f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         assert!(heights.set_height(1, invalid).is_err());
     }
     assert!(heights.set_height(3, 20.).is_err());

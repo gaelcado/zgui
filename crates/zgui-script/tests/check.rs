@@ -83,6 +83,56 @@ fn clean_scripts_pass_and_misspelled_properties_fail() {
 }
 
 #[test]
+fn a_recipes_axes_type_a_components_props() {
+    if !installed() {
+        return;
+    }
+    let recipe = "local button = ui.variants {\n\tvariants = {\n\t\tsize = { sm = { h = 28 }, md = {} },\n\t\twide = { [true] = { w_full = true }, [false] = {} },\n\t},\n\tdefaults = { size = \"md\", wide = false },\n}\n\
+                  type Size = VariantOption<typeof(button), \"size\">\n\
+                  type Wide = VariantOption<typeof(button), \"wide\">\n\
+                  type Props = VariantProps<typeof(button)>\n";
+    let dir = scripts(
+        "variants",
+        &[
+            (
+                "good.luau",
+                &format!(
+                    "{recipe}local size: Size = \"sm\"\nlocal wide: Wide = true\n\
+                     local props: Props = {{ size = ui.state(\"s\", \"md\") }}\n\
+                     return ui.div {{ variants = button {{ size = size, wide = wide }}, props.size and nil }}\n"
+                ),
+            ),
+            (
+                "bad.luau",
+                &format!(
+                    "{recipe}local size: Size = \"xl\"\nreturn ui.div {{ variants = button {{ size = size }} }}\n"
+                ),
+            ),
+        ],
+    );
+    let out = zgui()
+        .arg("check")
+        .arg(dir.join("good.luau"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "the names type the props: {stdout}");
+    // An option the recipe lacks is an error.
+    let out = zgui()
+        .arg("check")
+        .arg(dir.join("bad.luau"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains("bad.luau:11:") && stdout.contains("\"xl\""),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn without_luau_lsp_it_says_how_to_install_it() {
     let dir = scripts("missing", &[("app.luau", "return ui.text { \"hi\" }\n")]);
     let out = zgui()

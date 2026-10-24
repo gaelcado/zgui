@@ -1,0 +1,196 @@
+{
+	"name": "tokyo-night",
+	"type": "dark",
+	"extends": "zgui-dark",
+	"tokens": {
+		"background": "#1a1b26",
+		"surface": {
+			"sunken": "#1a1b26",
+			"base": "#16161e",
+			"raised": "#292e42",
+			"overlay": "#222739"
+		},
+		"text": {
+			"primary": "#c0caf5",
+			"secondary": "#9aa5ce",
+			"tertiary": "#7f87ad",
+			"disabled": "#c0caf561"
+		},
+		"border": "#ffffff1a",
+		"border.subtle": "#ffffff0f",
+		"border.strong": "#ffffff2e",
+		"accent": "#7aa2f7",
+		"accent.hover": "#9fbcf9",
+		"accent.text": "#000000",
+		"danger": "#f7768e",
+		"warning": "#e0af68",
+		"success": "#9ece6a",
+		"info": "#7aa2f7",
+		"selection": "#7aa2f759",
+		"selection.item": "#ebebeb1c",
+		"focus.ring": "{border.strong}",
+		"hover": "#ffffff1c",
+		"pressed": "#7aa2f72e",
+		"scrollbar": {
+			"thumb": "#c0caf54c",
+			"thumb.active": "#c0caf58c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#16161ecc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#292e42b8",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#1f2335",
+			"dialog": "#212537",
+			"input.border": "#bdc7d117",
+			"solid": "#ebebef",
+			"on_solid": "#000000",
+			"danger.muted": "#e88eab",
+			"danger.strong": "#b35667",
+			"danger.text": "#ffffff",
+			"danger.hover": "#a54f5f",
+			"danger.pressed": "#964857",
+			"info.strong": "#5875b3",
+			"info.text": "#ffffff",
+			"info.hover": "#516ca5",
+			"info.pressed": "#4a6296",
+			"warning.strong": "#e0af68",
+			"warning.text": "#000000",
+			"warning.hover": "#e2b574",
+			"warning.pressed": "#e5bc80",
+			"success.strong": "#9ece6a",
+			"success.text": "#000000",
+			"success.hover": "#a6d276",
+			"success.pressed": "#aed682",
+			"warning.muted": "#d8b68b",
+			"success.muted": "#a6cd8d",
+			"accent": {
+				"wash": "#7aa2f738",
+				"selection": "#7aa2f759"
+			},
+			"ink": {
+				"1": "#ffffff0a",
+				"2": "#ffffff0f",
+				"3": "#ffffff14",
+				"4": "#ffffff1c",
+				"5": "#ffffff29",
+				"6": "#ffffff38"
+			},
+			"diff": {
+				"add": "#9ece6a",
+				"delete": "#f7768e",
+				"hunk": "#7aa2f714"
+			},
+			"cursor": "#c0caf566",
+			"scrim": "#00000099",
+			"code.wash": "#7aa2f738",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#ffffff1c",
+				"hover": "#ffffff0d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#d2d2d7",
+			"solid.pressed": "#c1c1c7"
+		}
+	},
+	"_source": {
+		"family": "tokyo-night",
+		"name": "Tokyo Night",
+		"treatment": "Opaque",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

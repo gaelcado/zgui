@@ -19,13 +19,30 @@ fn form(cx: &mut WindowContext, name: &'static str, smoke: bool) {
                     .on_click(move || write.set(write.get() + 1)),
             ),
     );
+    // The modifiers the window says are held: whether Control was seen
+    // down, and what is held at the end.
+    let held = cx.ui.held_keys();
+    let saw = Rc::new(Cell::new(false));
+    let seen = saw.clone();
+    let watch = held.clone();
+    let effect = cx.ui.runtime.effect(move || {
+        if watch.get().control {
+            seen.set(true);
+        }
+    });
     if smoke {
         cx.on_closed(move || {
+            let _ = &effect;
             println!(
                 "HELD {name} value={:?} actions={}",
                 value.get(),
                 actions.get()
-            )
+            );
+            println!(
+                "MODS {name} saw_control={} now_control={}",
+                saw.get(),
+                held.get().control
+            );
         });
     }
 }

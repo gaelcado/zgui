@@ -1,5 +1,6 @@
-//! The desktop's `zgui::platform::Platform`: the native clipboard and the
-//! window's file dialogs, provided to what a window renders.
+//! The desktop's `zgui::platform::Platform`: the native clipboard, the
+//! window's file dialogs and the trackpad's haptics, provided to what a
+//! window renders.
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use zgui::platform::{FilePicker, Pending, Platform};
 
@@ -33,6 +34,10 @@ impl Platform for Desktop {
     fn open_url(&self, url: &str) -> bool {
         // The launcher runs detached: nothing waits on the browser.
         crate::url::valid_url(url) && open::that_detached(url).is_ok()
+    }
+    #[cfg(target_os = "macos")]
+    fn haptic(&self, haptic: zgui::platform::Haptic) -> bool {
+        haptics::perform(haptic)
     }
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     fn misspellings(&self, text: &str) -> Vec<std::ops::Range<usize>> {
@@ -100,6 +105,33 @@ fn byte_offset(text: &str, units: usize) -> usize {
 
 #[cfg(target_os = "linux")]
 use crate::linux_spelling as spelling;
+
+/// macOS's haptic feedback (`NSHapticFeedbackManager`), performed now
+/// rather than at the next draw. AppKit does nothing where the trackpad
+/// cannot (a mouse, an older trackpad).
+#[cfg(target_os = "macos")]
+mod haptics {
+    use objc2_app_kit::{
+        NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
+        NSHapticFeedbackPerformer,
+    };
+    use zgui::platform::Haptic;
+
+    pub(super) fn perform(haptic: Haptic) -> bool {
+        // AppKit's performer is the main thread's, where input is handled.
+        if objc2::MainThreadMarker::new().is_none() {
+            return false;
+        }
+        let pattern = match haptic {
+            Haptic::Level => NSHapticFeedbackPattern::LevelChange,
+            Haptic::Alignment => NSHapticFeedbackPattern::Alignment,
+            Haptic::Generic => NSHapticFeedbackPattern::Generic,
+        };
+        NSHapticFeedbackManager::defaultPerformer()
+            .performFeedbackPattern_performanceTime(pattern, NSHapticFeedbackPerformanceTime::Now);
+        true
+    }
+}
 
 /// macOS's spelling checker (`NSSpellChecker`), for editors that check
 /// (`View::spellcheck`). One document tag for the app: what Ignore Spelling

@@ -683,6 +683,8 @@ struct Inner {
     platform: io::SharedPlatform,
     /// The files the user picked in this host's dialogs.
     picked: io::Picked,
+    /// The haptics scripts asked for (`haptics`).
+    felt: Rc<io::Felt>,
     /// Whether errors show over the interface (`error_banner`).
     show_errors: bool,
     /// What hears each script error (`on_error`), and what follows them.
@@ -822,6 +824,7 @@ impl ScriptHost {
             rewatch: RefCell::default(),
             platform: Rc::default(),
             picked: Rc::default(),
+            felt: Rc::default(),
             show_errors: cfg!(debug_assertions),
             error_hooks: Rc::default(),
             error_watch: RefCell::default(),
@@ -1168,6 +1171,13 @@ impl ScriptHost {
     /// no script (a resize the layout engine handles alone).
     pub fn script_calls(&self) -> u64 {
         self.0.calls.get()
+    }
+    /// How many haptics the scripts asked for (`ui.haptic`) since the
+    /// host's start, and the last one's pattern, whether or not a trackpad
+    /// felt them: what a test reads to check that a slider taps once a
+    /// step, and never at a step it stays on.
+    pub fn haptics(&self) -> (u64, Option<zgui::platform::Haptic>) {
+        (self.0.felt.count.get(), self.0.felt.last.get())
     }
     /// Bytes the loaded scripts' VMs hold after a full collection (each is
     /// capped at `Limits::memory`): what a test reads over many updates to
@@ -1582,6 +1592,17 @@ impl ScriptHost {
                 persist.set_tasks(cx.tasks());
                 timers.set_tasks(cx.tasks());
             }
+            // `ui.keys`: the modifier keys held, as the window says.
+            if let Some(held) = cx.try_service::<zgui::input::HeldKeys>() {
+                let keys = host
+                    .0
+                    .shared
+                    .state(windows::KEYS, windows::keys(Default::default()));
+                let held = held.0.clone();
+                cx.retain(cx.runtime().effect(move || {
+                    keys.set(windows::keys(held.get()));
+                }));
+            }
             // The clipboard and file dialogs, from the window.
             if let Some(platform) = cx.try_service::<zgui::platform::PlatformService>() {
                 *host.0.platform.borrow_mut() = Some((*platform).clone());
@@ -1967,6 +1988,7 @@ impl ScriptHost {
             &ui,
             self.0.platform.clone(),
             self.0.picked.clone(),
+            self.0.felt.clone(),
             may(Capability::Clipboard),
             may(Capability::Files),
         )

@@ -296,3 +296,79 @@ fn virtual_row_disposal_removes_open_popover_scope_and_subscriptions() {
     assert_eq!(builds.get(), drops.get());
     assert!(ui.scene.borrow().children(ui.root()).is_empty());
 }
+
+#[test]
+fn a_popover_with_an_exit_stays_drawn_and_inert_until_the_exit_is_done() {
+    let mut ui = Ui::new(300., 200.);
+    let open = ui.signal(false);
+    let opened = Rc::new(Cell::new(0));
+    type Done = Rc<dyn Fn()>;
+    let exits: Rc<std::cell::RefCell<Vec<Done>>> = Rc::default();
+    let (count, pending) = (opened.clone(), exits.clone());
+    let view = ui.mount(
+        column().p(20.).child(
+            popover(
+                "Details",
+                open.clone(),
+                button()
+                    .id("anchor")
+                    .size(40., 20.)
+                    .p(0.)
+                    .child(text("Open")),
+            )
+            .lazy()
+            .on_open(move || count.set(count.get() + 1))
+            .exit(move |done| pending.borrow_mut().push(done))
+            .size(100., 60.)
+            .p(0.)
+            .child(button().id("body").size(60., 20.).child(text("Inside"))),
+        ),
+    );
+    let anchor = view.find("anchor").unwrap();
+    assert!(ui.input.focus(&ui.scene, Some(anchor)));
+    assert!(view.find("body").is_none(), "lazy: built as it first opens");
+    open.set(true);
+    ui.prepare_frame();
+    assert_eq!(opened.get(), 1, "its entrance runs as it opens");
+    let body = view.find("body").unwrap();
+    let overlay = {
+        let scene = ui.scene.borrow();
+        scene
+            .parent(scene.parent(panel(&ui, body)).unwrap())
+            .unwrap()
+    };
+    let opacity = |ui: &Ui| ui.scene.borrow().effects(overlay).opacity;
+    assert_eq!(opacity(&ui), 1.);
+    assert_eq!(ui.input.focused(), Some(body));
+
+    // Closed, it gives focus back and takes no input at once, but stays
+    // drawn while its exit plays.
+    open.set(false);
+    ui.prepare_frame();
+    assert_eq!(exits.borrow().len(), 1, "the exit starts");
+    assert_eq!(opacity(&ui), 1., "drawn during the exit");
+    assert_eq!(ui.input.focused(), Some(anchor));
+    assert!(
+        ui.input.options(overlay).is_some_and(|o| o.disabled),
+        "inert during the exit"
+    );
+    let done = exits.borrow_mut().pop().unwrap();
+    done();
+    ui.prepare_frame();
+    assert_eq!(opacity(&ui), 0., "hidden once the exit is done");
+
+    // Opened again mid-exit, it stays shown: the old exit's end does nothing.
+    open.set(true);
+    ui.prepare_frame();
+    assert_eq!(opened.get(), 2, "its entrance runs on every opening");
+    open.set(false);
+    ui.prepare_frame();
+    let stale = exits.borrow_mut().pop().unwrap();
+    open.set(true);
+    ui.prepare_frame();
+    stale();
+    ui.prepare_frame();
+    assert_eq!(opacity(&ui), 1., "a reopening outlives the exit before it");
+    assert_eq!(opened.get(), 3);
+    view.unmount();
+}

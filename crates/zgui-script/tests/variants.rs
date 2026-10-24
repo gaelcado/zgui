@@ -293,3 +293,54 @@ fn the_error_mode_fails_and_ui_raw_needs_a_reason() {
     );
     assert!(error.contains("design lint"), "{error}");
 }
+
+#[test]
+fn group_hover_styles_follow_the_hover_group_without_script() {
+    let mut h = Harness::inline(
+        r##"
+        local row = ui.variants {
+            base = { w = 40, h = 20, bg = "#ff0000" },
+            variants = {
+                selected = {
+                    [true] = { bg = "#0000ff" },
+                    [false] = { group_hover = { bg = "#00ff00" } },
+                },
+            },
+        }
+        local selected = ui.state("selected", false)
+        return ui.column {
+            ui.row {
+                id = "group",
+                hover_group = true,
+                w = 200,
+                h = 20,
+                ui.div { id = "handle", w = 40, h = 20 },
+                ui.div { id = "close", w = 40, h = 20, bg = "#ff0000", group_hover = { bg = "#00ff00" } },
+                ui.div { id = "chosen", variants = row { selected = selected } },
+                ui.div { id = "reveal", w = 20, h = 20, hidden = true, group_hover = { hidden = false } },
+            },
+            ui.div { id = "outside", w = 40, h = 20, bg = "#ff0000", group_hover = { bg = "#00ff00" } },
+            ui.button { id = "select", w = 10, h = 10, on_click = function() selected:set(true) end },
+        }
+        "##,
+    );
+    assert!(h.error().is_none(), "{:?}", h.error());
+    assert_eq!((h.fill("close"), h.fill("chosen")), (RED, RED));
+    assert_eq!(h.bounds("reveal").width, 0., "hidden at rest");
+    // Over another child of the group: both follow its hover, in Rust.
+    let calls = h.calls();
+    h.hover("handle");
+    h.frame();
+    assert_eq!((h.fill("close"), h.fill("chosen")), (GREEN, GREEN));
+    assert_eq!(h.bounds("reveal").width, 20., "`hidden = false` shows it");
+    assert_eq!(h.calls(), calls, "no script ran");
+    assert_eq!(h.fill("outside"), RED, "outside a group it never applies");
+    h.hover("outside");
+    h.frame();
+    assert_eq!((h.fill("close"), h.fill("outside")), (RED, RED));
+    // A variant chosen by state decides whether the group's hover shows.
+    h.click("select");
+    h.hover("handle");
+    h.frame();
+    assert_eq!(h.fill("chosen"), BLUE);
+}

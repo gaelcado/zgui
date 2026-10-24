@@ -341,3 +341,53 @@ fn ui_prefers_follows_the_systems_display_settings() {
     h.frames(1);
     assert_eq!(h.text("p"), "true false true", "as the system changes");
 }
+
+#[test]
+fn single_corners_take_tokens_after_the_radius() {
+    // A token on one corner refines the radius set with it, whatever order
+    // the table lists them in, and follows the theme.
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.div { id = "a", w = 40, h = 20, bg = "#223344", rounded = 8, rounded_tr = "$radius.lg" },
+            ui.div { id = "b", w = 40, h = 20, bg = "#223344", rounded_bl = "$radius.sm", rounded = "$radius.md" },
+            ui.button { id = "light", w = 20, h = 20, on_click = function() ui.theme.set("zgui-light") end },
+        }"##,
+    );
+    let corners = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap();
+        match h.ui.scene.borrow().kind(node) {
+            NodeKind::Panel { quad, .. } => {
+                let c = quad
+                    .decoration
+                    .as_ref()
+                    .and_then(|d| d.corners)
+                    .expect("corners of its own");
+                [c.top_left, c.top_right, c.bottom_right, c.bottom_left]
+            }
+            other => panic!("`{id}` is not a box: {other:?}"),
+        }
+    };
+    h.frames(2);
+    assert_eq!(corners(&mut h, "a"), [8., 10., 8., 8.]);
+    assert_eq!(corners(&mut h, "b"), [6., 6., 6., 4.]);
+    h.click("light");
+    h.frames(2);
+    assert_eq!(corners(&mut h, "a"), [8., 10., 8., 8.]);
+}
+
+#[test]
+fn gaps_per_axis_take_tokens() {
+    // The design lint asks for tokens on `gap_x` and `gap_y` as on `gap`:
+    // they lay out as their values.
+    let mut h = Harness::inline(
+        r##"local cells = {}
+        for i = 1, 3 do
+            table.insert(cells, ui.div { id = `c{i}`, w = 40, h = 10, bg = "#223344" })
+        end
+        return ui.row { w = 100, flex_wrap = true, gap_x = "$space.3", gap_y = "$space.2", cells }"##,
+    );
+    h.frames(2);
+    let (a, b, c) = (h.bounds("c1"), h.bounds("c2"), h.bounds("c3"));
+    assert_eq!(b.x - (a.x + a.width), 12., "gap_x is space.3");
+    assert_eq!(c.y - (a.y + a.height), 8., "gap_y is space.2");
+}

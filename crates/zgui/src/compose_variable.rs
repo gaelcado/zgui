@@ -15,6 +15,9 @@ pub struct VariableHeights {
     index: Rc<RefCell<HeightIndex>>,
     revision: Signal<u64>,
     end: Rc<Cell<bool>>,
+    /// Rows clip what they draw to their height (while heights ease, a row
+    /// shrinking under its content).
+    clip: Rc<Cell<bool>>,
 }
 impl VariableHeights {
     pub fn new(runtime: &Runtime, count: usize, estimate: f32) -> Self {
@@ -25,6 +28,7 @@ impl VariableHeights {
             index: Rc::new(RefCell::new(HeightIndex::try_new(count, estimate)?)),
             revision: runtime.signal(0),
             end: Default::default(),
+            clip: Default::default(),
         })
     }
     /// Keep a viewport resting at the end there through height and count
@@ -35,11 +39,19 @@ impl VariableHeights {
         self.end.set(true);
         self
     }
+    /// Clip each row to its height (or stop): while heights ease, a row
+    /// is shorter than what it draws. At rest rows draw unclipped.
+    pub fn set_clip_rows(&self, clip: bool) {
+        if self.clip.replace(clip) != clip {
+            self.changed();
+        }
+    }
     fn changed(&self) {
         self.revision
             .update(|revision| *revision = revision.wrapping_add(1));
     }
-    /// Update one finite positive height. Once mounted in measured mode, values
+    /// Update one finite height: positive, or zero for a row folded away
+    /// (it is not built while it is). Once mounted in measured mode, values
     /// below one logical pixel clamp to one, including offscreen estimates.
     pub fn set_height(&self, index: usize, height: f32) -> Result<bool, HeightError> {
         let changed = self.index.borrow_mut().set_height(index, height)?;
@@ -270,7 +282,7 @@ struct Entry {
     index: Signal<usize>,
     measurement: Option<Signal<(f32, f32)>>,
 }
-fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
+fn row_style(width: f32, height: f32, measured: bool, clip: bool) -> crate::scene::Style {
     if measured {
         crate::scene::Style {
             width: Some(width),
@@ -278,7 +290,10 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
             ..Default::default()
         }
     } else {
-        crate::widgets::fixed(width, height)
+        crate::scene::Style {
+            clip,
+            ..crate::widgets::fixed(width, height)
+        }
     }
 }
 fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
@@ -493,8 +508,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     (length, total, position, target, geometry, next_anchor)
                 };
                 // Release the index borrow before application key/build callbacks.
+                // A row folded to nothing is not built (nor kept).
                 let keys: Vec<_> = geometry
                     .into_iter()
+                    .filter(|(_, _, row_height)| *row_height > 0.)
                     .map(|(index, top, row_height)| (key(index), index, top, row_height))
                     .collect();
                 let unique: std::collections::HashSet<_> =
@@ -520,7 +537,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         let row = ui.container(
                             content,
                             Layout::Overlay,
-                            row_style(width, *row_height, measured),
+                            row_style(width, *row_height, measured, heights.clip.get()),
                         );
                         crate::selection::mount_row(&mut ui, row, &index_signal);
                         let node = mount(&mut ui, row, view, environment.clone());
@@ -582,7 +599,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         );
                         for (key, _, top, row_height) in &keys {
                             let node = entries[key].node;
-                            scene.set_style(node, row_style(width, *row_height, measured));
+                            scene.set_style(
+                                node,
+                                row_style(width, *row_height, measured, heights.clip.get()),
+                            );
                             scene.set_transform(node, crate::scene::Transform { x: 0.0, y: *top });
                         }
                         let order: Vec<_> =

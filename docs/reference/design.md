@@ -7,6 +7,7 @@ ui.variants<D>(definition: D) -> (choice: VariantChoice<D, …>) -> Variants
 ui.raw<T>(value: T, reason: string) -> T
 ui.theme.strict(mode: "warn" | "error" | "off" | boolean) -> ()
 type VariantProps<R>  -- a recipe's variant props, for a component's own props type
+type VariantOption<R, axis>  -- one axis's option names, for a prop the component reads
 ```
 
 ## Variants
@@ -20,7 +21,7 @@ type VariantProps<R>  -- a recipe's variant props, for a component's own props t
 | `compound` | `{ { [axis]: option \| { option }, …styles } }` | styles for combinations: a rule applies when each axis it names has one of the options it lists |
 | `defaults` | `{ [axis]: option }` | the option an axis takes when the choice leaves it out; without one, the axis adds nothing |
 
-A style table holds [properties](properties.md) as plain values (tokens included) and `hover`, `active`, `focus` and `disabled` tables of them. The choice is a table of options by axis name: each a name, a state holding one, or a function returning one. `variants = recipe` alone takes every default.
+A style table holds [properties](properties.md) as plain values (tokens included) and `hover`, `active`, `focus`, `disabled` and `group_hover` tables of them. The choice is a table of options by axis name: each a name, a state holding one, or a function returning one. `variants = recipe` alone takes every default.
 
 Layers apply in order: `base`, the axes in name order, the matching `compound` rules in their order, then the element's own properties. Each layer's property replaces what it covers in the layers before (`p` an earlier `px` or `pt`, `rounded` the corners, `gap` `gap_x`), as `tailwind-merge` does for shadcn: a caller's `p = 0` takes all the padding a variant gave, and its `bg` wins over every tone's. Two axes that set the same property warn when they are defined: which wins would be their names' order, so set it in one of them or decide in a compound rule.
 
@@ -61,7 +62,7 @@ return ui.column {
 }
 ```
 
-**Types.** The recipe's choice is typed from the definition: an option that does not exist (`tone = "loud"`) and an axis that does not (`tnoe = …`) are errors in the editor and in `zgui check`. `VariantProps<typeof(button)>` is the axes as props, to merge into a component's own props type. Pass each axis through by name (`button { tone = props.tone }`), as shadcn does with `cva`: passing a whole props table does not check. The definition's style tables are checked as the script loads (`unknown style \`bgg\` in \`variants.tone.solid\``).
+**Types.** The recipe's choice is typed from the definition: an option that does not exist (`tone = "loud"`) and an axis that does not (`tnoe = …`) are errors in the editor and in `zgui check`. `VariantProps<typeof(button)>` is the axes as props, to merge into a component's own props type. Pass each axis through by name (`button { tone = props.tone }`), as shadcn does with `cva`: passing a whole props table does not check. `VariantOption<typeof(button), "size">` is one axis's names alone (`"sm" | "md"`; `boolean` for an on-off axis), without the states and functions a choice also takes: the type of a prop the component reads itself, a `size` that picks its icon's size too. The definition's style tables are checked as the script loads (`unknown style \`bgg\` in \`variants.tone.solid\``).
 
 **Cost.** The definition's tables are parsed once, as `ui.variants` runs (a module runs once). A choice of names resolves as the element is built, into the element's literal styles: the same as writing them out. A choice by state or function resolves in Rust each time it changes, cached per combination, and restyles the node in place: its properties and its interaction styles swap without calling the script (a function choosing an option runs when what it reads changes, as `ui.computed` does). A colour change repaints; a size change lays out.
 

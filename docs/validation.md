@@ -206,7 +206,8 @@ editor changes, with two model-level regressions supplementing native evidence.
 
 [Held-key focus transfer](platform-validation/held-keys/README.md) verifies that
 synthetic X11 key presses/releases cannot type or activate controls, while actual
-subsequent input works. [Live Wayland scaling](platform-validation/dpi-transition/README.md)
+subsequent input works, and that a held modifier reaches the view (`Ui::held_keys`,
+`ui.keys`) and clears as it comes up. [Live Wayland scaling](platform-validation/dpi-transition/README.md)
 checks 1×→2×→1× with native protocol events, fixed physical surface size, correct
 logical viewports and caret coordinates, actual pointer edits, and exactly doubled
 editor pixels at 2×. The application cannot fall back to X11 in that test.

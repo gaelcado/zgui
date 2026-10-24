@@ -71,6 +71,9 @@ pub(crate) struct Node {
     pub shader_tokens: [Option<zgui::theme::TokenId>; 4],
     /// `window_drag = true`: a press on it moves the window.
     pub window_drag: bool,
+    /// `hover_group = true`: descendants' `group_hover` styles follow its
+    /// hover.
+    pub hover_group: bool,
     /// `selectable = true`: the pointer selects the text in it (`false`
     /// keeps a part of a selectable node out).
     pub selectable: Option<bool>,
@@ -419,6 +422,7 @@ impl Node {
             shader_params: None,
             shader_tokens: [None; 4],
             window_drag: false,
+            hover_group: false,
             selectable: None,
             selection_colors: None,
             tooltip: None,
@@ -451,12 +455,36 @@ impl Node {
         self.layout.as_ref().is_some_and(|l| l.width || l.height)
     }
     pub fn targetable(&self) -> bool {
-        self.id.is_some()
+        // An overlay's `enter` and `exit` play on its panel's element.
+        let moves = matches!(
+            &self.kind,
+            Kind::Modal {
+                motion: Some(_),
+                ..
+            } | Kind::Popover {
+                motion: Some(_),
+                ..
+            } | Kind::Menu {
+                motion: Some(_),
+                ..
+            }
+        );
+        moves
+            || self.id.is_some()
             || !self.classes.is_empty()
             || !self.refs.is_empty()
             || self.events().mount.is_some()
             || self.events().resize.is_some()
             || self.events().visible.is_some()
+    }
+    /// An overlay's `enter` and `exit`, when it has them.
+    pub(crate) fn overlay_motion(&self) -> Option<&Rc<OverlayMotion>> {
+        match &self.kind {
+            Kind::Modal { motion, .. }
+            | Kind::Popover { motion, .. }
+            | Kind::Menu { motion, .. } => motion.as_ref(),
+            _ => None,
+        }
     }
     pub fn events(&self) -> &Events {
         self.events.as_deref().unwrap_or(&Events::NONE)
@@ -536,6 +564,9 @@ pub(crate) struct Events {
     pub hover: Option<Handler>,
     /// `fn({ x, y, local_x, local_y })`.
     pub pointer_move: Option<Handler>,
+    /// The same, only while a press that began on the node is held (a
+    /// divider's drag): the pointer passing over runs nothing.
+    pub press_move: Option<Handler>,
     /// `fn({ key, shift, ctrl, alt, meta, repeat })`; returning true
     /// consumes the key.
     pub key: Option<Handler>,
@@ -593,6 +624,7 @@ impl Events {
         release: None,
         hover: None,
         pointer_move: None,
+        press_move: None,
         key: None,
         key_up: None,
         focus: None,
@@ -617,6 +649,7 @@ impl Events {
             || self.release.is_some()
             || self.hover.is_some()
             || self.pointer_move.is_some()
+            || self.press_move.is_some()
             || self.key.is_some()
             || self.key_up.is_some()
             || self.focus.is_some()
@@ -631,6 +664,13 @@ impl Events {
     }
 }
 
+/// A scroll's `follow`: a boolean, or a state it follows.
+#[derive(Clone)]
+pub(crate) enum Follow {
+    Always(bool),
+    When(Signal<Value>),
+}
+
 pub(crate) enum Kind {
     Column,
     Row,
@@ -638,13 +678,16 @@ pub(crate) enum Kind {
     Overlay,
     Button,
     /// `offset`: state the scroll position follows and reports, in points.
-    /// `follow`: stays at the end while the content grows, until scrolled away.
+    /// `follow`: stays at the end while the content grows, until scrolled
+    /// away; a state: only while it holds.
     Scroll {
         offset: Option<Signal<Value>>,
         horizontal: bool,
-        follow: bool,
+        follow: Follow,
         /// `scrollbar = true`: an interactive scrollbar over its edge.
         scrollbar: bool,
+        /// `at_end`: a state the scroll writes, whether it shows its end.
+        at_end: Option<Signal<Value>>,
     },
     Text(Text),
     Rich(Vec<Span>),
@@ -684,6 +727,16 @@ pub(crate) enum Kind {
         select_on_focus: bool,
         /// `line_numbers = true`: a textarea numbers its lines.
         line_numbers: bool,
+        /// `auto_height = true`: a textarea's height follows its text.
+        auto_height: bool,
+        /// `chips = "@"`: finished references starting with one of these
+        /// characters show as chips (in `chip_color`) and delete whole.
+        chips: Option<String>,
+        chip_color: Option<Source>,
+        /// `fits = state`: written whether the text fits one line
+        /// `fits_inset` narrower than the box (a composer's one row).
+        fits: Option<Signal<Value>>,
+        fits_inset: Option<Source>,
         /// `secure = true`: a password field (masked, never copied).
         secure: bool,
         /// `spellcheck = true` (or a state or function of one): the system's
@@ -732,6 +785,9 @@ pub(crate) enum Kind {
         /// `keyboard = true`: its rows are one Tab stop, and the arrows,
         /// Page Up and Down, Home and End move focus through all of them.
         keyboard: bool,
+        /// `animate`: a change of `heights` that keeps the count eases the
+        /// rows there (a section folding), in Rust.
+        animate: Option<crate::motion::Timing>,
     },
     Switch {
         value: Source,
@@ -747,6 +803,7 @@ pub(crate) enum Kind {
         autofocus: bool,
         /// `ui.layer`: non-modal, over the window (toasts).
         layer: bool,
+        motion: Option<Rc<OverlayMotion>>,
     },
     Popover {
         label: String,
@@ -754,6 +811,7 @@ pub(crate) enum Kind {
         anchor: Rc<Node>,
         placement: Option<zgui::compose::Placement>,
         autofocus: bool,
+        motion: Option<Rc<OverlayMotion>>,
     },
     Menu {
         label: String,
@@ -763,6 +821,7 @@ pub(crate) enum Kind {
         autofocus: bool,
         /// `open_over = fn() -> id`: opens with that item over the trigger.
         over: Option<Function>,
+        motion: Option<Rc<OverlayMotion>>,
     },
     /// Its label, and whether it leaves its menu open when chosen.
     MenuItem(String, bool),
@@ -874,12 +933,17 @@ pub(crate) struct Tooltip {
     /// `tooltip_interactive`: a hover card the pointer can move into (and
     /// click in); it stays while the pointer is over the node or the card.
     pub interactive: bool,
+    /// `tooltip_delay`: how long the pointer rests before it shows, in ms.
+    pub delay: Option<f64>,
 }
 pub(crate) enum TooltipContent {
     /// Drawn in the theme's tooltip look.
     Text(String),
     /// The app's own content (its look and all).
     Node(Rc<Node>),
+    /// The same, built by the function each time it shows (a hover card
+    /// on every row of a list costs nothing until one shows).
+    Build(mlua::Function),
 }
 
 /// A list's row heights: a list of numbers, a state holding one, or a
@@ -967,6 +1031,8 @@ pub(crate) enum Pseudo {
     Active,
     Focus,
     Disabled,
+    /// While the nearest `hover_group` ancestor is hovered.
+    GroupHover,
 }
 impl Pseudo {
     /// Its place in zgui's interaction styles (and `variants::INTERACTION`).
@@ -1560,6 +1626,8 @@ pub(crate) struct A11y {
     pub description: Option<Rc<str>>,
     pub hidden: bool,
     pub focus_group: Option<zgui::input::FocusGroup>,
+    /// `focus_wrap`: whether the group's arrows go round past its ends.
+    pub focus_wrap: Option<bool>,
 }
 /// `focus_group`'s axes.
 fn focus_group(axis: &str) -> mlua::Result<zgui::input::FocusGroup> {
@@ -1606,6 +1674,19 @@ fn a11y_role(name: &str) -> Option<zgui::semantics::Role> {
     })
 }
 
+/// An overlay's `enter` (played each time it opens) and `exit` (played as
+/// it closes, the panel drawn until it ends): anime parameters for its
+/// panel, as `ui.presence` takes them.
+pub(crate) struct OverlayMotion {
+    pub enter: Option<Table>,
+    pub exit: Option<Table>,
+}
+fn overlay_motion(table: &Table) -> mlua::Result<Option<Rc<OverlayMotion>>> {
+    let enter = table.get::<Option<Table>>("enter")?;
+    let exit = table.get::<Option<Table>>("exit")?;
+    Ok((enter.is_some() || exit.is_some()).then(|| Rc::new(OverlayMotion { enter, exit })))
+}
+
 /// Rows past which `ui.each` suggests `ui.list`.
 const LONG_EACH: usize = 1000;
 
@@ -1620,6 +1701,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "follow",
     "scrollbar",
     "keyboard",
+    "at_end",
     "src",
     "code",
     "draw",
@@ -1649,6 +1731,11 @@ const WIDGET_FIELDS: &[&str] = &[
     "secure",
     "spellcheck",
     "line_numbers",
+    "auto_height",
+    "chips",
+    "chip_color",
+    "fits",
+    "fits_inset",
     "animate",
 ];
 
@@ -1668,6 +1755,7 @@ fn set_handler(
         "on_release" => &mut events.release,
         "on_hover" => &mut events.hover,
         "on_pointer_move" => &mut events.pointer_move,
+        "on_press_move" => &mut events.press_move,
         "on_key" => &mut events.key,
         "on_key_up" => &mut events.key_up,
         "on_focus" => &mut events.focus,
@@ -1835,6 +1923,7 @@ fn fill_from(
             },
             "focusable" => node.focusable = Some(lua.unpack(value)?),
             "window_drag" => node.window_drag = lua.unpack(value)?,
+            "hover_group" => node.hover_group = lua.unpack(value)?,
             "selectable" => node.selectable = lua.unpack(value)?,
             "selection_color" | "selected_text_color" => {
                 let at = usize::from(key == "selected_text_color");
@@ -1848,9 +1937,10 @@ fn fill_from(
                     mlua::Value::UserData(ud) if ud.is::<NodeUd>() => {
                         Some(TooltipContent::Node(ud.borrow::<NodeUd>()?.0.clone()))
                     }
+                    mlua::Value::Function(f) => Some(TooltipContent::Build(f)),
                     other => {
                         return Err(mlua::Error::runtime(format!(
-                            "`tooltip` takes a string or a node, not {}",
+                            "`tooltip` takes a string, a node or a function making one, not {}",
                             other.type_name()
                         )));
                     }
@@ -1862,6 +1952,13 @@ fn fill_from(
             }
             "tooltip_interactive" => {
                 node.tooltip.get_or_insert_default().interactive = lua.unpack(value)?;
+            }
+            "tooltip_delay" => {
+                let ms: f64 = lua.unpack(value)?;
+                if !(ms.is_finite() && ms >= 0.) {
+                    return Err(mlua::Error::runtime("`tooltip_delay` takes milliseconds, 0 or more"));
+                }
+                node.tooltip.get_or_insert_default().delay = Some(ms);
             }
             "pointer_events" => {
                 node.pointer_events = Some(match &value {
@@ -2103,11 +2200,12 @@ fn fill_from(
                     )
                 });
             }
-            "hover" | "active" | "focus" | "disabled" => {
+            "hover" | "active" | "focus" | "disabled" | "group_hover" => {
                 let pseudo = match key {
                     "hover" => Pseudo::Hover,
                     "active" => Pseudo::Active,
                     "focus" => Pseudo::Focus,
+                    "group_hover" => Pseudo::GroupHover,
                     _ => Pseudo::Disabled,
                 };
                 let mlua::Value::Table(styles) = value else {
@@ -2201,6 +2299,9 @@ fn fill_from(
             "focus_group" => {
                 let axis: String = lua.unpack(value)?;
                 node.a11y.get_or_insert_default().focus_group = Some(focus_group(&axis)?);
+            }
+            "focus_wrap" => {
+                node.a11y.get_or_insert_default().focus_wrap = Some(lua.unpack(value)?);
             }
             name if WIDGET_FIELDS.contains(&name) => {}
             name => {
@@ -2496,13 +2597,26 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     .then(|| expect_state(&offset, "`offset`"))
                     .transpose()?;
                 let follow = match &table {
-                    Some(t) => t.get::<Option<bool>>("follow")?.unwrap_or(false),
-                    None => false,
+                    Some(t) => match t.get::<mlua::Value>("follow")? {
+                        mlua::Value::Nil => Follow::Always(false),
+                        mlua::Value::Boolean(on) => Follow::Always(on),
+                        other => {
+                            Follow::When(expect_state(&other, "`follow` (a boolean or a state)")?)
+                        }
+                    },
+                    None => Follow::Always(false),
                 };
                 let scrollbar = match &table {
                     Some(t) => t.get::<Option<bool>>("scrollbar")?.unwrap_or(false),
                     None => false,
                 };
+                let at_end = match &table {
+                    Some(t) => t.get::<mlua::Value>("at_end")?,
+                    None => mlua::Value::Nil,
+                };
+                let at_end = (!at_end.is_nil())
+                    .then(|| expect_state(&at_end, "`at_end`"))
+                    .transpose()?;
                 let node = fill(
                     lua,
                     Node::new(
@@ -2512,6 +2626,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             horizontal,
                             follow,
                             scrollbar,
+                            at_end,
                         },
                     ),
                     table.as_ref(),
@@ -2672,6 +2787,14 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     secure: table.get::<Option<bool>>("secure")?.unwrap_or(false),
                     spellcheck: optional("spellcheck", Ty::Bool)?,
                     line_numbers: table.get::<Option<bool>>("line_numbers")?.unwrap_or(false),
+                    auto_height: table.get::<Option<bool>>("auto_height")?.unwrap_or(false),
+                    chips: table.get::<Option<String>>("chips")?,
+                    chip_color: optional("chip_color", Ty::Color)?,
+                    fits: match table.get::<mlua::Value>("fits")? {
+                        mlua::Value::Nil => None,
+                        state => Some(expect_state(&state, "`fits`")?),
+                    },
+                    fits_inset: optional("fits_inset", Ty::Num)?,
                 };
                 node_ud(lua, fill(lua, Node::new(owner(lua)?, kind), Some(&table))?)
             })?,
@@ -2820,6 +2943,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             offset,
                             scrollbar: table.get::<Option<bool>>("scrollbar")?.unwrap_or(false),
                             keyboard: table.get::<Option<bool>>("keyboard")?.unwrap_or(false),
+                            animate: crate::motion::timing_of(table.get("animate")?)?,
                         },
                     ),
                     Some(&table),
@@ -2899,6 +3023,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             placement: modal_placement_of(table.get("placement")?)?,
                             autofocus: table.get::<Option<bool>>("autofocus")?.unwrap_or(true),
                             layer: false,
+                            motion: overlay_motion(&table)?,
                         },
                     ),
                     Some(&table),
@@ -2926,6 +3051,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             placement: modal_placement_of(table.get("placement")?)?,
                             autofocus: false,
                             layer: true,
+                            motion: overlay_motion(&table)?,
                         },
                     ),
                     Some(&table),
@@ -2942,6 +3068,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let label = label(&table)?;
                 let placement = placement_of(table.get("placement")?)?;
                 let autofocus = table.get::<Option<bool>>("autofocus")?.unwrap_or(true);
+                let motion = overlay_motion(&table)?;
                 let kind = if name == "menu" {
                     Kind::Menu {
                         label,
@@ -2950,6 +3077,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         placement,
                         autofocus,
                         over: table.get("open_over")?,
+                        motion,
                     }
                 } else {
                     Kind::Popover {
@@ -2958,6 +3086,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         anchor,
                         placement,
                         autofocus,
+                        motion,
                     }
                 };
                 node_ud(lua, fill(lua, Node::new(owner(lua)?, kind), Some(&table))?)
@@ -3024,10 +3153,34 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     Some(p) => p,
                     None => lua.create_table()?,
                 };
-                // Children stay in the props table's array part and are
-                // also given as `props.children`.
+                // Children stay in the props table's array part, packed from
+                // 1 (a `nil` or `false` child, `cond and node`, leaves no
+                // hole that `#props`, `ipairs` or `table.unpack(props)` would
+                // stop at), and are also given as `props.children`.
+                let mut items = array_items(&props)?;
+                let all = items.len();
+                items.retain(|child| !matches!(child, mlua::Value::Boolean(false)));
+                let mut keys = Vec::new();
+                props.for_each(|key: mlua::Value, _: mlua::Value| {
+                    if let mlua::Value::Integer(i) = key
+                        && i >= 1
+                    {
+                        keys.push(i);
+                    }
+                    Ok(())
+                })?;
+                keys.sort_unstable();
+                if items.len() != all || keys.iter().enumerate().any(|(at, &i)| i != at as i64 + 1)
+                {
+                    for i in keys {
+                        props.raw_set(i, mlua::Value::Nil)?;
+                    }
+                    for (i, child) in items.iter().enumerate() {
+                        props.raw_set(i + 1, child.clone())?;
+                    }
+                }
                 let kids = lua.create_table()?;
-                for (i, child) in array_items(&props)?.into_iter().enumerate() {
+                for (i, child) in items.into_iter().enumerate() {
                     kids.raw_set(i + 1, child)?;
                 }
                 props.raw_set("children", kids)?;
@@ -3652,20 +3805,21 @@ pub(crate) fn computed(_: &Lua, env: &Env, f: Function) -> Signal<Value> {
     signal
 }
 /// A node's interaction styles by slot (`variants::INTERACTION`'s order).
-pub(crate) fn interaction_of(pseudo: &[(Pseudo, Styles)]) -> [Vec<(Prop, Lit)>; 4] {
-    let mut out: [Vec<(Prop, Lit)>; 4] = Default::default();
+pub(crate) fn interaction_of(pseudo: &[(Pseudo, Styles)]) -> [Vec<(Prop, Lit)>; 5] {
+    let mut out: [Vec<(Prop, Lit)>; 5] = Default::default();
     for (pseudo, styles) in pseudo {
         out[pseudo.slot()].extend(styles.iter().cloned());
     }
     out
 }
 /// The other way: the slots that set anything.
-pub(crate) fn pseudo_of(slots: [Vec<(Prop, Lit)>; 4]) -> Vec<(Pseudo, Styles)> {
+pub(crate) fn pseudo_of(slots: [Vec<(Prop, Lit)>; 5]) -> Vec<(Pseudo, Styles)> {
     let pseudos = [
         Pseudo::Hover,
         Pseudo::Active,
         Pseudo::Focus,
         Pseudo::Disabled,
+        Pseudo::GroupHover,
     ];
     pseudos
         .into_iter()

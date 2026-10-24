@@ -127,6 +127,43 @@ export type function VariantProps(recipe)
 	return out
 end
 
+-- An axis's option names alone, without the states and functions a recipe
+-- also takes: the type of a prop the component reads itself (a `size`
+-- choosing its metrics). `VariantOption<typeof(button), "size">` is
+-- `"sm" | "md" | "lg"`; an on-off axis is `boolean`.
+export type function VariantOption(recipe, axis)
+	if not recipe:is("function") then
+		return types.never
+	end
+	local head: { type } = recipe:parameters().head or {}
+	local choice: type? = head[1]
+	if not choice or not choice:is("table") then
+		return types.never
+	end
+	local option = choice:readproperty(axis)
+	if not option then
+		return types.never
+	end
+	local function keep(t: type): boolean
+		return t:is("singleton") or t:is("boolean")
+	end
+	if not option:is("union") then
+		return if keep(option) then option else types.never
+	end
+	local names: { type } = {}
+	for _, part in option:components() do
+		if keep(part) then
+			names[#names + 1] = part
+		end
+	end
+	if #names == 0 then
+		return types.never
+	elseif #names == 1 then
+		return names[1]
+	end
+	return types.unionof(table.unpack(names))
+end
+
 -- A table's fields, each optional: what `state:patch` takes.
 type function Partial(t)
 	if t:is("any") then
@@ -882,10 +919,10 @@ export type Styles = {
 	bg_fit: Fit?,
 	rounded: Num?,
 	corners: Corners?,
-	rounded_tl: number?,
-	rounded_tr: number?,
-	rounded_br: number?,
-	rounded_bl: number?,
+	rounded_tl: Num?,
+	rounded_tr: Num?,
+	rounded_br: Num?,
+	rounded_bl: Num?,
 	border: Num?,
 	border_sides: Sides?,
 	border_color: Color?,
@@ -1021,10 +1058,10 @@ export type StyleProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -1136,6 +1173,9 @@ export type NodeProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -1154,17 +1194,26 @@ export type NodeProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -1189,6 +1238,9 @@ export type NodeProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -1303,10 +1355,10 @@ export type Props = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -1398,6 +1450,9 @@ export type Props = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -1416,17 +1471,26 @@ export type Props = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -1451,6 +1515,9 @@ export type Props = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -1558,10 +1625,10 @@ export type ContainerProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -1653,6 +1720,9 @@ export type ContainerProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -1671,17 +1741,26 @@ export type ContainerProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -1706,6 +1785,9 @@ export type ContainerProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -1815,10 +1897,10 @@ export type ScrollProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -1910,6 +1992,9 @@ export type ScrollProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -1928,17 +2013,26 @@ export type ScrollProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -1963,6 +2057,9 @@ export type ScrollProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -2004,10 +2101,16 @@ export type ScrollProps = {
 	label: string?,
 	-- The scroll position in points, both ways.
 	offset: State<number>?,
-	-- Stays at the end while the content grows, until scrolled away.
 	-- An interactive scrollbar over the trailing edge (none by default).
 	scrollbar: boolean?,
-	follow: boolean?,
+	-- Stays at the end while the content grows, until scrolled away; a
+	-- state: only while it holds (a chat while a reply streams); what
+	-- grows otherwise extends below, the view staying where it is.
+	follow: (boolean | Readable<boolean>)?,
+	-- Written by the scroll: whether it shows its end (a "scroll to
+	-- bottom" pill shows while it does not). It changes only when that
+	-- does; set `offset` to `math.huge` to go to the end.
+	at_end: State<boolean>?,
 }
 -- `ui.text { "Count: {count}", text_size = 18 }`: the text first.
 export type TextProps = {
@@ -2079,10 +2182,10 @@ export type TextProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -2174,6 +2277,9 @@ export type TextProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -2192,17 +2298,26 @@ export type TextProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2227,6 +2342,9 @@ export type TextProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -2384,10 +2502,10 @@ export type RichProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -2479,6 +2597,9 @@ export type RichProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -2497,17 +2618,26 @@ export type RichProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2532,6 +2662,9 @@ export type RichProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -2639,10 +2772,10 @@ export type ImageProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -2734,6 +2867,9 @@ export type ImageProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -2752,17 +2888,26 @@ export type ImageProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2787,6 +2932,9 @@ export type ImageProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -2902,10 +3050,10 @@ export type SvgProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -2997,6 +3145,9 @@ export type SvgProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -3015,17 +3166,26 @@ export type SvgProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3050,6 +3210,9 @@ export type SvgProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -3159,10 +3322,10 @@ export type CanvasProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -3254,6 +3417,9 @@ export type CanvasProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -3272,17 +3438,26 @@ export type CanvasProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3307,6 +3482,9 @@ export type CanvasProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -3415,10 +3593,10 @@ export type CheckboxProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -3510,6 +3688,9 @@ export type CheckboxProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -3528,17 +3709,26 @@ export type CheckboxProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3563,6 +3753,9 @@ export type CheckboxProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -3674,10 +3867,10 @@ export type InputProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -3769,6 +3962,9 @@ export type InputProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -3787,17 +3983,26 @@ export type InputProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3822,6 +4027,9 @@ export type InputProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -3878,6 +4086,23 @@ export type InputProps = {
 	spellcheck: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Several lines only: numbered in a gutter at the left (a code editor).
 	line_numbers: boolean?,
+	-- A textarea as tall as its text and padding, between min_h and max_h
+	-- (past which it scrolls): a composer growing as the user types.
+	auto_height: boolean?,
+	-- Finished references as chips: a word starting with one of these
+	-- characters and followed by a space (`"@"`: `@src/main.rs `, as a
+	-- completion leaves it) sits on a rounded fill in `chip_color` (the
+	-- selection's unless set), and a backspace at its end (a delete at its
+	-- start) takes it whole.
+	chips: string?,
+	chip_color: Reactive<Color>?,
+	-- Written whether the text fits on one line `fits_inset` points
+	-- narrower than its text box: a composer's one row while its draft is
+	-- short. A line break never fits, nor a line under 200 wide; once it
+	-- does not fit, it must fall 32 under before it does again. Written
+	-- only when that changes, by the engine (no script per key).
+	fits: State<boolean>?,
+	fits_inset: Reactive<number>?,
 }
 export type ProgressProps = {
 	-- Size and position.
@@ -3948,10 +4173,10 @@ export type ProgressProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -4043,6 +4268,9 @@ export type ProgressProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -4061,17 +4289,26 @@ export type ProgressProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4096,6 +4333,9 @@ export type ProgressProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -4204,10 +4444,10 @@ export type SliderProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -4299,6 +4539,9 @@ export type SliderProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -4317,17 +4560,26 @@ export type SliderProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4352,6 +4604,9 @@ export type SliderProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -4464,10 +4719,10 @@ export type ListProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -4559,6 +4814,9 @@ export type ListProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -4577,17 +4835,26 @@ export type ListProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4612,6 +4879,9 @@ export type ListProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -4671,6 +4941,10 @@ export type ListProps = {
 	sticky: ({ number } | Readable<{ number }> | (() -> { number }))?,
 	-- How far below the top the sticky rows stick (CSS's sticky `top`).
 	sticky_top: number?,
+	-- With `heights`: a change that keeps the count eases the rows there
+	-- (a section folding to rows of 0, which are not built), as `each`'s
+	-- `animate` takes it; in Rust, no script per frame.
+	animate: Motion?,
 	-- Rows built beyond each edge (2 by default).
 	overscan: number?,
 	offset: State<number>?,
@@ -4683,6 +4957,10 @@ export type ModalPlacement = {
 	y: ("start" | "center" | "end")?,
 	inset: (number | { number })?,
 }
+-- An overlay's motion on its panel: `enter` plays each time it opens (give
+-- it its starting values), `exit` as it closes, the panel drawn (and
+-- inert, focus already given back) until the exit ends.
+export type OverlayMotion = { enter: ElementParams?, exit: ElementParams? }
 export type LayerProps = {
 	-- Size and position.
 	w: Reactive<Length>?,
@@ -4752,10 +5030,10 @@ export type LayerProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -4847,6 +5125,9 @@ export type LayerProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -4865,17 +5146,26 @@ export type LayerProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4900,6 +5190,9 @@ export type LayerProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -4936,6 +5229,8 @@ export type LayerProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 	[number]: Child,
+	enter: ElementParams?,
+	exit: ElementParams?,
 	open: State<boolean>?,
 	label: string?,
 	placement: ModalPlacement?,
@@ -5009,10 +5304,10 @@ export type ModalProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -5104,6 +5399,9 @@ export type ModalProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -5122,17 +5420,26 @@ export type ModalProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5157,6 +5464,9 @@ export type ModalProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -5193,6 +5503,8 @@ export type ModalProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 	[number]: Child,
+	enter: ElementParams?,
+	exit: ElementParams?,
 	open: State<boolean>,
 	label: string?,
 	placement: ModalPlacement?,
@@ -5275,10 +5587,10 @@ export type PopoverProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -5370,6 +5682,9 @@ export type PopoverProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -5388,17 +5703,26 @@ export type PopoverProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5423,6 +5747,9 @@ export type PopoverProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -5459,6 +5786,9 @@ export type PopoverProps = {
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
 	[number]: Child,
+	-- See `OverlayMotion`.
+	enter: ElementParams?,
+	exit: ElementParams?,
 	open: State<boolean>,
 	-- The trigger, shown where the popover is written.
 	anchor: Node,
@@ -5543,10 +5873,10 @@ export type MenuItemProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -5638,6 +5968,9 @@ export type MenuItemProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -5656,17 +5989,26 @@ export type MenuItemProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5691,6 +6033,9 @@ export type MenuItemProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -5800,10 +6145,10 @@ export type SubmenuProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -5895,6 +6240,9 @@ export type SubmenuProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -5913,17 +6261,26 @@ export type SubmenuProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5948,6 +6305,9 @@ export type SubmenuProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -6060,10 +6420,10 @@ export type WebViewProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -6155,6 +6515,9 @@ export type WebViewProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -6173,17 +6536,26 @@ export type WebViewProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6208,6 +6580,9 @@ export type WebViewProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -6338,10 +6713,10 @@ export type TerminalProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -6433,6 +6808,9 @@ export type TerminalProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -6451,17 +6829,26 @@ export type TerminalProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6486,6 +6873,9 @@ export type TerminalProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -6594,10 +6984,10 @@ export type SlotProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -6689,6 +7079,9 @@ export type SlotProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -6707,17 +7100,26 @@ export type SlotProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6742,6 +7144,9 @@ export type SlotProps = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -6855,10 +7260,10 @@ export type EachOptions = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -6950,6 +7355,9 @@ export type EachOptions = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -6968,17 +7376,26 @@ export type EachOptions = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -7003,6 +7420,9 @@ export type EachOptions = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -7119,10 +7539,10 @@ export type PresenceOptions = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -7214,6 +7634,9 @@ export type PresenceOptions = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -7232,17 +7655,26 @@ export type PresenceOptions = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
 	tooltip_interactive: boolean?,
+	-- How long the pointer rests before the tooltip shows, in ms (300).
+	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -7267,6 +7699,9 @@ export type PresenceOptions = {
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -7408,6 +7843,9 @@ declare ui: {
 	term: (id: string, opts: TermOptions?) -> Term,
 	command: (opts: CommandOptions) -> (),
 	window: WindowApi,
+	-- The modifier keys held now (none while the window is at the back):
+	-- what a held key offers shows while it is down (⌘1 to ⌘9 beside rows).
+	keys: State<{ shift: boolean, ctrl: boolean, alt: boolean, meta: boolean }>,
 	checkbox: (props: CheckboxProps) -> Node,
 	input: (props: InputProps) -> Node,
 	textarea: (props: InputProps) -> Node,
@@ -7521,6 +7959,10 @@ declare ui: {
 	read_file: (file: File | string) -> Promise<string>,
 	-- Write `text` to a file the user picked (beside it, then over it).
 	write_file: (file: File | string, text: string) -> Promise<nil>,
+	-- Tap the trackpad now (macOS, a haptic trackpad; elsewhere nothing):
+	-- "level" (default) a control's detent, "alignment" a snap into place.
+	-- Whether a trackpad could.
+	haptic: (pattern: ("level" | "alignment" | "generic")?) -> boolean,
 	-- `T` comes from the state's `set`, so a literal fits a state of a
 	-- union (`ui.set(density, "compact")` for `"comfortable" | "compact"`)
 	-- and anything else is still an error.

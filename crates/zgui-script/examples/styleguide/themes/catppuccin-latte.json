@@ -1,0 +1,196 @@
+{
+	"name": "catppuccin-latte",
+	"type": "light",
+	"extends": "zgui-light",
+	"tokens": {
+		"background": "#eff1f5",
+		"surface": {
+			"sunken": "#eff1f5",
+			"base": "#e6e9ef",
+			"raised": "#dce0e8",
+			"overlay": "#f6f8fa"
+		},
+		"text": {
+			"primary": "#4c4f69",
+			"secondary": "#5c5f77",
+			"tertiary": "#6c6f85",
+			"disabled": "#4c4f6961"
+		},
+		"border": "#0000001f",
+		"border.subtle": "#00000012",
+		"border.strong": "#00000038",
+		"accent": "#8839ef",
+		"accent.hover": "#9b5af0",
+		"accent.text": "#ffffff",
+		"danger": "#d20f39",
+		"warning": "#df8e1d",
+		"success": "#40a02b",
+		"info": "#1e66f5",
+		"selection": "#8839ef3d",
+		"selection.item": "#1a1a1a0f",
+		"focus.ring": "{border.strong}",
+		"hover": "#0000000f",
+		"pressed": "#8839ef1a",
+		"scrollbar": {
+			"thumb": "#4c4f694c",
+			"thumb.active": "#4c4f698c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#e6e9efcc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#f7f8fa",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#f7f8fa",
+			"dialog": "#f6f7f9",
+			"input.border": "#4352601a",
+			"solid": "#232328",
+			"on_solid": "#ffffff",
+			"danger.muted": "#ac2146",
+			"danger.strong": "#d20f39",
+			"danger.text": "#ffffff",
+			"danger.hover": "#c10e34",
+			"danger.pressed": "#b00d30",
+			"info.strong": "#1e66f5",
+			"info.text": "#ffffff",
+			"info.hover": "#1c5ee1",
+			"info.pressed": "#1956ce",
+			"warning.strong": "#df8e1d",
+			"warning.text": "#000000",
+			"warning.hover": "#e2972f",
+			"warning.pressed": "#e4a041",
+			"success.strong": "#40a02b",
+			"success.text": "#000000",
+			"success.hover": "#4fa83c",
+			"success.pressed": "#5faf4d",
+			"warning.muted": "#ba7e30",
+			"success.muted": "#438c3a",
+			"accent": {
+				"wash": "#8839ef1f",
+				"selection": "#8839ef3d"
+			},
+			"ink": {
+				"1": "#0000000a",
+				"2": "#0000000f",
+				"3": "#00000014",
+				"4": "#0000001c",
+				"5": "#00000029",
+				"6": "#00000038"
+			},
+			"diff": {
+				"add": "#40a02b",
+				"delete": "#d20f39",
+				"hunk": "#8839ef12"
+			},
+			"cursor": "#4c4f698c",
+			"scrim": "#00000099",
+			"code.wash": "#8839ef1f",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#0000001c",
+				"hover": "#0000000d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#3b3c41",
+			"solid.pressed": "#4c4c51"
+		}
+	},
+	"_source": {
+		"family": "catppuccin",
+		"name": "Catppuccin Latte",
+		"treatment": "Opaque",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

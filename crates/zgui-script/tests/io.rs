@@ -1,6 +1,7 @@
 //! The machine beyond the window (`ui.clipboard`, `ui.open_files`,
 //! `ui.save_file`, `ui.read_file`, `ui.write_file`) through a platform the
 //! window provides: here a fake, as a desktop window provides the real one.
+//! And `ui.haptic`, which taps the platform's trackpad.
 mod common;
 use common::Harness;
 use std::{
@@ -9,7 +10,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use zgui::platform::{FilePicker, Pending, Platform, PlatformService};
+use zgui::platform::{FilePicker, Haptic, Pending, Platform, PlatformService};
 use zgui_script::ScriptHost;
 
 struct Fake {
@@ -17,8 +18,13 @@ struct Fake {
     /// What the open dialog picks, and where the save dialog saves.
     opens: PathBuf,
     saves: PathBuf,
+    tapped: RefCell<Vec<Haptic>>,
 }
 impl Platform for Fake {
+    fn haptic(&self, haptic: Haptic) -> bool {
+        self.tapped.borrow_mut().push(haptic);
+        true
+    }
     fn clipboard_text(&self) -> Option<String> {
         Some(self.clipboard.borrow().clone())
     }
@@ -73,6 +79,7 @@ fn app(dir: &std::path::Path, code: &'static str, plugin: Option<&'static str>) 
         clipboard: RefCell::new(String::new()),
         opens: dir.join("in.txt"),
         saves: dir.join("out.txt"),
+        tapped: RefCell::default(),
     });
     Harness::wrapped(
         move |runtime| {
@@ -153,4 +160,49 @@ fn without_a_platform_it_says_so() {
     h.click("copy");
     let error = h.host.error().get().unwrap_or_default();
     assert!(error.contains("need a desktop window"), "{error}");
+}
+
+const TAPS: &str = r#"
+local felt = ui.state("felt", "")
+return ui.column {
+    ui.text { id = "label", function() return felt:get() end },
+    ui.button { id = "tap", w = 40, h = 20, "t", on_click = function()
+        felt:set(`{ui.haptic()} {ui.haptic("alignment")}`)
+    end },
+    ui.button { id = "bad", w = 40, h = 20, "b", on_click = function()
+        ui.haptic("buzz" :: any)
+    end },
+}
+"#;
+
+#[test]
+fn a_haptic_reaches_the_platform_and_is_counted() {
+    let fake = Rc::new(Fake {
+        clipboard: RefCell::new(String::new()),
+        opens: PathBuf::new(),
+        saves: PathBuf::new(),
+        tapped: RefCell::default(),
+    });
+    let platform = fake.clone();
+    let mut h = Harness::wrapped(
+        |runtime| ScriptHost::inline(runtime, "app", TAPS),
+        move |view| zgui::compose::provide(PlatformService(platform), view),
+    );
+    assert_eq!(h.host.haptics(), (0, None));
+    h.click("tap");
+    wait_for(&mut h, "true true");
+    assert_eq!(*fake.tapped.borrow(), [Haptic::Level, Haptic::Alignment]);
+    assert_eq!(h.host.haptics(), (2, Some(Haptic::Alignment)));
+    h.click("bad");
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("not \"buzz\""), "{error}");
+}
+
+#[test]
+fn headless_a_haptic_is_counted_and_felt_by_nothing() {
+    let mut h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", TAPS));
+    h.click("tap");
+    wait_for(&mut h, "false false");
+    assert_eq!(h.host.haptics(), (2, Some(Haptic::Alignment)));
+    assert_eq!(h.host.error().get(), None);
 }

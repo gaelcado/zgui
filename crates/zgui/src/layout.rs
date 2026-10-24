@@ -75,6 +75,10 @@ impl EdgeLengths {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LayoutOptions {
     pub display: Option<Display>,
+    /// Shown: merged over options that hide the view (`Display::None`), it
+    /// takes their display back to the default. A hover or a variant can
+    /// show what the base hides without knowing its display.
+    pub shown: Option<bool>,
     pub visible: Option<bool>,
     pub clip_x: Option<bool>,
     pub clip_y: Option<bool>,
@@ -153,9 +157,16 @@ impl LayoutOptions {
         self == Self::default()
     }
     pub fn merge(&mut self, other: Self) {
+        if other.shown == Some(true)
+            && other.display.is_none()
+            && self.display == Some(Display::None)
+        {
+            self.display = None;
+        }
         macro_rules! merge{($($field:ident),* $(,)?)=>{$(if other.$field.is_some(){self.$field=other.$field;})*};}
         merge!(
             display,
+            shown,
             visible,
             wrap,
             reverse,
