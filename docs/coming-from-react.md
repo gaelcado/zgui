@@ -92,7 +92,7 @@ end)
 
 local next_id = 1
 local function add(title: string)
-	store.todos:push({ id = next_id, title = title, done = false })
+	store.todos:push { id = next_id, title = title, done = false }
 	next_id += 1
 end
 add("Write the docs")
@@ -151,9 +151,11 @@ end)
 return ui.column {
 	gap = 6,
 	ui.input { ref = box, value = query, label = "Search", placeholder = "Search" },
-	ui.text { function()
-		return `{words:get()} words, {hits:get()} letters searched`
-	end },
+	ui.text {
+		function()
+			return `{words:get()} words, {hits:get()} letters searched`
+		end,
+	},
 	ui.button {
 		on_click = function()
 			local el = box:peek()
@@ -225,7 +227,7 @@ For long lists, `ui.list` takes the same `data`, `key` and `row` and builds only
 type Message = { id: number, text: string }
 local messages = ui.state("messages", {} :: { Message })
 for i = 1, 2000 do
-	messages:push({ id = i, text = `Message {i}` })
+	messages:push { id = i, text = `Message {i}` }
 end
 
 return ui.list {
@@ -268,12 +270,17 @@ return ui.column {
 	gap = 6,
 	ui.switch(user.status, {
 		loading = ui.text { "Loading…" },
-		failed = ui.text { function()
-			return `Couldn't load: {user.error:get()}`
-		end, color = "$danger" },
-		ready = ui.text { function()
-			return user.data:get().name
-		end },
+		failed = ui.text {
+			function()
+				return `Couldn't load: {user.error:get()}`
+			end,
+			color = "$danger",
+		},
+		ready = ui.text {
+			function()
+				return user.data:get().name
+			end,
+		},
 	}),
 	ui.button { on_click = ui.add(id, 1), "Next user" },
 	ui.button { on_click = user.reload, "Reload" },

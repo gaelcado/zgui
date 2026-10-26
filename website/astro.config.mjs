@@ -5,6 +5,9 @@ import mdx from '@astrojs/mdx';
 import tailwindcss from '@tailwindcss/vite';
 import sitemap from '@astrojs/sitemap';
 import { unified } from '@astrojs/markdown-remark';
+import rehypeCodeFrame from './src/lib/code-frame.mjs';
+import rehypeProse from './src/lib/rehype-prose.mjs';
+import { codeThemes } from './src/lib/code-themes.mjs';
 import {
   rehypeCode,
   remarkCodeTab,
@@ -16,7 +19,9 @@ import {
 // the table of contents, search's structured data, and Shiki highlighting
 // in both themes.
 const rehypeCodeOptions = {
-  themes: { light: 'github-light-default', dark: 'github-dark-default' },
+  themes: codeThemes,
+  // Every block's language as a class: code-frame.mjs labels the block by it.
+  addLanguageClass: true,
   // Markdown pages render outside React: no language icons for a code block component to show.
   icon: false,
   langs: ['rust', 'luau', 'sh', 'json', 'toml', 'powershell', 'text', 'wgsl', 'swift', 'diff', 'yaml', 'python'],
@@ -34,7 +39,7 @@ export default defineConfig({
     syntaxHighlight: false,
     processor: unified({
       remarkPlugins: [remarkHeading, remarkCodeTab, [remarkStructure, { exportAs: 'structuredData' }]],
-      rehypePlugins: [[rehypeCode, rehypeCodeOptions]],
+      rehypePlugins: [[rehypeCode, rehypeCodeOptions], rehypeCodeFrame, rehypeProse],
     }),
   },
   integrations: [react(), mdx({ extendMarkdownConfig: true, syntaxHighlight: false }), sitemap()],

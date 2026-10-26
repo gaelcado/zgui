@@ -133,3 +133,23 @@ export const environment = heavy.environment;
 export const toolchains = heavy.toolchains as Record<string, any>;
 export const protocol = heavy.protocol;
 export const date = heavy.started_utc.slice(0, 10);
+
+const sceneShort: Record<string, string> = { heavy: 'Dashboard', lab: 'Text and list', animate: 'Animation', vlist: 'Long list' };
+
+/**
+ * Every active test (a scene and a mode), each rival's figure as a multiple
+ * of zgx's: the home page's chart. Above 1 a rival uses more than zgx.
+ */
+export function relativeTests(source: 'cpu_percent_one_core' | 'gpu_power_mw') {
+  return active.map(([s, mode]) => {
+    const ours = value(s, 'zgx', mode, source)!;
+    return {
+      scene: sceneShort[s.scene] ?? s.scene,
+      mode: s.modes.length > 1 ? text.modes[mode as keyof typeof text.modes] : '',
+      zgx: ours,
+      rivals: rivals
+        .filter((r) => s.frameworks.includes(r))
+        .map((r) => ({ framework: r, name: names[r], value: value(s, r, mode, source)!, ratio: value(s, r, mode, source)! / ours })),
+    };
+  });
+}

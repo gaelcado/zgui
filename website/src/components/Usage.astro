@@ -1,7 +1,7 @@
 ---
 // A command's usage text, read from its source.
-import { Code } from 'astro:components';
 import { rustString } from '@/lib/repo';
+import { codeBlock } from '@/lib/highlight';
 
 interface Props {
   file: string;
@@ -10,4 +10,4 @@ interface Props {
 const { file, name } = Astro.props;
 ---
 
-<Code code={rustString(file, name)} lang="text" themes={{ light: 'github-light-default', dark: 'github-dark-default' }} defaultColor={false} />
+<Fragment set:html={codeBlock({ code: rustString(file, name), lang: 'text', title: `${file.split('/').pop()} · ${name}` })} />

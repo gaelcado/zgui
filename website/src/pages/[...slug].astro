@@ -3,7 +3,7 @@ import { render } from 'astro:content';
 import type { TOCItemType } from 'fumadocs-core/toc';
 import Base from '@/layouts/Base.astro';
 import { Docs } from '@/components/docs';
-import CopyCode from '@/components/CopyCode.astro';
+import CodeBlocks from '@/components/CodeBlocks.astro';
 import { pageTree, source } from '@/lib/source';
 import { markdownUrl, ogImage, repoUrl } from '@/lib/shared';
 
@@ -20,7 +20,8 @@ const entry = page.data._raw;
 const { Content, headings } = await render(entry);
 const toc: TOCItemType[] = headings
   .filter((h) => h.depth >= 2 && h.depth <= 3)
-  .map((h) => ({ depth: h.depth, title: h.text, url: `#${h.slug}` }));
+  // (the text without the heading's own "#" link, lib/rehype-prose.mjs)
+  .map((h) => ({ depth: h.depth, title: h.text.replace(/#$/, ''), url: `#${h.slug}` }));
 const sourceUrl = entry.data.source ? `${repoUrl}/blob/main/${entry.data.source}` : undefined;
 ---
 
@@ -41,5 +42,5 @@ const sourceUrl = entry.data.source ? `${repoUrl}/blob/main/${entry.data.source}
       <Content />
     </div>
   </Docs>
-  <CopyCode />
+  <CodeBlocks />
 </Base>

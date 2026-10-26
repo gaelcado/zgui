@@ -130,7 +130,12 @@ return ui.column {
 		items = "center",
 		ui.image { src = "photo.png", w = 48, h = 48, fit = "cover", rounded = 8, label = "Avatar" },
 		ui.svg { src = "icon.svg", w = 20, h = 20, tint = "#5ea5ff" },
-		ui.svg { code = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 2'><rect width='2' height='2'/></svg>", w = 12, h = 12, tint = "#e5534b" },
+		ui.svg {
+			code = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 2'><rect width='2' height='2'/></svg>",
+			w = 12,
+			h = 12,
+			tint = "#e5534b",
+		},
 	},
 	ui.canvas {
 		w = 180,

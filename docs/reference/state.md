@@ -109,13 +109,21 @@ Handlers take a function or an action Rust runs without calling the script:
 | `p:await()` | inside `ui.task(function() ... end)` only: waits for it, returns its value or raises its error (the host's message as it wrote it, so `pcall` catches it) |
 
 ```luau
-local user = ui.call("load_user", id)            -- the interface follows it
-ui.text { function() return if user.done then user.value.name else "Loading" end }
+local user = ui.call("load_user", id) -- the interface follows it
+ui.text {
+	function()
+		return if user.done then user.value.name else "Loading"
+	end,
+}
 
-ui.task(function()                               -- steps in order
-    local token = ui.call("sign_in"):await()
-    local ok, err = pcall(function() return ui.call("sync", token):await() end)
-    if not ok then status:set(err) end
+ui.task(function() -- steps in order
+	local token = ui.call("sign_in"):await()
+	local ok, err = pcall(function()
+		return ui.call("sync", token):await()
+	end)
+	if not ok then
+		status:set(err)
+	end
 end)
 ```
 
@@ -126,8 +134,10 @@ end)
 ```lua
 local status = ui.state("status", "")
 ui.task(function()
-    local _, err = ui.try(function() return ui.call("load_user"):await() end)
-    status:set(if err then `Couldn't load: {err}` else "Loaded")
+	local _, err = ui.try(function()
+		return ui.call("load_user"):await()
+	end)
+	status:set(if err then `Couldn't load: {err}` else "Loaded")
 end)
 return ui.text { "{status}" }
 ```
@@ -152,20 +162,28 @@ A rejection that nothing handles (no `on_error`, no read of `error`, no `await`)
 type Person = { name: string }
 local id = ui.state("id", 1)
 local person = ui.resource(function(): Person?
-    local response = ui.fetch(`https://api.example/people/{id:get()}`):await()
-    if not response.ok then error(`The server answered {response.status}`, 0) end
-    return response.json :: Person
+	local response = ui.fetch(`https://api.example/people/{id:get()}`):await()
+	if not response.ok then
+		error(`The server answered {response.status}`, 0)
+	end
+	return response.json :: Person
 end)
 return ui.switch(person.status, {
-    loading = ui.text "Loading…",
-    failed = ui.column {
-        ui.text { function() return person.error:get() end },
-        ui.button { "Try again", on_click = person.reload },
-    },
-    ready = ui.text { function()
-        local found = person.data:get()
-        return if found then found.name else ""
-    end },
+	loading = ui.text("Loading…"),
+	failed = ui.column {
+		ui.text {
+			function()
+				return person.error:get()
+			end,
+		},
+		ui.button { "Try again", on_click = person.reload },
+	},
+	ready = ui.text {
+		function()
+			local found = person.data:get()
+			return if found then found.name else ""
+		end,
+	},
 })
 ```
 
@@ -181,26 +199,38 @@ A response can be read as it arrives (a model's reply, a log): `on_chunk = funct
 local reply = ui.state("reply", "")
 local running = nil
 local function ask(question: string)
-    reply:set("")
-    running = ui.task(function()
-        local response = ui.fetch("https://api.example/chat", {
-            method = "POST",
-            body = { question = question, stream = true },
-            on_event = function(e: ServerEvent)
-                if e.data ~= "[DONE]" then
-                    reply:set(reply:peek() .. e.data)
-                end
-            end,
-        }):await()
-        if not response.ok then
-            reply:set(`Failed: {response.status}`)
-        end
-    end)
+	reply:set("")
+	running = ui.task(function()
+		local response = ui.fetch("https://api.example/chat", {
+			method = "POST",
+			body = { question = question, stream = true },
+			on_event = function(e: ServerEvent)
+				if e.data ~= "[DONE]" then
+					reply:set(reply:peek() .. e.data)
+				end
+			end,
+		}):await()
+		if not response.ok then
+			reply:set(`Failed: {response.status}`)
+		end
+	end)
 end
 return ui.column {
-    ui.button { "Ask", on_click = function() ask("Why is the sky blue?") end },
-    ui.button { "Stop", on_click = function() if running then running:cancel() end end },
-    ui.text { "{reply}", wrap = true },
+	ui.button {
+		"Ask",
+		on_click = function()
+			ask("Why is the sky blue?")
+		end,
+	},
+	ui.button {
+		"Stop",
+		on_click = function()
+			if running then
+				running:cancel()
+			end
+		end,
+	},
+	ui.text { "{reply}", wrap = true },
 }
 ```
 
@@ -226,7 +256,9 @@ State converts what it holds between Luau and Rust, through Luau's C API: 100,00
 
 ```lua
 local initial = {}
-for i = 1, 1000 do initial[i] = { id = i, price = i } end
+for i = 1, 1000 do
+	initial[i] = { id = i, price = i }
+end
 local rows = ui.state("rows", initial)
 ui.every(250, function()
 	ui.batch(function()
@@ -240,13 +272,17 @@ end)
 local order = ui.sorted(rows, { by = "price", descending = true })
 return ui.list {
 	h = 300,
-	count = function() return order:len() end,
+	count = function()
+		return order:len()
+	end,
 	height = 24,
 	row = function(i)
-		return ui.text { function()
-			local row = order:at(i)
-			return if row then ui.number(row.price, { decimals = 2 }) else ""
-		end }
+		return ui.text {
+			function()
+				local row = order:at(i)
+				return if row then ui.number(row.price, { decimals = 2 }) else ""
+			end,
+		}
 	end,
 }
 ```
@@ -289,8 +325,12 @@ What `each` rows, `presence` content and `list` rows build owns what it makes in
 ```lua
 local user = ui.state("user", "Ada")
 local Greeting = ui.component(function()
-    local who = ui.use_context("user")
-    return ui.text { function() return `Hello, {who:get()}` end }
+	local who = ui.use_context("user")
+	return ui.text {
+		function()
+			return `Hello, {who:get()}`
+		end,
+	}
 end)
 return ui.column { provide = { user = user }, Greeting {} }
 ```

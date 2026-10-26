@@ -166,7 +166,15 @@ A field over a list of commands near the window's top, filtered by a fuzzy match
 
 ```lua
 local open = ui.state("palette", false)
-ui.command { id = "palette", title = "Command Palette", menu = "View", key = "cmd+shift+p", run = function() open:set(true) end }
+ui.command {
+	id = "palette",
+	title = "Command Palette",
+	menu = "View",
+	key = "cmd+shift+p",
+	run = function()
+		open:set(true)
+	end,
+}
 ui.command { id = "theme", title = "Toggle Theme", menu = "View", run = function() end }
 return ui.command_palette { open = open }
 ```
@@ -245,7 +253,9 @@ local form = ui.form {
 	submit = function(values)
 		-- In a task: it awaits, and raises what went wrong.
 		local response = ui.fetch("https://api.example/people", { method = "POST", body = values }):await()
-		if not response.ok then error(`The server answered {response.status}`, 0) end
+		if not response.ok then
+			error(`The server answered {response.status}`, 0)
+		end
 		return response.json
 	end,
 }
@@ -265,9 +275,13 @@ return ui.column {
 	field("name", "Name"),
 	field("email", "Email"),
 	ui.segmented { field = form.fields.role, options = { "Engineer", "Designer" } },
-	ui.presence(form.failure, function(message: string) return ui.text { message, color = "$danger" } end),
+	ui.presence(form.failure, function(message: string)
+		return ui.text { message, color = "$danger" }
+	end),
 	ui.button {
-		function() return if form.pending:get() then "Saving…" else "Save" end,
+		function()
+			return if form.pending:get() then "Saving…" else "Save"
+		end,
 		disabled = form.pending,
 		on_click = form.submit,
 	},

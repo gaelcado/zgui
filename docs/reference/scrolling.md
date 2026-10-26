@@ -152,7 +152,7 @@ return ui.row {
 		},
 		ui.button {
 			on_click = function()
-				messages:push({ from = "Ada", text = `Message {messages:len() + 1}` })
+				messages:push { from = "Ada", text = `Message {messages:len() + 1}` }
 			end,
 			"Send",
 		},

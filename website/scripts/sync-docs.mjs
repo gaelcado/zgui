@@ -211,12 +211,25 @@ function fence(src, node) {
       .map((line) => line.replace(/^(\s*)##/, '$1#'))
       .join('\n');
   }
+  // A project's file (`-- file: plugins/x.luau`, or ```json file=.luaurc,
+  // the convention the docs' tests read) is shown under its name.
+  let title = (node.meta ?? '').match(/(?:^|\s)file=(\S+)/)?.[1];
+  const marker = node.value.match(/^-- file: (.+)\n/);
+  if (marker) {
+    title = marker[1].trim();
+    node.value = node.value.slice(marker[0].length);
+  }
+  node.value = node.value.replace(/^(\s*\n)+/, '').replace(/(\n\s*)+$/, '');
   node.lang = lang;
-  node.meta = null;
+  node.meta = title ? `title="${title}"` : null;
 }
 
 // --- Write. ------------------------------------------------------------------
 fs.rmSync(outDir, { recursive: true, force: true });
+// Astro keeps rendered pages by their files' contents, so a change to the
+// Markdown pipeline (lib/code-frame.mjs, the themes) would leave old HTML.
+for (const store of ['.astro/data-store.json', 'node_modules/.astro/data-store.json'])
+  fs.rmSync(path.join(website, store), { force: true });
 fs.rmSync(assetsDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 
