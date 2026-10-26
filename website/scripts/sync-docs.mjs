@@ -131,6 +131,15 @@ for (const set of sets) {
     pages.push({ set, page, url, parsed, nodes });
   }
 }
+// A split file's intro is on some page too (README's lede is the home page's).
+for (const src of taken.keys()) {
+  if (src === 'README.md' || !src.startsWith('docs/')) continue;
+  const pagesOf = sets.flatMap((set) => set.pages).filter((p) => typeof p !== 'string' && p.src === src);
+  const nodes = sources.get(src).tree.children;
+  const firstH2 = nodes.findIndex((n) => n.type === 'heading' && n.depth === 2);
+  const hasIntro = nodes.slice(0, firstH2).some((n) => n.type !== 'heading');
+  if (hasIntro && !pagesOf.some((p) => p.intro ?? !p.sections)) fail(`${src}: its text before the first section is on no page (give a page intro: true)`);
+}
 // A split file's every section is on some page.
 for (const [src, titles] of taken) {
   for (const heading of sources.get(src).headings.filter((h) => h.depth === 2)) {
@@ -285,6 +294,18 @@ for (const set of sets) {
   );
   for (const [folder, items] of folders)
     fs.writeFileSync(path.join(outDir, set.dir, folder, 'meta.json'), JSON.stringify({ pages: items }, null, 2));
+}
+
+// --- Redirects: the repository's paths (docs/layout.md) to their pages. --
+{
+  const lines = ['/docs /rust 301', '/docs/ /rust 301'];
+  for (const [src, { url }] of fileUrls) {
+    if (!src.startsWith('docs/')) continue;
+    const bare = `/${src.replace(/\.md$/, '')}`;
+    lines.push(`/${src} ${url} 301`, `${bare} ${url} 301`);
+  }
+  lines.push('/CHANGELOG.md /rust/changelog 301', '/README.md /rust 301');
+  fs.writeFileSync(path.join(website, 'public/_redirects'), `${lines.join('\n')}\n`);
 }
 
 // --- Performance: the published run (site/, written and checked by
