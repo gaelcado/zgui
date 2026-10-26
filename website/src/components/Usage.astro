@@ -10,4 +10,4 @@ interface Props {
 const { file, name } = Astro.props;
 ---
 
-<Code code={rustString(file, name)} lang="text" themes={{ light: 'github-light', dark: 'github-dark' }} defaultColor={false} class="shiki" />
+<Code code={rustString(file, name)} lang="text" themes={{ light: 'github-light-default', dark: 'github-dark-default' }} defaultColor={false} class="shiki" />

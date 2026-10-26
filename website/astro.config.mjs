@@ -16,7 +16,7 @@ import {
 // the table of contents, search's structured data, and Shiki highlighting
 // in both themes.
 const rehypeCodeOptions = {
-  themes: { light: 'github-light', dark: 'github-dark' },
+  themes: { light: 'github-light-default', dark: 'github-dark-default' },
   // Markdown pages render outside React: no language icons for a code block component to show.
   icon: false,
   langs: ['rust', 'luau', 'sh', 'json', 'toml', 'powershell', 'text', 'wgsl', 'swift', 'diff', 'yaml', 'python'],
@@ -26,7 +26,8 @@ export default defineConfig({
   site: 'https://zgx.zeron.sh',
   trailingSlash: 'never',
   devToolbar: { enabled: false },
-  build: { format: 'file' },
+  // One request less before first paint: the CSS is small once compressed.
+  build: { format: 'file', inlineStylesheets: 'always' },
   prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
   markdown: {
     // Fumadocs' rehypeCode highlights; Astro's own Shiki would run first.

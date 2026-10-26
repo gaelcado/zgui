@@ -14,6 +14,9 @@
   --color-fd-primary: hsl(146, 45%, 33%);
   --color-fd-primary-foreground: hsl(0, 0%, 100%);
   --color-fd-ring: hsl(146, 45%, 40%);
+  /* Fumadocs' neutral grey is 4.2:1 on its cards; this is 5.6:1. */
+  --color-fd-muted-foreground: hsl(0, 0%, 38%);
+  --color-code: #ffffff;
   --color-zgx: #2f7d4b;
   --color-zgx-luau: #6aa982;
 }
@@ -22,6 +25,8 @@
   --color-fd-primary: hsl(144, 50%, 58%);
   --color-fd-primary-foreground: hsl(150, 40%, 8%);
   --color-fd-ring: hsl(144, 50%, 50%);
+  --color-fd-muted-foreground: hsl(0, 0%, 66%);
+  --color-code: hsl(0, 0%, 7%);
   --color-zgx: #5cbf7e;
   --color-zgx-luau: #3f8a5b;
 }
@@ -65,7 +70,7 @@ html > body[data-scroll-locked] {
   overflow-x: auto;
   border: 1px solid var(--color-fd-border);
   border-radius: 0.6rem;
-  background: var(--color-fd-secondary);
+  background: var(--color-code);
   font-size: 0.8125rem;
   line-height: 1.6;
 }

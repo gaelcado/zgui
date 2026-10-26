@@ -1,6 +1,8 @@
 ---
 import '@/styles/global.css';
 import { siteName, siteUrl } from '@/lib/shared';
+import geist from '@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url';
+import geistMono from '@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2?url';
 
 interface Props {
   title: string;
@@ -25,6 +27,8 @@ const imageUrl = new URL(image, siteUrl).href;
     {description && <meta name="description" content={description} />}
     <link rel="canonical" href={canonical} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preload" as="font" type="font/woff2" href={geist} crossorigin />
+    <link rel="preload" as="font" type="font/woff2" href={geistMono} crossorigin />
     <link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt" />
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0a0a" />

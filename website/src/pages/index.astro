@@ -12,7 +12,7 @@ import { repoUrl } from '@/lib/shared';
 
 const icons = { Box, FileCode, MonitorSmartphone, SquareTerminal, Gauge } as const;
 const h = headline();
-const themes = { light: 'github-light', dark: 'github-dark' } as const;
+const themes = { light: 'github-light-default', dark: 'github-dark-default' } as const;
 const [lede, ...more] = readme.lede.split(/(?<=\.) /);
 ---
 
@@ -373,7 +373,7 @@ const [lede, ...more] = readme.lede.split(/(?<=\.) /);
     margin: 0;
     border: 1px solid var(--color-fd-border);
     border-radius: 0.9rem;
-    background: var(--color-fd-card);
+    background: var(--color-code);
     overflow: hidden;
     box-shadow: 0 1px 0 color-mix(in oklab, var(--color-fd-foreground) 4%, transparent), 0 12px 32px -18px color-mix(in oklab, var(--color-fd-foreground) 25%, transparent);
   }
@@ -620,7 +620,7 @@ const [lede, ...more] = readme.lede.split(/(?<=\.) /);
     padding: 1rem;
     border-radius: 0.7rem;
     border: 1px solid var(--color-fd-border);
-    background: var(--color-fd-background) !important;
+    background: var(--color-code) !important;
     font-size: 0.8rem;
     line-height: 1.7;
     overflow-x: auto;
