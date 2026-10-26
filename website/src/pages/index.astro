@@ -9,7 +9,7 @@ import BenchOverview from '@/components/home/BenchOverview.astro';
 import CodeBlocks from '@/components/CodeBlocks.astro';
 import readme from '@/generated/readme.json';
 import { sets } from '../../docs.manifest.mjs';
-import { headline, fmt, scene, value } from '@/lib/perf';
+import { headline, fmt, scene, value, startupLead } from '@/lib/perf';
 import { repoUrl } from '@/lib/shared';
 import { publishedVersion, workspaceVersion } from '@/lib/repo';
 import { codeBlock, codeTabs } from '@/lib/highlight';
@@ -43,6 +43,14 @@ const figures = [
   { label: 'CPU, heavy dashboard', value: h.cards[0].value, note: `GPUI Fast ${fmt(value(heavy, 'gpui-fast', 'both', 'cpu_percent_one_core')!, 1)}%` },
   { label: 'Frames over 25 ms, at most', value: h.cards[2].value, note: `rivals ${h.cards[2].detail[0].text}` },
 ];
+// Launch to first content, when the published run measured it.
+const launch = startupLead();
+if (launch)
+  figures.unshift({
+    label: 'Launch to first content',
+    value: `${fmt(launch.content, 0)} ms`,
+    note: `${fmt(launch.sooner, 0)} ms sooner than GPUI Fast, ${Math.round(launch.fewer * 100)}% fewer instructions`,
+  });
 const navName = (dir: string, title: string) => (dir === 'rust' ? 'Rust' : dir === 'luau' ? 'Luau' : title);
 ---
 

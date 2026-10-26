@@ -153,3 +153,29 @@ export function relativeTests(source: 'cpu_percent_one_core' | 'gpu_power_mw') {
     };
   });
 }
+
+type StartupStat = { median: number; min: number; max: number };
+type Startup = {
+  commit: string;
+  machine: string;
+  probe: string;
+  apps: Record<string, string>;
+  protocol: string;
+  medians: Record<string, Record<'window_ms' | 'content_ms' | 'instructions' | 'cpu_ms', StartupStat>>;
+};
+/** Launch to first content, zgx against GPUI Fast (data.json's `startup`), when the run has one. */
+export const startup = ((perf as Record<string, unknown>).startup ?? null) as Startup | null;
+
+/** The startup comparison's lead: how much sooner, and how many fewer instructions. */
+export function startupLead() {
+  if (!startup) return null;
+  const ours = startup.medians.zgx;
+  const theirs = startup.medians['gpui-fast'];
+  if (!ours || !theirs) return null;
+  return {
+    sooner: theirs.content_ms.median - ours.content_ms.median,
+    fewer: 1 - ours.instructions.median / theirs.instructions.median,
+    content: ours.content_ms.median,
+    theirContent: theirs.content_ms.median,
+  };
+}

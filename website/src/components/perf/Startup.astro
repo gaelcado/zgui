@@ -1,0 +1,117 @@
+---
+// Startup: launch to first content, zgx against GPUI Fast with the same menu
+// bar (data.json's `startup`, from scripts/build_site.py). Nothing when the
+// published run has none.
+import { startup, startupLead, names, fmt, repo } from '@/lib/perf';
+
+const metrics = [
+  { key: 'content_ms', title: 'Launch to first content', unit: 'ms', scale: 1, digits: 0 },
+  { key: 'cpu_ms', title: 'CPU to first content', unit: 'ms of CPU', scale: 1, digits: 0 },
+  { key: 'instructions', title: 'Instructions to first content', unit: 'million', scale: 1e6, digits: 0 },
+] as const;
+const lead = startupLead();
+const frameworks = startup ? Object.keys(startup.medians).sort((a, b) => (a === 'zgx' ? -1 : b === 'zgx' ? 1 : 0)) : [];
+---
+
+{
+  startup && lead && (
+    <section class="startup not-prose" aria-labelledby="startup">
+      <h2 id="startup">Startup</h2>
+      <p class="startup-lead">
+        <strong>zgx reaches its first content {fmt(lead.sooner, 0)} ms sooner, with {Math.round(lead.fewer * 100)}% fewer instructions.</strong>{' '}
+        <span>From launch to the window's first drawn text, against GPUI Fast building the same menu bar; {startup.protocol}.</span>
+      </p>
+      <figure class="perf-chart">
+        <table class="perf-table">
+          <colgroup><col class="perf-col-mode" /><col class="perf-col-fw" /><col /></colgroup>
+          <caption>
+            <span class="perf-chart-title">Launch to first content</span>
+            <span class="perf-chart-unit">Medians of the launches, their range as a whisker; lower is better.</span>
+          </caption>
+          <thead class="sr-only">
+            <tr><th scope="col">Measure</th><th scope="col">Framework</th><th scope="col">Median (range)</th></tr>
+          </thead>
+          {metrics.map((m) => {
+            const top = Math.max(...frameworks.map((f) => startup.medians[f][m.key].max)) || 1;
+            return (
+              <tbody>
+                {frameworks.map((f, i) => {
+                  const s = startup.medians[f][m.key];
+                  const v = (x: number) => fmt(x / m.scale, m.digits);
+                  return (
+                    <tr data-fw={f}>
+                      {i === 0 && (
+                        <th scope="rowgroup" rowspan={frameworks.length} class="perf-mode">
+                          {m.title.replace(' to first content', '')}
+                          <span class="startup-unit">{m.unit}</span>
+                        </th>
+                      )}
+                      <th scope="row" class="perf-fw">{names[f] ?? f}</th>
+                      <td>
+                        <div class="perf-cell">
+                          <span class="perf-track" aria-hidden="true">
+                            <span class="perf-bar" style={`width:${((100 * s.median) / top).toFixed(1)}%`} />
+                            <span class="perf-whisker" style={`left:${((100 * s.min) / top).toFixed(1)}%;width:${((100 * (s.max - s.min)) / top).toFixed(1)}%`} />
+                          </span>
+                          <span class="perf-value">{v(s.median)}</span>
+                          <span class="sr-only">(launches {v(s.min)} to {v(s.max)})</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            );
+          })}
+        </table>
+      </figure>
+      <p class="startup-foot">
+        Measured apart from the suite on {startup.machine}, zgx at <a href={`${repo}/commit/${startup.commit}`}><code>{startup.commit.slice(0, 7)}</code></a>.
+      </p>
+    </section>
+  )
+}
+
+<style>
+  .startup {
+    margin: 3rem 0 2rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid var(--color-hairline);
+  }
+  .startup h2 {
+    margin: 0 0 0.8rem;
+    font-size: 1.4375rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    scroll-margin-top: 5.5rem;
+  }
+  .startup-lead {
+    margin: 0 0 1.5rem;
+    font-size: 1.125rem;
+    line-height: 1.45;
+    letter-spacing: -0.02em;
+  }
+  .startup-lead strong {
+    font-weight: 600;
+    color: var(--color-ink);
+  }
+  .startup-lead span {
+    color: var(--color-ink-2);
+  }
+  .startup-unit {
+    display: block;
+    font-size: 0.6875rem;
+    color: var(--color-fd-muted-foreground);
+  }
+  .startup .perf-chart {
+    max-width: 34rem;
+  }
+  .startup-foot {
+    margin: 1rem 0 0;
+    font-size: 0.8125rem;
+    color: var(--color-fd-muted-foreground);
+  }
+  .startup-foot a {
+    color: inherit;
+  }
+</style>
