@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo } from 'react';
+import { type ReactNode, lazy, useMemo } from 'react';
 import type { SerializedPageTree } from 'fumadocs-core/source/client';
 import { useFumadocsLoader } from 'fumadocs-core/source/client';
 import type { TOCItemType } from 'fumadocs-core/toc';
@@ -12,7 +12,8 @@ import {
   MarkdownCopyButton,
   ViewOptionsPopover,
 } from 'fumadocs-ui/layouts/docs/page';
-import Search from './search';
+// Search's dialog and index load when it first opens, not with the page.
+const Search = lazy(() => import('./search'));
 import { Logo } from './logo';
 import { repoUrl } from '@/lib/shared';
 
