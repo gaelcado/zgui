@@ -5696,7 +5696,8 @@ impl GpuRenderer {
                     };
                     // Find's marks, under the selection: rounded a little,
                     // as a browser's.
-                    quads.extend(scene.text_marks(item.id).iter().map(|m| {
+                    let marks = scene.text_marks(item.id);
+                    quads.extend(marks.iter().map(|m| {
                         let rect = [
                             bounds.x + m.rect.x,
                             bounds.y + m.rect.y,
@@ -5791,7 +5792,9 @@ impl GpuRenderer {
                     {
                         // (A twin's, placed in this atlas already.)
                         place(&mut quads, &shaped.quads);
-                        glyphs_alone = highlight.is_none() && shaped.decorations.is_empty();
+                        glyphs_alone = marks.is_empty()
+                            && highlight.is_none()
+                            && shaped.decorations.is_empty();
                         shaped.last_used = self.frame;
                         self.shaped_bytes += shaped.bytes();
                         self.shapes.insert(item.id, shaped);
@@ -5801,7 +5804,9 @@ impl GpuRenderer {
                         && shaped.atlas_epoch == self.atlas_epoch
                     {
                         place(&mut quads, &shaped.quads);
-                        glyphs_alone = highlight.is_none() && shaped.decorations.is_empty();
+                        glyphs_alone = marks.is_empty()
+                            && highlight.is_none()
+                            && shaped.decorations.is_empty();
                         shaped.last_used = self.frame;
                     } else {
                         let mut shaped = match fresh {
@@ -5867,7 +5872,9 @@ impl GpuRenderer {
                         }
                         let visible = std::mem::take(&mut self.visible_glyphs);
                         place(&mut quads, if partial { &visible } else { &shaped.quads });
-                        glyphs_alone = highlight.is_none() && shaped.decorations.is_empty();
+                        glyphs_alone = marks.is_empty()
+                            && highlight.is_none()
+                            && shaped.decorations.is_empty();
                         self.visible_glyphs = visible;
                         shaped.last_used = self.frame;
                         let bytes = shaped.bytes();
