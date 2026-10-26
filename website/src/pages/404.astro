@@ -1,0 +1,16 @@
+---
+import Base from '@/layouts/Base.astro';
+---
+
+<Base title="Not found" image="/og/index.png">
+  <main class="grid min-h-screen place-items-center px-6">
+    <div class="text-center">
+      <p class="font-mono text-sm text-fd-muted-foreground">404</p>
+      <h1 class="mt-2 text-3xl font-semibold tracking-tight">This page isn't here.</h1>
+      <p class="mt-3 text-fd-muted-foreground">It may have moved when its doc changed.</p>
+      <nav class="mt-6 flex flex-wrap justify-center gap-4 text-sm font-medium text-fd-primary" aria-label="Documentation">
+        <a href="/">Home</a><a href="/rust">Rust</a><a href="/luau">Luau</a><a href="/platforms">Platforms</a><a href="/devtools">Devtools</a><a href="/performance">Performance</a>
+      </nav>
+    </div>
+  </main>
+</Base>

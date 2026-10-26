@@ -1,0 +1,648 @@
+---
+// The home page: static HTML, no React. Its words are README.md's, its
+// samples README's quick start, its numbers the published benchmark, and
+// its doc sets the manifest's.
+import { Code } from 'astro:components';
+import { Box, FileCode, MonitorSmartphone, SquareTerminal, Gauge, ArrowRight } from 'lucide-react';
+import Base from '@/layouts/Base.astro';
+import readme from '@/generated/readme.json';
+import { sets } from '../../docs.manifest.mjs';
+import { headline, verdict, date, commit, repo } from '@/lib/perf';
+import { repoUrl } from '@/lib/shared';
+
+const icons = { Box, FileCode, MonitorSmartphone, SquareTerminal, Gauge } as const;
+const h = headline();
+const themes = { light: 'github-light', dark: 'github-dark' } as const;
+const [lede, ...more] = readme.lede.split(/(?<=\.) /);
+---
+
+<Base
+  title="zgx: a retained-mode GUI framework for Rust and Luau"
+  description={readme.lede}
+  image="/og/index.png"
+  bare
+>
+  <a href="#main" class="skip">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-row">
+      <a href="/" class="brand" aria-label="zgx home">
+        <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="2" y="2" width="20" height="20" rx="6" fill="var(--color-fd-primary)"></rect>
+          <path d="M7.5 8h9l-9 8h9" fill="none" stroke="var(--color-fd-background)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+        <span>zgx</span>
+      </a>
+      <nav aria-label="Documentation" class="header-nav">
+        <a href="/rust">Rust</a>
+        <a href="/luau">Luau</a>
+        <a href="/platforms">Platforms</a>
+        <a href="/devtools">Devtools</a>
+        <a href="/performance">Performance</a>
+      </nav>
+      <div class="header-actions">
+        <a href={repoUrl} class="icon-btn" aria-label="zgx on GitHub">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2 0 1.9 1.2 1.9 1.2 1 1.8 2.8 1.3 3.5 1 0-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6 0-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8 0 3.2.9.8 1.3 1.9 1.3 3.2 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1.1.9 2.2v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3"></path></svg>
+        </a>
+        <button type="button" class="icon-btn" id="theme-toggle" aria-label="Switch to dark theme">
+          <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg>
+          <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <p class="eyebrow"><span class="dot" aria-hidden="true"></span> 0.1 · macOS, Windows, Linux · MIT</p>
+      <h1 id="hero-title">Native interfaces in Rust and Luau that do no work when nothing changes.</h1>
+      <p class="hero-lede">{lede} {more.join(' ')}</p>
+      <div class="cta">
+        <a class="btn primary" href="/rust/getting-started">Start in Rust <ArrowRight size={16} aria-hidden="true" /></a>
+        <a class="btn" href="/luau/getting-started">Start in Luau</a>
+        <a class="btn ghost" href={repoUrl}>GitHub</a>
+      </div>
+    </section>
+
+    <section class="samples wrap" aria-label="The same app in Rust and in Luau">
+      <figure class="sample">
+        <figcaption><span>main.rs</span><span class="tag">Rust</span></figcaption>
+        <Code code={readme.rust} lang="rust" themes={themes} defaultColor={false} />
+      </figure>
+      <figure class="sample">
+        <figcaption><span>hello/app.luau</span><span class="tag">Luau · hot reloads, keeps state</span></figcaption>
+        <Code code={readme.luau} lang="luau" themes={themes} defaultColor={false} />
+        <p class="sample-note"><code>zgx-run hello/</code> opens it. Save, and the window updates with the count kept.</p>
+      </figure>
+    </section>
+
+    <section class="numbers wrap" aria-labelledby="numbers-title">
+      <div class="section-head">
+        <h2 id="numbers-title">Measured, not claimed</h2>
+        <p>{verdict}</p>
+      </div>
+      <dl class="stat-grid">
+        {
+          h.cards.map((card) => (
+            <div class="stat">
+              <dt>{card.label}</dt>
+              <dd class="stat-value">{card.value}</dd>
+              <dd class="stat-detail">
+                {card.detail.map((d) => (d.name === 'rivals' ? <span>GPUI Fast, MyGo and Rune: {d.text}</span> : <span>{d.name} {d.text}</span>))}
+              </dd>
+            </div>
+          ))
+        }
+      </dl>
+      <p class="numbers-foot">
+        One Apple M5 Max, macOS, {date}; zgx at <a href={`${repo}/commit/${commit}`}><code>{commit.slice(0, 7)}</code></a>. Medians of fresh launches, lower is better.
+        <a href="/performance" class="arrow-link">Every scene, every trial <ArrowRight size={14} aria-hidden="true" /></a>
+      </p>
+    </section>
+
+    <section class="docsets wrap" aria-labelledby="docs-title">
+      <div class="section-head">
+        <h2 id="docs-title">Documentation</h2>
+        <p>Five sets, each with its own sidebar. Every page is the repository's own docs, rebuilt as they change.</p>
+      </div>
+      <ul class="set-grid">
+        {
+          sets.map((set) => {
+            const Icon = icons[set.icon as keyof typeof icons];
+            return (
+              <li>
+                <a href={`/${set.dir}`} class="set-card">
+                  <span class="set-icon" aria-hidden="true">
+                    <Icon size={18} />
+                  </span>
+                  <span class="set-title">{set.title}</span>
+                  <span class="set-desc">{set.description}</span>
+                </a>
+              </li>
+            );
+          })
+        }
+      </ul>
+    </section>
+
+    <section class="features wrap" aria-labelledby="features-title">
+      <div class="section-head">
+        <h2 id="features-title">What it has</h2>
+      </div>
+      <ul class="feature-grid">
+        {
+          readme.features.map((f) => (
+            <li>
+              <strong>{f.title}</strong> <span set:html={f.html} />
+            </li>
+          ))
+        }
+      </ul>
+    </section>
+
+    <section class="agents wrap" aria-labelledby="agents-title">
+      <div class="agents-card">
+        <div>
+          <h2 id="agents-title">Built to be driven by agents</h2>
+          <p>
+            <code>zgx inspect</code> reads a running app's tree, states, errors and frame costs, and clicks, types and presses keys by the same targets its tests use. As an MCP server, any agent can use it.
+          </p>
+          <a href="/devtools" class="arrow-link">Devtools <ArrowRight size={14} aria-hidden="true" /></a>
+        </div>
+        <Code
+          code={`claude mcp add zgx -- zgx inspect mcp\nzgx inspect tree --depth 2\nzgx inspect click '"Send"'\nzgx inspect frames 5`}
+          lang="sh"
+          themes={themes}
+          defaultColor={false}
+        />
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-row">
+      <span>zgx · MIT licensed</span>
+      <nav aria-label="Footer">
+        <a href={repoUrl}>GitHub</a>
+        <a href={`${repoUrl}/blob/main/CHANGELOG.md`}>Changelog</a>
+        <a href="/llms.txt">llms.txt</a>
+      </nav>
+    </div>
+  </footer>
+</Base>
+
+<script is:inline>
+  (() => {
+    const button = document.getElementById('theme-toggle');
+    const sync = () => {
+      const dark = document.documentElement.classList.contains('dark');
+      button.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+    };
+    sync();
+    button.addEventListener('click', () => {
+      const dark = !document.documentElement.classList.contains('dark');
+      document.documentElement.classList.toggle('dark', dark);
+      document.documentElement.classList.toggle('light', !dark);
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+      try { localStorage.setItem('theme', dark ? 'dark' : 'light'); } catch {}
+      sync();
+    });
+  })();
+</script>
+
+<style>
+  .skip {
+    position: absolute;
+    left: -999px;
+    top: 0.5rem;
+    z-index: 50;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    background: var(--color-fd-primary);
+    color: var(--color-fd-primary-foreground);
+  }
+  .skip:focus {
+    left: 0.5rem;
+  }
+  .wrap {
+    width: 100%;
+    max-width: 72rem;
+    margin-inline: auto;
+    padding-inline: 1.25rem;
+  }
+  :global(body) {
+    background:
+      radial-gradient(60rem 30rem at 50% -10rem, color-mix(in oklab, var(--color-fd-primary) 9%, transparent), transparent 70%),
+      var(--color-fd-background);
+  }
+  a:focus-visible,
+  button:focus-visible {
+    outline: 2px solid var(--color-fd-ring);
+    outline-offset: 2px;
+    border-radius: 0.4rem;
+  }
+
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    backdrop-filter: blur(12px);
+    background: color-mix(in oklab, var(--color-fd-background) 75%, transparent);
+    border-bottom: 1px solid color-mix(in oklab, var(--color-fd-border) 70%, transparent);
+  }
+  .header-row {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    height: 3.5rem;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    font-size: 1.05rem;
+  }
+  .header-nav {
+    display: flex;
+    gap: 1.25rem;
+    font-size: 0.875rem;
+    color: var(--color-fd-muted-foreground);
+  }
+  .header-nav a:hover {
+    color: var(--color-fd-foreground);
+  }
+  .header-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 0.25rem;
+  }
+  .icon-btn {
+    display: grid;
+    place-items: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 0.5rem;
+    color: var(--color-fd-muted-foreground);
+  }
+  .icon-btn:hover {
+    color: var(--color-fd-foreground);
+    background: var(--color-fd-accent);
+  }
+  :global(.dark) .sun,
+  :global(html:not(.dark)) .moon {
+    display: none;
+  }
+  @media (max-width: 720px) {
+    .header-nav {
+      display: none;
+    }
+  }
+
+  .hero {
+    padding-top: clamp(3.5rem, 9vw, 7rem);
+    padding-bottom: 2.5rem;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 1.25rem;
+    padding: 0.25rem 0.7rem;
+    border: 1px solid var(--color-fd-border);
+    border-radius: 999px;
+    font-size: 0.8rem;
+    color: var(--color-fd-muted-foreground);
+    background: var(--color-fd-card);
+  }
+  .dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    background: var(--color-fd-primary);
+  }
+  h1 {
+    max-width: 18ch;
+    margin: 0;
+    font-size: clamp(2.3rem, 6.2vw, 4.4rem);
+    line-height: 1.02;
+    letter-spacing: -0.045em;
+    font-weight: 650;
+    text-wrap: balance;
+  }
+  .hero-lede {
+    max-width: 44rem;
+    margin: 1.5rem 0 0;
+    font-size: clamp(1rem, 1.6vw, 1.15rem);
+    line-height: 1.6;
+    color: var(--color-fd-muted-foreground);
+    text-wrap: pretty;
+  }
+  .cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 2rem;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    height: 2.6rem;
+    padding: 0 1.1rem;
+    border-radius: 0.6rem;
+    font-size: 0.925rem;
+    font-weight: 550;
+    border: 1px solid var(--color-fd-border);
+    background: var(--color-fd-card);
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .btn:hover {
+    border-color: color-mix(in oklab, var(--color-fd-foreground) 25%, transparent);
+  }
+  .btn.primary {
+    background: var(--color-fd-foreground);
+    color: var(--color-fd-background);
+    border-color: transparent;
+  }
+  .btn.primary:hover {
+    background: color-mix(in oklab, var(--color-fd-foreground) 85%, var(--color-fd-background));
+  }
+  .btn.ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--color-fd-muted-foreground);
+  }
+  .btn.ghost:hover {
+    color: var(--color-fd-foreground);
+  }
+
+  .samples {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+    gap: 1rem;
+    padding-block: 1.5rem 4rem;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .samples {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .sample {
+    margin: 0;
+    border: 1px solid var(--color-fd-border);
+    border-radius: 0.9rem;
+    background: var(--color-fd-card);
+    overflow: hidden;
+    box-shadow: 0 1px 0 color-mix(in oklab, var(--color-fd-foreground) 4%, transparent), 0 12px 32px -18px color-mix(in oklab, var(--color-fd-foreground) 25%, transparent);
+  }
+  .sample figcaption {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--color-fd-border);
+    font-size: 0.78rem;
+    font-family: var(--font-mono);
+    color: var(--color-fd-muted-foreground);
+  }
+  .tag {
+    font-family: var(--font-sans);
+  }
+  .sample :global(pre) {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    line-height: 1.65;
+    background: transparent !important;
+  }
+  .sample-note {
+    margin: 0;
+    padding: 0.7rem 1rem;
+    border-top: 1px solid var(--color-fd-border);
+    font-size: 0.8rem;
+    color: var(--color-fd-muted-foreground);
+  }
+
+  .section-head {
+    max-width: 46rem;
+    margin-bottom: 1.5rem;
+  }
+  .section-head h2 {
+    margin: 0;
+    font-size: clamp(1.4rem, 3vw, 1.9rem);
+    letter-spacing: -0.03em;
+    font-weight: 650;
+  }
+  .section-head p {
+    margin: 0.6rem 0 0;
+    color: var(--color-fd-muted-foreground);
+    line-height: 1.55;
+    text-wrap: pretty;
+  }
+
+  .numbers {
+    padding-block: 3rem;
+    border-top: 1px solid var(--color-fd-border);
+  }
+  .numbers .section-head p {
+    color: var(--color-fd-foreground);
+    font-size: 1.05rem;
+  }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 0;
+    border: 1px solid var(--color-fd-border);
+    border-radius: 0.9rem;
+    background: var(--color-fd-card);
+    overflow: hidden;
+  }
+  @media (max-width: 900px) {
+    .stat-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 1.25rem;
+    box-shadow: -1px 0 0 var(--color-fd-border), 0 -1px 0 var(--color-fd-border);
+  }
+  .stat dt {
+    order: 2;
+    font-size: 0.85rem;
+    font-weight: 550;
+  }
+  .stat dd {
+    margin: 0;
+  }
+  .stat-value {
+    order: 1;
+    font-size: clamp(1.8rem, 4vw, 2.5rem);
+    font-weight: 650;
+    letter-spacing: -0.04em;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-zgx);
+  }
+  .stat-detail {
+    order: 3;
+    display: flex;
+    flex-direction: column;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--color-fd-muted-foreground);
+  }
+  .numbers-foot {
+    margin: 1rem 0 0;
+    font-size: 0.85rem;
+    color: var(--color-fd-muted-foreground);
+  }
+  .numbers-foot a:not(.arrow-link) {
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  .arrow-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: 0.4rem;
+    font-weight: 550;
+    color: var(--color-fd-primary);
+  }
+  .arrow-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+
+  .docsets {
+    padding-block: 3rem;
+    border-top: 1px solid var(--color-fd-border);
+  }
+  .set-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .set-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    height: 100%;
+    padding: 1.1rem;
+    border: 1px solid var(--color-fd-border);
+    border-radius: 0.9rem;
+    background: var(--color-fd-card);
+    transition: border-color 120ms ease, transform 120ms ease;
+  }
+  .set-card:hover {
+    border-color: color-mix(in oklab, var(--color-fd-primary) 55%, var(--color-fd-border));
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .set-card:hover {
+      transform: translateY(-1px);
+    }
+  }
+  .set-icon {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    margin-bottom: 0.4rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--color-fd-border);
+    color: var(--color-fd-primary);
+  }
+  .set-title {
+    font-weight: 600;
+  }
+  .set-desc {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--color-fd-muted-foreground);
+  }
+
+  .features {
+    padding-block: 3rem;
+    border-top: 1px solid var(--color-fd-border);
+  }
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.25rem 2.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: var(--color-fd-muted-foreground);
+  }
+  @media (max-width: 720px) {
+    .feature-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .feature-grid strong {
+    color: var(--color-fd-foreground);
+    font-weight: 600;
+  }
+  .feature-grid :global(code),
+  .agents :global(p code),
+  .sample-note code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+  }
+  .feature-grid :global(a) {
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+
+  .agents {
+    padding-block: 3rem 5rem;
+  }
+  .agents-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 2rem;
+    align-items: center;
+    padding: clamp(1.25rem, 3vw, 2rem);
+    border: 1px solid var(--color-fd-border);
+    border-radius: 1rem;
+    background: var(--color-fd-card);
+  }
+  @media (max-width: 820px) {
+    .agents-card {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .agents h2 {
+    margin: 0;
+    font-size: 1.35rem;
+    letter-spacing: -0.025em;
+    font-weight: 650;
+  }
+  .agents p {
+    margin: 0.6rem 0 1rem;
+    color: var(--color-fd-muted-foreground);
+    line-height: 1.6;
+  }
+  .agents :global(.arrow-link) {
+    margin-left: 0;
+  }
+  .agents :global(pre) {
+    margin: 0;
+    padding: 1rem;
+    border-radius: 0.7rem;
+    border: 1px solid var(--color-fd-border);
+    background: var(--color-fd-background) !important;
+    font-size: 0.8rem;
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+
+  .site-footer {
+    border-top: 1px solid var(--color-fd-border);
+    font-size: 0.85rem;
+    color: var(--color-fd-muted-foreground);
+  }
+  .footer-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-block: 1.5rem;
+  }
+  .footer-row nav {
+    display: flex;
+    gap: 1.25rem;
+  }
+  .footer-row a:hover {
+    color: var(--color-fd-foreground);
+  }
+</style>

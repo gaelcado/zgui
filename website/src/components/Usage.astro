@@ -1,0 +1,13 @@
+---
+// A command's usage text, read from its source.
+import { Code } from 'astro:components';
+import { rustString } from '@/lib/repo';
+
+interface Props {
+  file: string;
+  name: string;
+}
+const { file, name } = Astro.props;
+---
+
+<Code code={rustString(file, name)} lang="text" themes={{ light: 'github-light', dark: 'github-dark' }} defaultColor={false} class="shiki" />

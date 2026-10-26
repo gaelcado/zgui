@@ -1,0 +1,36 @@
+---
+// Copy buttons for code blocks. Markdown pages render as static HTML, outside
+// React, so Fumadocs' own code block component isn't there to give them.
+---
+
+<script>
+  const copied = new WeakMap<HTMLButtonElement, number>();
+  function decorate() {
+    for (const pre of document.querySelectorAll<HTMLPreElement>('.prose pre.shiki')) {
+      if (pre.parentElement?.classList.contains('code-frame')) continue;
+      const frame = document.createElement('div');
+      frame.className = 'code-frame';
+      pre.replaceWith(frame);
+      frame.append(pre);
+      pre.tabIndex = 0;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'code-copy';
+      button.setAttribute('aria-label', 'Copy code');
+      button.innerHTML =
+        '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+      button.addEventListener('click', async () => {
+        await navigator.clipboard.writeText(pre.querySelector('code')?.innerText ?? pre.innerText);
+        button.dataset.copied = '';
+        button.setAttribute('aria-label', 'Copied');
+        clearTimeout(copied.get(button));
+        copied.set(button, window.setTimeout(() => {
+          delete button.dataset.copied;
+          button.setAttribute('aria-label', 'Copy code');
+        }, 1500));
+      });
+      frame.append(button);
+    }
+  }
+  decorate();
+</script>
