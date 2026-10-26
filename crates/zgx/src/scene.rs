@@ -2489,6 +2489,13 @@ impl Scene {
         debug_assert!(slot.generation == id.generation, "stale scene node");
         slot.node.as_ref().unwrap_or_else(|| stale())
     }
+    /// `tree_node`, to change.
+    #[inline(always)]
+    fn tree_node_mut(&mut self, id: NodeId) -> &mut Node {
+        let slot = &mut self.slots[id.index as usize];
+        debug_assert!(slot.generation == id.generation, "stale scene node");
+        slot.node.as_mut().unwrap_or_else(|| stale())
+    }
     fn node_mut(&mut self, id: NodeId) -> &mut Node {
         assert!(self.contains(id), "stale scene node");
         self.slots[id.index as usize].node.as_mut().unwrap()
@@ -4880,7 +4887,8 @@ impl Scene {
         if self.damage_is_full() {
             return (None, None);
         }
-        let node = self.node(id);
+        // `arrange` checked it.
+        let node = self.tree_node(id);
         let Some((parent, parent_clip)) =
             *context.get_or_insert_with(|| self.damage_context(node.parent))
         else {
@@ -6637,7 +6645,8 @@ impl Scene {
             false => (x, y),
         };
         // What it holds, read at once: laying it out leaves these as they are.
-        let node = self.node(id);
+        // Checked just above.
+        let node = self.tree_node(id);
         let cache = node.measurement.as_ref().unwrap();
         let bounds = Rect::new(x, y, cache.size.0, cache.size.1);
         let (arrange_dirty, rtl, childless) =
@@ -6659,7 +6668,7 @@ impl Scene {
         // other damage comes between, and nothing it paints changes.
         match (damage, leaf) {
             (true, true) => {
-                let was = self.node(id).bounds;
+                let was = self.tree_node(id).bounds;
                 let (before, after) = self.leaf_damage::<CELLS>(id, context, was, bounds);
                 match (CELLS, &mut self.damage_grid) {
                     (false, _) => self.add_moved_leaf_damage(before, after),
@@ -6679,7 +6688,7 @@ impl Scene {
             _ => {}
         }
         if changed {
-            self.node_mut(id).bounds = bounds;
+            self.tree_node_mut(id).bounds = bounds;
             self.invalidate(id, PAINTED);
         }
         // Where the children are damaged, worked out when the first moves.
@@ -6687,7 +6696,7 @@ impl Scene {
         // Read in place, not copied out: laying a child out leaves this
         // node's result as it is.
         for at in 0..count {
-            let cache = self.node(id).measurement.as_ref().unwrap();
+            let cache = self.tree_node(id).measurement.as_ref().unwrap();
             let (child, mut rect, constraints) = cache.children[at];
             // Right to left: laid out left to right, mirrored in its box.
             if rtl {
@@ -6713,7 +6722,7 @@ impl Scene {
         if damage && !leaf {
             self.damage_subtree_with(id, context);
         }
-        let node = self.node_mut(id);
+        let node = self.tree_node_mut(id);
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
     }
