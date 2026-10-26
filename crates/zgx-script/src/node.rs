@@ -1719,6 +1719,11 @@ fn lossy<R>(string: &mlua::LuaString, f: impl FnOnce(&str) -> R) -> R {
 /// `literal`: a string is shown as it is, braces and all (data: code,
 /// titles, messages), not read as a template.
 fn text_of(lua: &Lua, value: mlua::Value, what: &str, literal: bool) -> mlua::Result<Text> {
+    // A state given as it is (a component's `ui.use_state`, which no
+    // template can name): its value as text, followed without the script.
+    if let Some(state) = state_of(&value) {
+        return Ok(Text::Template(vec![Segment::State(state, Rc::from([]))]));
+    }
     Ok(match value {
         mlua::Value::String(s) if literal => Text::Literal(lossy(&s, str::to_owned)),
         mlua::Value::String(s) => lossy(&s, |text| template(lua, text))?,
@@ -1728,7 +1733,7 @@ fn text_of(lua: &Lua, value: mlua::Value, what: &str, literal: bool) -> mlua::Re
         mlua::Value::Nil => Text::Literal(String::new()),
         other => {
             return Err(mlua::Error::runtime(format!(
-                "{what} takes a string or function, not {}",
+                "{what} takes a string, a state or a function, not {}",
                 other.type_name()
             )));
         }
