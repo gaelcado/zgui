@@ -1,0 +1,29 @@
+---
+title: Windows
+description: zgx against GPUI Fast, MyGo and Rune on a Windows 11 PC, in its own metrics, never ranked against macOS.
+---
+
+import WinFacts from '@/components/perf/WinFacts.astro';
+import WinScene from '@/components/perf/WinScene.astro';
+
+<WinFacts />
+
+## Heavy dashboard
+
+<WinScene scene="heavy" />
+
+## Text and a 100,000-row list
+
+<WinScene scene="lab" />
+
+## Animation
+
+<WinScene scene="animate" />
+
+## Variable-height list
+
+<WinScene scene="vlist" />
+
+## Data
+
+Every trial is under [docs/results](https://github.com/zeronsh/zgx/tree/main/docs/results); this page's numbers are [site/windows/data.json](https://github.com/zeronsh/zgx/blob/main/site/windows/data.json). How the Windows runs are made: [methodology, on Windows](/performance/methodology#on-windows).

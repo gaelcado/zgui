@@ -104,6 +104,8 @@ const pages = [];
 const anchors = new Map(); // `${src}#${sourceSlug}` → url
 const fileUrls = new Map(); // src → url of its first page
 const taken = new Map(); // src → Set of section titles taken
+// A page with `when` exists only while that file does (a platform's results).
+for (const set of sets) set.pages = set.pages.filter((p) => typeof p === 'string' || !p.when || fs.existsSync(path.join(root, p.when)));
 for (const set of sets) {
   for (const page of set.pages) {
     if (typeof page === 'string') continue;
@@ -360,6 +362,7 @@ print(json.dumps({
   'metrics': {k: {'title': t, 'unit': u, 'digits': d, 'scale': s, 'source': src, 'applies': a} for k, (t, u, d, s, src, a) in b.METRICS.items()},
   'micro_scenes': {k: {'title': t, 'note': n} for k, (t, n) in b.MICRO_SCENES.items()},
   'rune_notes': b.RUNE_NOTES,
+  'windows_metrics': {k: {'title': t, 'unit': u, 'digits': d, 'scale': s, 'source': src, 'applies': a} for k, (t, u, d, s, src, a) in getattr(b, 'WINDOWS_METRICS', {}).items()},
 }))
 `], { cwd: root, encoding: 'utf8' });
   const data = JSON.parse(fs.readFileSync(path.join(root, 'site/data.json'), 'utf8'));
@@ -370,7 +373,14 @@ print(json.dumps({
     .map((line) => JSON.parse(line));
   const generated = path.join(website, 'src/generated');
   fs.mkdirSync(generated, { recursive: true });
-  fs.writeFileSync(path.join(generated, 'perf.json'), JSON.stringify({ ...data, text: JSON.parse(text), micro }));
+  const words = JSON.parse(text);
+  fs.writeFileSync(path.join(generated, 'perf.json'), JSON.stringify({ ...data, text: words, micro }));
+  // Windows' run, on a page of its own when it is published (never ranked with macOS's).
+  const windowsData = path.join(root, 'site/windows/data.json');
+  fs.writeFileSync(
+    path.join(generated, 'perf-windows.json'),
+    JSON.stringify(fs.existsSync(windowsData) ? { available: true, ...JSON.parse(fs.readFileSync(windowsData, 'utf8')), metricFormats: words.windows_metrics, modes: words.modes, sceneText: words.scenes } : { available: false }),
+  );
 }
 
 // --- The home page's words: README's "What it has" and its two samples. ----

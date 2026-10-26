@@ -12,6 +12,7 @@
 //   intro        keep the text before the first `##` (default: true unless
 //                `sections` is given)
 //   sections     keep only these `##` sections, by title (a prefix matches)
+//   when         a file the page needs; without it the page is left out
 //   unwrap       drop the first section's heading (the page's title) and
 //                lift its subsections a level
 // Strings starting with `---` are sidebar separators. `page` with `mdx` is a
@@ -170,6 +171,7 @@ export const sets = [
     icon: 'Gauge',
     pages: [
       { slug: 'index', mdx: 'performance/index.mdx' },
+      { slug: 'windows', mdx: 'performance/windows.mdx', when: 'site/windows/data.json' },
       { slug: 'microbenchmarks', mdx: 'performance/microbenchmarks.mdx' },
       { slug: 'gpui', src: 'README.md', title: 'zgx and GPUI', sections: ['Performance'], unwrap: true,
         description: 'The heavy dashboard in zgx, GPUI and GPUI’s fast path on an Apple Silicon Mac, with and without PGO.' },
