@@ -6,23 +6,23 @@ zgx runs on macOS, Windows and Linux. On Linux, install the fontconfig, xkbcommo
 
 ## In Rust
 
-Add the crates. Until zgx's first release is on crates.io, from its repository:
-
-```toml
-[dependencies]
-zgx = { git = "https://github.com/zeronsh/zgx" }
-zgx-desktop = { git = "https://github.com/zeronsh/zgx" }
-# The component library (a data grid, a tree, tabs, toasts…), if you use it.
-zgx-components = { git = "https://github.com/zeronsh/zgx" }
-```
-
-Once it is released, from crates.io, with nothing else:
+Add the crates, from crates.io:
 
 ```toml
 [dependencies]
 zgx = "0.1"
 zgx-desktop = "0.1"
+# The component library (a data grid, a tree, tabs, toasts…), if you use it.
 zgx-components = "0.1"
+```
+
+Or, for what is not released yet ([the changelog](../CHANGELOG.md) says what), from its repository:
+
+```toml
+[dependencies]
+zgx = { git = "https://github.com/zeronsh/zgx" }
+zgx-desktop = { git = "https://github.com/zeronsh/zgx" }
+zgx-components = { git = "https://github.com/zeronsh/zgx" }
 ```
 
 That builds as it is: zgx's own forks (of cosmic-text, taffy and mlua) come with it as crates of their own. A few more of its dependencies are patched in zgx's repository alone (winit, wgpu-hal, the AccessKit adapters), and an app gets their releases instead, which zgx builds with, short of those fixes: Wayland popups open in their window, Metal frames take more command buffers, VoiceOver misses headings and grid rows, a field's error message is said only in its description ([releasing](releasing.md) lists them). To have them too, add the patches your app's build then takes from zgx's repository (a dependency's `[patch]` never reaches an app):
