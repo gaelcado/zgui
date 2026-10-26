@@ -9,6 +9,7 @@ on:
       - "website/**"
       - "docs/**"
       - "README.md"
+      - "CHANGELOG.md"
       - "site/data.json"
       - "site/micro.jsonl"
       - "scripts/build_site.py"
