@@ -231,7 +231,9 @@ for (const { set, page, url, parsed, nodes } of pages) {
   const file = path.join(outDir, set.dir, `${page.slug}.${page.mdx ? 'mdx' : 'md'}`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (page.mdx) {
-    fs.copyFileSync(path.join(handWritten, page.mdx), file);
+    // Its source, for "Edit on GitHub", as the synced pages carry theirs.
+    const text = fs.readFileSync(path.join(handWritten, page.mdx), 'utf8');
+    fs.writeFileSync(file, text.replace(/^---\n/, `---\nsource: "website/content-src/${page.mdx}"\n`));
     continue;
   }
   const tree = { type: 'root', children: nodes };

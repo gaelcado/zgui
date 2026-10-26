@@ -3,6 +3,18 @@
 import { source } from '@/lib/source';
 import { sets } from '../../docs.manifest.mjs';
 import { siteUrl } from '@/lib/shared';
+import { luauApi } from '@/lib/luau-api';
+import { lintRules, rustString } from '@/lib/repo';
+
+/** Components whose content agents need as Markdown too. */
+const components: Record<string, (attrs: Record<string, string>) => string> = {
+  LuauApi: () =>
+    luauApi()
+      .map((m) => `- \`${m.group}.${m.name}: ${m.type}\`${m.doc ? `\n  ${m.doc}` : ''}`)
+      .join('\n'),
+  LintRules: () => ['| Rule | Flags |', '| --- | --- |', ...lintRules().map((r) => `| \`${r.name}\` | ${r.summary} |`)].join('\n'),
+  Usage: (a) => `\`\`\`text\n${rustString(a.file, a.name)}\n\`\`\``,
+};
 
 type Page = ReturnType<typeof source.getPages>[number];
 type Node = { type: string; url?: string; children?: Node[]; index?: Node };
@@ -30,7 +42,10 @@ export function pageMarkdown(page: Page): string {
   if (raw.filePath?.endsWith('.mdx')) {
     body = body
       .replace(/^import .*$/gm, '')
-      .replace(/^<[A-Z][^>]*\/>$/gm, (tag) => `_(${tag.match(/<(\w+)/)![1]}: see ${siteUrl}${page.url})_`)
+      .replace(/^<([A-Z]\w*)([^>]*)\/>$/gm, (_, name: string, rest: string) => {
+        const attrs = Object.fromEntries([...rest.matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+        return components[name]?.(attrs) ?? `_(${name}: see ${siteUrl}${page.url})_`;
+      })
       .replace(/\n{3,}/g, '\n\n');
   }
   const lines = [`# ${page.data.title}`, ''];

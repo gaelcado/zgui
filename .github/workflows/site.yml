@@ -16,6 +16,7 @@ on:
       - "scripts/perf/README.md"
       - "crates/zgx-script/src/bin/zgx.rs"
       - "crates/zgx-script/src/lint.rs"
+      - "crates/zgx-script/types/zgx.d.luau"
       - "crates/zgx-run/src/main.rs"
       - ".github/workflows/site.yml"
   pull_request:

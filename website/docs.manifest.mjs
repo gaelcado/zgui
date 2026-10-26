@@ -100,6 +100,7 @@ export const sets = [
       { slug: 'design-systems', src: 'docs/reference/design.md', title: 'Design systems' },
       '---API reference---',
       { slug: 'reference', src: 'docs/reference/index.md', title: 'Reading the reference' },
+      { slug: 'reference/api', mdx: 'luau/api.mdx' },
       { slug: 'reference/state', src: 'docs/reference/state.md', title: 'State and components' },
       { slug: 'reference/properties', src: 'docs/reference/properties.md', title: 'Properties' },
       { slug: 'reference/events', src: 'docs/reference/events.md', title: 'Events' },

@@ -21,9 +21,7 @@ const { Content, headings } = await render(entry);
 const toc: TOCItemType[] = headings
   .filter((h) => h.depth >= 2 && h.depth <= 3)
   .map((h) => ({ depth: h.depth, title: h.text, url: `#${h.slug}` }));
-const sourceUrl = entry.data.source
-  ? `${repoUrl}/blob/main/${entry.data.source}`
-  : `${repoUrl}/blob/main/website/content-src/${entry.id.replace(/\.mdx?$/, '')}.mdx`;
+const sourceUrl = entry.data.source ? `${repoUrl}/blob/main/${entry.data.source}` : undefined;
 ---
 
 <Base title={page.data.title} description={page.data.description} image={ogImage(slugs)}>
