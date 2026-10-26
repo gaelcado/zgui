@@ -8,34 +8,32 @@
 @import 'fumadocs-ui/css/generated/shared.css';
 @import '@fontsource-variable/geist';
 @import '@fontsource-variable/geist-mono';
-@import '@fontsource/instrument-serif/400.css';
-@import '@fontsource/instrument-serif/400-italic.css';
 
 @source '../../content-src/**/*.mdx';
 
-/* ---- Tokens (design/BRIEF.md): warm paper, one signal green. ------------ */
+/* ---- Tokens (design/BRIEF.md): white ground, green-black ink, one green. -- */
 @theme {
   --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --font-display: 'Instrument Serif', ui-serif, Georgia, serif;
 
-  --color-paper: #f8f7f4;
-  --color-paper-2: #f1efea;
+  --color-paper: #ffffff;
+  --color-paper-2: #f6f8f7;
   --color-surface: #ffffff;
-  --color-ink: #161614;
-  --color-ink-2: #3a3934;
-  --color-hairline: color-mix(in oklab, #161614 11%, transparent);
-  --color-hairline-strong: color-mix(in oklab, #161614 18%, transparent);
-  --color-signal: #0d7a52;
-  --color-signal-soft: color-mix(in oklab, #0d7a52 10%, transparent);
+  --color-ink: #11231b;
+  --color-ink-2: #4d6157;
+  --color-hairline: color-mix(in oklab, #11231b 10%, transparent);
+  --color-hairline-strong: color-mix(in oklab, #11231b 17%, transparent);
+  --color-signal: #0b7a4f;
+  --color-signal-soft: color-mix(in oklab, #0b7a4f 9%, transparent);
+  --color-wash: linear-gradient(135deg, #eef6f1 0%, #f7f5ef 60%, #f6efe9 100%);
   --color-code: #ffffff;
-  --color-zgx: #0d7a52;
+  --color-zgx: #0b7a4f;
   --color-zgx-luau: #5aa585;
 
   --color-fd-background: var(--color-paper);
   --color-fd-foreground: var(--color-ink);
   --color-fd-muted: var(--color-paper-2);
-  --color-fd-muted-foreground: #66655e;
+  --color-fd-muted-foreground: #5a6d63;
   --color-fd-popover: var(--color-surface);
   --color-fd-popover-foreground: var(--color-ink);
   --color-fd-card: var(--color-surface);
@@ -55,31 +53,32 @@
    ground, warm ink, and a mint signal bright enough to read as light. */
 .dark,
 .dark #nd-sidebar {
-  --color-paper: #0b0c0b;
-  --color-paper-2: #0f110f;
-  --color-surface: #131513;
-  --color-ink: #f1f0ea;
-  --color-ink-2: #cfcdc5;
-  --color-hairline: color-mix(in oklab, #f1f0ea 10%, transparent);
-  --color-hairline-strong: color-mix(in oklab, #f1f0ea 17%, transparent);
-  --color-signal: #46d39a;
-  --color-signal-soft: color-mix(in oklab, #46d39a 12%, transparent);
-  --color-code: #101210;
-  --color-zgx: #46d39a;
+  --color-paper: #0a0f0c;
+  --color-paper-2: #0d1310;
+  --color-surface: #101712;
+  --color-ink: #e9f1ec;
+  --color-ink-2: #a9bcb1;
+  --color-hairline: color-mix(in oklab, #e9f1ec 10%, transparent);
+  --color-hairline-strong: color-mix(in oklab, #e9f1ec 17%, transparent);
+  --color-signal: #4ad69c;
+  --color-signal-soft: color-mix(in oklab, #4ad69c 12%, transparent);
+  --color-wash: linear-gradient(135deg, #0f1d17 0%, #111614 60%, #18130f 100%);
+  --color-code: #0c120f;
+  --color-zgx: #4ad69c;
   --color-zgx-luau: #2e8f67;
 
   --color-fd-background: var(--color-paper);
   --color-fd-foreground: var(--color-ink);
   --color-fd-muted: var(--color-paper-2);
-  --color-fd-muted-foreground: #9a998f;
+  --color-fd-muted-foreground: #97ab9f;
   --color-fd-popover: var(--color-surface);
   --color-fd-popover-foreground: var(--color-ink);
   --color-fd-card: var(--color-surface);
   --color-fd-card-foreground: var(--color-ink);
   --color-fd-border: var(--color-hairline);
   --color-fd-primary: var(--color-signal);
-  --color-fd-primary-foreground: #06200f;
-  --color-fd-secondary: #161816;
+  --color-fd-primary-foreground: #04150d;
+  --color-fd-secondary: #131b16;
   --color-fd-secondary-foreground: var(--color-ink);
   --color-fd-accent: color-mix(in oklab, #f1f0ea 7%, transparent);
   --color-fd-accent-foreground: var(--color-ink);
@@ -105,13 +104,13 @@ html > body[data-scroll-locked] {
 /* ---- Code blocks (lib/code-frame.mjs builds them, CodeBlocks.astro runs them). */
 :root {
   --cb-bg: var(--color-code);
-  --cb-head: #faf9f6;
+  --cb-head: #f7f9f8;
   --cb-border: color-mix(in oklab, var(--color-fd-foreground) 11%, transparent);
   --cb-line-hl: color-mix(in oklab, var(--color-fd-primary) 9%, transparent);
 }
 .dark {
   --cb-bg: var(--color-code);
-  --cb-head: #141614;
+  --cb-head: #111915;
   --cb-border: color-mix(in oklab, var(--color-fd-foreground) 10%, transparent);
   --cb-line-hl: color-mix(in oklab, var(--color-fd-primary) 12%, transparent);
 }
@@ -269,10 +268,6 @@ html > body[data-scroll-locked] {
 }
 
 /* ---- Docs chrome and typography (design/BRIEF.md). ---------------------- */
-.font-display {
-  font-family: var(--font-display);
-  font-weight: 400;
-}
 
 /* The sidebar sits on a slightly darker paper than the page. */
 #nd-sidebar {
@@ -419,16 +414,15 @@ html > body[data-scroll-locked] {
   color: var(--color-signal);
 }
 #nd-page h1 {
-  font-family: var(--font-display);
-  font-size: clamp(2.4rem, 4.2vw, 3.1rem);
-  font-weight: 400;
-  line-height: 1.02;
-  letter-spacing: -0.015em;
+  font-size: clamp(1.9rem, 3.2vw, 2.4rem);
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
   text-wrap: balance;
 }
 #nd-page h1 + p {
   margin-top: 0.4rem;
-  font-size: 1.125rem;
+  font-size: 1.0625rem;
   line-height: 1.55;
   color: var(--color-fd-muted-foreground);
   text-wrap: pretty;
@@ -630,11 +624,10 @@ html > body[data-scroll-locked] {
   margin: 0.5rem 0 2rem;
 }
 .perf-verdict {
-  font-family: var(--font-display);
-  font-size: clamp(1.75rem, 3vw, 2.25rem);
-  line-height: 1.12;
-  font-weight: 400;
-  letter-spacing: -0.01em;
+  font-size: clamp(1.4rem, 2.4vw, 1.75rem);
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.03em;
   text-wrap: balance;
   margin: 0;
   color: var(--color-ink);
@@ -682,12 +675,12 @@ html > body[data-scroll-locked] {
 }
 .perf-big {
   order: 1;
-  font-family: var(--font-display);
-  font-size: 2.6rem;
-  line-height: 0.9;
-  letter-spacing: -0.02em;
+  font-size: 2.1rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.04em;
   font-variant-numeric: tabular-nums;
-  color: var(--color-signal);
+  color: var(--color-ink);
 }
 .perf-detail {
   order: 3;
@@ -1003,19 +996,36 @@ tr[data-fw='zgx-luau'] .perf-bar {
   transform: rotate(45deg) scale(0.92);
 }
 @media (max-width: 640px) {
+  /* On a phone each test's name sits above a full-width track. */
   .dots {
-    --dots-label: 6.5rem;
-    --dots-value: 3.4rem;
+    --dots-value: 3.2rem;
   }
-  .dots-mode {
-    display: block;
-    font-size: 0.75rem;
-  }
+  .dots-axis,
   .dots-row {
-    height: 3rem;
+    grid-template-columns: minmax(0, 1fr) var(--dots-value);
   }
   .dots-axis-label {
     display: none;
+  }
+  .dots-row {
+    grid-template-rows: auto 1.6rem;
+    height: auto;
+    padding: 0.55rem 0 0.25rem;
+    row-gap: 0.15rem;
+  }
+  .dots-label {
+    grid-column: 1 / -1;
+    font-size: 0.8125rem;
+  }
+  .dots-mode {
+    display: inline;
+    font-size: inherit;
+  }
+  .dots-track {
+    grid-row: 2;
+  }
+  .dots-value {
+    grid-row: 2;
   }
 }
 

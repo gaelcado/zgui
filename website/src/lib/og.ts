@@ -8,8 +8,6 @@ const font = (file: string) => fs.readFileSync(path.join(process.cwd(), 'node_mo
 const fonts = [
   { name: 'Geist', data: font('geist/files/geist-latin-wght-normal.woff2') },
   { name: 'Geist Mono', data: font('geist-mono/files/geist-mono-latin-wght-normal.woff2') },
-  { name: 'Instrument Serif', data: fs.readFileSync(path.join(process.cwd(), 'node_modules/@fontsource/instrument-serif/files/instrument-serif-latin-400-normal.woff2')) },
-  { name: 'Instrument Serif Italic', data: fs.readFileSync(path.join(process.cwd(), 'node_modules/@fontsource/instrument-serif/files/instrument-serif-latin-400-italic.woff2')) },
 ];
 
 const green = '#46d39a';
@@ -45,7 +43,7 @@ function frame(eyebrow: string, children: ReactNode[]) {
       'div',
       { style: { display: 'flex', alignItems: 'center', gap: 18 } },
       mark(44),
-      h('span', { style: { fontSize: 46, fontFamily: 'Instrument Serif Italic', lineHeight: 1 } }, 'zgx'),
+      h('span', { style: { fontSize: 36, fontWeight: 650, letterSpacing: '-0.035em', lineHeight: 1 } }, 'zgx'),
       eyebrow
         ? h('span', { style: { fontSize: 28, color: 'rgba(241,240,234,0.5)', marginLeft: 6 } }, `/  ${eyebrow}`)
         : null,
@@ -67,7 +65,7 @@ export function docsImage(set: string, title: string, description?: string) {
     frame(set, [
       h(
         'div',
-        { style: { display: 'flex', fontFamily: 'Instrument Serif', fontSize: size(title, 112, 84, 22), letterSpacing: '-0.015em', lineHeight: 1, marginTop: 84, maxWidth: 1020 } },
+        { style: { display: 'flex', fontSize: size(title, 88, 68, 24), fontWeight: 600, letterSpacing: '-0.04em', lineHeight: 1.05, marginTop: 88, maxWidth: 1020 } },
         title,
       ),
       description
@@ -88,10 +86,8 @@ export function homeImage(stats: { value: string; label: string }[]) {
     frame('', [
       h(
         'div',
-        { style: { display: 'flex', flexWrap: 'wrap', fontFamily: 'Instrument Serif', fontSize: 82, letterSpacing: '-0.015em', lineHeight: 0.98, marginTop: 40, maxWidth: 1040 } },
-        h('span', {}, 'Native interfaces that do\u00a0'),
-        h('span', { style: { fontFamily: 'Instrument Serif Italic', color: green } }, 'no work\u00a0'),
-        h('span', {}, 'when nothing changes.'),
+        { style: { display: 'flex', flexWrap: 'wrap', fontSize: 62, fontWeight: 600, letterSpacing: '-0.04em', lineHeight: 1.1, marginTop: 44, maxWidth: 1040 } },
+        h('span', {}, 'Native interfaces that do no work when nothing changes.'),
       ),
       h(
         'div',
@@ -110,7 +106,7 @@ export function homeImage(stats: { value: string; label: string }[]) {
                 backgroundColor: 'rgba(255,255,255,0.03)',
               },
             },
-            h('span', { style: { fontSize: 56, fontFamily: 'Instrument Serif', color: green, lineHeight: 1 } }, s.value),
+            h('span', { style: { fontSize: 50, fontWeight: 600, letterSpacing: '-0.045em', color: '#f1f0ea', lineHeight: 1 } }, s.value),
             h('span', { style: { fontSize: 21, color: 'rgba(241,240,234,0.6)', marginTop: 8 } }, s.label),
           ),
         ),

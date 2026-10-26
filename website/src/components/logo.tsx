@@ -6,7 +6,7 @@ export function Logo() {
         <rect x="2" y="2" width="20" height="20" rx="6" fill="currentColor" />
         <path d="M7.5 8h9l-9 8h9" fill="none" stroke="var(--color-fd-background)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
-      <span className="font-display italic text-[1.65rem] leading-none tracking-[-0.01em] text-fd-foreground">zgx</span>
+      <span className="text-[1.05rem] font-semibold tracking-[-0.03em] text-fd-foreground">zgx</span>
     </span>
   );
 }

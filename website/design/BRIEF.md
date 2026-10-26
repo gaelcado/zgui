@@ -1,46 +1,55 @@
 # zgx.zeron.sh: design brief
 
-**Direction: a precision instrument on warm paper.** zgx is about doing exactly the work a change needs and nothing else. The site should feel the same way: calm, exact, and quietly confident, with one signal colour that only appears where something matters.
+**Direction: restraint.** zgx does exactly the work a change needs and nothing more, and the site should read the same way. That means one typeface, a few sizes, hairline structure and plain sentences, with colour only where something is live. Polish comes from proportion and consistency, not ornament.
+
+## What we take from onkeiki.com
+
+We take its discipline, not its content.
+
+- **One sans, weight and tone instead of typefaces.** Headings are a single paragraph: a dark lead sentence, then a lighter continuation in the same size ("**One agent, every channel.** Customers text it on…"). Sizes stay modest: 36 px for the hero lead and 26 px for section leads, with tracking pulled in about 3.5%. Body text is 15–16 px.
+- **A ruled page.** Content sits in a centred column bounded by hairline vertical rules, and full-width hairlines separate sections. It reads like a drawing, not a stack of cards.
+- **Two columns per section.** Text sits on the left: a small icon-tile label ("Conversations"), the lead heading, and a list in hairline rows. On the right is one large, softly tinted panel that shows the product itself.
+- **Numbers as type.** A big figure with a tiny label above it, with no box around it.
+- **Small, quiet controls.** Buttons are 32–36 px tall, with one filled primary per view and outlined secondaries. Nav links sit centred with a small icon; the call to action is on the right.
+- **A footer of link columns.** Nothing else competes with it.
 
 ## Type
 
-- **Display:** Instrument Serif (roman and italic). It sets headlines, page titles and the wordmark, giving the site a voice no other Rust GUI docs have.
-- **Text and UI:** Geist Sans.
-- **Data, labels and code:** Geist Mono. Eyebrows, axis ticks, table heads and keyboard hints sit in mono capitals at 11–12 px with +0.08em tracking.
-- **Scale (1.25 ratio, 16 px base):** 12 / 13 / 15.5 (docs body) / 17 (landing body) / 22 / 28 / 44 (docs title) / 56 (section) / 88 (hero).
-- **Tracking:** serif display runs at −0.015em with line-height 0.95–1.05; sans headings at −0.02em.
+- **Geist** for everything, with **Geist Mono** for code, keys and the few figures that are data.
+- **Scale:** 13 (labels, captions), 15 (UI), 16 (body), 20 (lede), 26 (section lead), 36–44 (hero lead).
+- **Weights:** 600 for leads, 450–500 for continuations and body, 500 for labels.
+- **Tracking:** −0.035em on leads, normal for body.
 
 ## Colour
 
-- **Neutrals:** warm stone, not zinc. Light is paper `#f8f7f4` with ink `#161614` and a white surface. Dark is tuned separately, not inverted: a green-black `#0b0c0b` with warm ink `#f1f0ea`.
-- **Accent:** one signal green, emerald `#0d7a52` in light and mint `#46d39a` in dark. It's used for zgx's marks in charts, the active nav item, links on hover, focus and one hero emphasis. Never for decoration at large.
-- **Data:** rival frameworks get blue, amber and violet, validated for CVD, each with its own shape.
-- **Contrast:** every text pair is AA or better, and every code token is checked by `scripts/check-contrast.mjs`.
+- **Light:** white ground, ink `#11231b` (a deep green-black), muted ink `#4d6157` for continuations and body, and hairlines at 10% ink.
+- **Dark:** its own palette rather than an inversion. Ground `#0a0f0c`, ink `#e9f1ec`, muted `#97ab9f`.
+- **Accent:** one green, `#0b7a4f` in light and `#4ad69c` in dark. It's used for primary actions, zgx's marks in charts, the current page and focus.
+- **Panels:** product panels sit on a faint mint-to-sand wash, and code sits on white or near-black inside them.
+- **Contrast:** every text pair is AA or better, and code tokens are checked by `scripts/check-contrast.mjs`.
 
 ## Space
 
-- **Rhythm:** an 8 px base. Sections sit 128 px apart on desktop and 80 px on a phone.
-- **Measure:** docs prose is capped near 72 characters.
-- **Edges:** hairline rules (1 px at 9–12% ink) separate rather than boxes. Cards are used only for things you pick: doc sets, stats and code.
+- **Rhythm:** an 8 px base and 96–120 px between sections.
+- **Columns:** the ruled column is 76 rem wide with 40 px gutters to its rules. Columns split 5/7 (text and panel) on desktop and stack on phones.
 
-## Surfaces
+## Words
 
-- **Paper:** a fine dot grid fades out behind the hero.
-- **Cards:** white or near-black, with a 1 px border and a 1 px top highlight. Borders darken and cards lift 2 px on hover.
-- **Code:** sits on its own surface, with a filename tab bar and the language in mono.
-- **Docs chrome:** the sidebar and table of contents sit on a slightly darker paper than the page, so the reading column is the brightest thing on screen.
+Talk only about zgx: what it is, why it's fast, what you can build with it, and how to start. Never describe the site or how its docs are made. Leave out numbered eyebrows, counters on cards and cute section titles. Use short, concrete, confident sentences.
+
+## Docs
+
+The same restraint applies inside the docs:
+
+- **Titles:** Geist semibold, set as plainly as the home page's leads.
+- **Sidebar:** sits on a faint tint.
+- **Current page:** marked with the accent only.
+- **Tables and callouts:** ruled, not boxed.
+- **Ornament:** nothing that doesn't help someone read.
 
 ## Motion
 
-- **Hero:** words rise 8 px and fade in, staggered by 50 ms.
-- **Chart:** marks travel out from the zgx line to their values when the chart scrolls into view, the one place motion carries meaning.
-- **Hover:** transitions take 150 ms ease-out.
-- **Reduced motion:** with `prefers-reduced-motion`, all of it turns off.
-
-## What we take from each
-
-- **fumadocs.dev:** the doc-set switcher as the docs' spine, and search that is always one key away.
-- **linear.app:** confident, tight display type, and dark mode designed rather than derived.
-- **vercel.com/docs:** code blocks with filename bars, crisp hairlines, and nothing decorative competing with content.
-- **tailwindcss.com:** large, opinionated headlines, a visible grid as texture, and generous whitespace in docs.
-- **react.dev:** side-by-side code that teaches by comparison, and readable, friendly docs typography.
+- **Sections:** fade in 8 px as they enter.
+- **Chart:** marks move from zgx's line to their values.
+- **Hover:** transitions take 150 ms.
+- **Reduced motion:** with `prefers-reduced-motion`, everything stays still.
