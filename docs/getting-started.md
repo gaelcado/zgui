@@ -10,10 +10,10 @@ Add the crates, from crates.io:
 
 ```toml
 [dependencies]
-zgx = "0.1"
-zgx-desktop = "0.1"
+zgx = "0.1.1"
+zgx-desktop = "0.1.1"
 # The component library (a data grid, a tree, tabs, toasts…), if you use it.
-zgx-components = "0.1"
+zgx-components = "0.1.1"
 ```
 
 Or, for what is not released yet ([the changelog](../CHANGELOG.md) says what), from its repository:
@@ -223,9 +223,11 @@ To ship it on Windows (an icon, a manifest, one instance per user, an installer)
 The same interface as a script, hot reloaded as you save it, without a Rust host of your own. Install the runner and the checker:
 
 ```sh
-LUAU_CXXFLAGS=-DNDEBUG cargo install --git https://github.com/zeronsh/zgx zgx-run
-LUAU_CXXFLAGS=-DNDEBUG cargo install --git https://github.com/zeronsh/zgx zgx-script --bin zgx
+LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-run
+LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-script --bin zgx
 ```
+
+(For what is not released yet, `--git https://github.com/zeronsh/zgx` before the crate's name installs from the repository.)
 
 (`zgx-run` uses mimalloc as its allocator, for 6–10% less CPU on script, text and layout work at about 2 MB more memory; add `--no-default-features` to keep the system's. `LUAU_CXXFLAGS=-DNDEBUG` builds Luau without its asserts, a fifth faster: the repository's own builds set it in `.cargo/config.toml`, which an install doesn't read. Without it, `zgx-run` says so as it starts.)
 

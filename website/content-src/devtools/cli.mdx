@@ -11,9 +11,11 @@ Each block below is read from the binary's source when the site builds, so it sa
 ## Install
 
 ```sh
-LUAU_CXXFLAGS=-DNDEBUG cargo install --git https://github.com/zeronsh/zgx zgx-run
-LUAU_CXXFLAGS=-DNDEBUG cargo install --git https://github.com/zeronsh/zgx zgx-script --bin zgx
+LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-run
+LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-script --bin zgx
 ```
+
+From crates.io; `--git https://github.com/zeronsh/zgx` before a crate's name installs what isn't released yet.
 
 `zgx check` needs [luau-lsp](https://github.com/JohnnyMorganz/luau-lsp/releases) on the `PATH`; `zgx lint` and `zgx inspect` need nothing else.
 
