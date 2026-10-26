@@ -8,6 +8,15 @@ interface Props {
   name: string;
 }
 const { file, name } = Astro.props;
+// Astro reports a component's error inside MDX only as "error while rendering":
+// say what it was.
+let html: string;
+try {
+  html = codeBlock({ code: rustString(file, name), lang: 'text', title: `${file.split('/').pop()} · ${name}` });
+} catch (error) {
+  console.error(`Usage ${file} ${name}:`, error);
+  throw error;
+}
 ---
 
-<Fragment set:html={codeBlock({ code: rustString(file, name), lang: 'text', title: `${file.split('/').pop()} · ${name}` })} />
+<Fragment set:html={html} />

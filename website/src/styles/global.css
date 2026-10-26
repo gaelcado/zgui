@@ -1089,3 +1089,34 @@ tr[data-fw='zgx-luau'] .perf-bar {
     min-width: 9.5rem;
   }
 }
+
+/* The doc set switcher's list: each set's icon on the same signal tile as the button's. */
+[role='dialog'][data-side] {
+  padding: 0.35rem;
+  border-color: var(--color-hairline);
+  border-radius: 0.9rem;
+  background: color-mix(in oklab, var(--color-surface) 92%, transparent);
+  box-shadow: 0 18px 50px -20px color-mix(in oklab, black 35%, transparent);
+}
+[role='dialog'][data-side] > a {
+  gap: 0.7rem;
+  padding: 0.55rem 0.6rem;
+  border-radius: 0.65rem;
+}
+[role='dialog'][data-side] > a > div:first-child {
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  padding: 0.42rem;
+  border-radius: 0.55rem;
+  background: var(--color-signal-soft);
+  color: var(--color-signal);
+}
+[role='dialog'][data-side] > a p:first-child {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+[role='dialog'][data-side] > a p + p {
+  font-size: 0.75rem;
+  line-height: 1.4;
+}

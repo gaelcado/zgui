@@ -1,6 +1,12 @@
 ---
 import { lintRules } from '@/lib/repo';
-const rules = lintRules();
+let rules: ReturnType<typeof lintRules>;
+try {
+  rules = lintRules();
+} catch (error) {
+  console.error('LintRules:', error);
+  throw error;
+}
 ---
 
 <table>
