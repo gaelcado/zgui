@@ -829,3 +829,19 @@ tr[data-fw='zgx-luau'] .perf-bar {
     scroll-margin-top: 7.5rem;
   }
 }
+
+/* "Edit on GitHub": a quiet link under the page, not a bar across it. */
+#nd-page a[href*='/edit/main/'] {
+  align-self: flex-start;
+  margin-top: 1.5rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-fd-muted-foreground);
+}
+#nd-page a[href*='/edit/main/']:hover {
+  background: none;
+  color: var(--color-fd-foreground);
+}
