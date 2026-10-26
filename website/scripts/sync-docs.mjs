@@ -376,10 +376,24 @@ print(json.dumps({
   const rust = quick.find((n) => n.lang?.startsWith('rust'));
   const luau = quick.find((n) => n.lang === 'lua' || n.lang === 'luau');
   if (!rust || !luau) fail('README.md: Quick start needs a rust and a lua sample for the home page');
+  // The same counter in both languages: getting started's "State" sections,
+  // the Rust one's component without its main.
+  const guide = source('docs/getting-started.md').tree.children;
+  const stateCode = (part) => {
+    const at = guide.findIndex((n) => n.type === 'heading' && n.depth === 2 && toString(n) === part);
+    const state = guide.findIndex((n, i) => i > at && n.type === 'heading' && n.depth === 3 && toString(n) === 'State');
+    const code = guide.slice(state).find((n) => n.type === 'code');
+    if (at === -1 || state === -1 || !code) fail(`docs/getting-started.md: no "${part}" › "State" sample for the home page`);
+    return code?.value ?? '';
+  };
+  const rustState = stateCode('In Rust');
+  const counter = rustState.slice(rustState.indexOf('fn counter'), rustState.indexOf('\nfn main')).trim();
+  if (!counter.startsWith('fn counter')) fail('docs/getting-started.md: the Rust "State" sample has no fn counter()');
+  const samples = { rust: `use zgx::compose::prelude::*;\n\n${counter}`, luau: stateCode('In Luau') };
   const lede = toString(nodes.find((n) => n.type === 'paragraph'));
   fs.writeFileSync(
     path.join(website, 'src/generated/readme.json'),
-    JSON.stringify({ lede, features, rust: rust?.value, luau: luau?.value }),
+    JSON.stringify({ lede, features, rust: rust?.value, luau: luau?.value, samples }),
   );
 }
 

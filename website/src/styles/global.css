@@ -8,36 +8,89 @@
 @import 'fumadocs-ui/css/generated/shared.css';
 @import '@fontsource-variable/geist';
 @import '@fontsource-variable/geist-mono';
+@import '@fontsource/instrument-serif/400.css';
+@import '@fontsource/instrument-serif/400-italic.css';
 
 @source '../../content-src/**/*.mdx';
 
-/* zgx's green, the colour its benchmark charts have always given it. */
+/* ---- Tokens (design/BRIEF.md): warm paper, one signal green. ------------ */
 @theme {
   --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --color-fd-primary: hsl(146, 45%, 33%);
-  --color-fd-primary-foreground: hsl(0, 0%, 100%);
-  --color-fd-ring: hsl(146, 45%, 40%);
-  /* Fumadocs' neutral grey is 4.2:1 on its cards; this is 5.6:1. */
-  --color-fd-muted-foreground: hsl(0, 0%, 38%);
+  --font-display: 'Instrument Serif', ui-serif, Georgia, serif;
+
+  --color-paper: #f8f7f4;
+  --color-paper-2: #f1efea;
+  --color-surface: #ffffff;
+  --color-ink: #161614;
+  --color-ink-2: #3a3934;
+  --color-hairline: color-mix(in oklab, #161614 11%, transparent);
+  --color-hairline-strong: color-mix(in oklab, #161614 18%, transparent);
+  --color-signal: #0d7a52;
+  --color-signal-soft: color-mix(in oklab, #0d7a52 10%, transparent);
   --color-code: #ffffff;
-  --color-zgx: #2f7d4b;
-  --color-zgx-luau: #6aa982;
+  --color-zgx: #0d7a52;
+  --color-zgx-luau: #5aa585;
+
+  --color-fd-background: var(--color-paper);
+  --color-fd-foreground: var(--color-ink);
+  --color-fd-muted: var(--color-paper-2);
+  --color-fd-muted-foreground: #66655e;
+  --color-fd-popover: var(--color-surface);
+  --color-fd-popover-foreground: var(--color-ink);
+  --color-fd-card: var(--color-surface);
+  --color-fd-card-foreground: var(--color-ink);
+  --color-fd-border: var(--color-hairline);
+  --color-fd-primary: var(--color-signal);
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: var(--color-paper-2);
+  --color-fd-secondary-foreground: var(--color-ink);
+  --color-fd-accent: color-mix(in oklab, #161614 5%, transparent);
+  --color-fd-accent-foreground: var(--color-ink);
+  --color-fd-ring: var(--color-signal);
+  --color-fd-overlay: color-mix(in oklab, #161614 24%, transparent);
 }
 
-.dark {
-  --color-fd-primary: hsl(144, 50%, 58%);
-  --color-fd-primary-foreground: hsl(150, 40%, 8%);
-  --color-fd-ring: hsl(144, 50%, 50%);
-  --color-fd-muted-foreground: hsl(0, 0%, 66%);
-  --color-code: hsl(0, 0%, 7%);
-  --color-zgx: #5cbf7e;
-  --color-zgx-luau: #3f8a5b;
+/* Dark is its own palette, not the light one turned over: a green-black
+   ground, warm ink, and a mint signal bright enough to read as light. */
+.dark,
+.dark #nd-sidebar {
+  --color-paper: #0b0c0b;
+  --color-paper-2: #0f110f;
+  --color-surface: #131513;
+  --color-ink: #f1f0ea;
+  --color-ink-2: #cfcdc5;
+  --color-hairline: color-mix(in oklab, #f1f0ea 10%, transparent);
+  --color-hairline-strong: color-mix(in oklab, #f1f0ea 17%, transparent);
+  --color-signal: #46d39a;
+  --color-signal-soft: color-mix(in oklab, #46d39a 12%, transparent);
+  --color-code: #101210;
+  --color-zgx: #46d39a;
+  --color-zgx-luau: #2e8f67;
+
+  --color-fd-background: var(--color-paper);
+  --color-fd-foreground: var(--color-ink);
+  --color-fd-muted: var(--color-paper-2);
+  --color-fd-muted-foreground: #9a998f;
+  --color-fd-popover: var(--color-surface);
+  --color-fd-popover-foreground: var(--color-ink);
+  --color-fd-card: var(--color-surface);
+  --color-fd-card-foreground: var(--color-ink);
+  --color-fd-border: var(--color-hairline);
+  --color-fd-primary: var(--color-signal);
+  --color-fd-primary-foreground: #06200f;
+  --color-fd-secondary: #161816;
+  --color-fd-secondary-foreground: var(--color-ink);
+  --color-fd-accent: color-mix(in oklab, #f1f0ea 7%, transparent);
+  --color-fd-accent-foreground: var(--color-ink);
+  --color-fd-ring: var(--color-signal);
+  --color-fd-overlay: color-mix(in oklab, black 50%, transparent);
 }
 
 html {
   scrollbar-gutter: stable;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 html > body[data-scroll-locked] {
@@ -51,14 +104,14 @@ html > body[data-scroll-locked] {
 
 /* ---- Code blocks (lib/code-frame.mjs builds them, CodeBlocks.astro runs them). */
 :root {
-  --cb-bg: #ffffff;
-  --cb-head: #f7f7f7;
+  --cb-bg: var(--color-code);
+  --cb-head: #faf9f6;
   --cb-border: color-mix(in oklab, var(--color-fd-foreground) 11%, transparent);
   --cb-line-hl: color-mix(in oklab, var(--color-fd-primary) 9%, transparent);
 }
 .dark {
-  --cb-bg: #111111;
-  --cb-head: #161616;
+  --cb-bg: var(--color-code);
+  --cb-head: #141614;
   --cb-border: color-mix(in oklab, var(--color-fd-foreground) 10%, transparent);
   --cb-line-hl: color-mix(in oklab, var(--color-fd-primary) 12%, transparent);
 }
@@ -215,38 +268,194 @@ html > body[data-scroll-locked] {
   }
 }
 
-/* ---- Docs typography. --------------------------------------------------- */
+/* ---- Docs chrome and typography (design/BRIEF.md). ---------------------- */
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 400;
+}
+
+/* The sidebar sits on a slightly darker paper than the page. */
+#nd-sidebar {
+  background: var(--color-paper-2);
+  border-color: var(--color-hairline);
+}
+#nd-sidebar a[href='/'] {
+  font-size: 1rem;
+}
+/* Search: a field, its keys in mono. */
+#nd-sidebar button[data-search-full] {
+  height: 2.25rem;
+  padding-inline: 0.65rem 0.4rem;
+  border-color: var(--color-hairline);
+  border-radius: 0.6rem;
+  background: var(--color-surface);
+  box-shadow: 0 1px 0 color-mix(in oklab, var(--color-ink) 4%, transparent);
+  font-size: 0.8125rem;
+}
+#nd-sidebar button[data-search-full] kbd {
+  border-color: var(--color-hairline);
+  background: var(--color-paper-2);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+/* The doc set switcher: a card, the set's icon on a signal tile, its line beneath. */
+#nd-sidebar button[aria-haspopup='dialog']:not([data-search-full]) {
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.6rem;
+  border-color: var(--color-hairline);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+  box-shadow: 0 1px 0 color-mix(in oklab, var(--color-ink) 4%, transparent);
+}
+#nd-sidebar button[aria-haspopup='dialog']:not([data-search-full]):hover {
+  border-color: var(--color-hairline-strong);
+  background: var(--color-surface);
+}
+#nd-sidebar button[aria-haspopup='dialog']:not([data-search-full]) > div:first-child {
+  width: 2rem;
+  height: 2rem;
+  padding: 0.4rem;
+  border-radius: 0.55rem;
+  background: var(--color-signal-soft);
+  color: var(--color-signal);
+}
+#nd-sidebar button[aria-haspopup='dialog']:not([data-search-full]) p {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+#nd-sidebar button[aria-haspopup='dialog']:not([data-search-full]) p + p {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 0.1rem;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: 0;
+  color: var(--color-fd-muted-foreground);
+}
+/* Group labels: small mono capitals. */
+#nd-sidebar p:not(button p) {
+  margin-top: 1.6rem;
+  margin-bottom: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-fd-muted-foreground);
+}
+#nd-sidebar p:not(button p):first-child {
+  margin-top: 0.6rem;
+}
+/* Items: quiet until hovered; the page you're on carries the signal. */
+#nd-sidebar a[data-active] {
+  position: relative;
+  padding-block: 0.36rem;
+  border-radius: 0.5rem;
+  font-size: 0.84375rem;
+  line-height: 1.35;
+  color: color-mix(in oklab, var(--color-ink) 72%, transparent);
+}
+#nd-sidebar a[data-active]:hover {
+  background: color-mix(in oklab, var(--color-ink) 4.5%, transparent);
+  color: var(--color-ink);
+}
+#nd-sidebar a[data-active='true'] {
+  background: var(--color-surface);
+  box-shadow: 0 0 0 1px var(--color-hairline), 0 1px 2px color-mix(in oklab, var(--color-ink) 5%, transparent);
+  color: var(--color-ink);
+  font-weight: 550;
+}
+#nd-sidebar a[data-active='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.45rem;
+  bottom: 0.45rem;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--color-signal);
+}
+
+/* Contents: mono heading, a signal bar for where you are. */
+#nd-toc #toc-title {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-fd-muted-foreground);
+}
+#nd-toc #toc-title svg {
+  display: none;
+}
+#nd-toc a {
+  padding-block: 0.28rem;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--color-fd-muted-foreground);
+}
+#nd-toc a:hover {
+  color: var(--color-ink);
+}
+#nd-toc a[data-active='true'] {
+  color: var(--color-signal);
+}
+
+/* The page: a mono eyebrow, a serif title, a quiet lede. */
 #nd-page {
   max-width: 50rem;
 }
+.doc-eyebrow {
+  margin: 0 0 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  color: var(--color-signal);
+}
 #nd-page h1 {
-  font-size: clamp(1.875rem, 3vw, 2.25rem);
-  line-height: 1.15;
-  letter-spacing: -0.024em;
-  font-weight: 620;
+  font-family: var(--font-display);
+  font-size: clamp(2.4rem, 4.2vw, 3.1rem);
+  font-weight: 400;
+  line-height: 1.02;
+  letter-spacing: -0.015em;
   text-wrap: balance;
 }
 #nd-page h1 + p {
-  font-size: 1.0625rem;
-  line-height: 1.6;
+  margin-top: 0.4rem;
+  font-size: 1.125rem;
+  line-height: 1.55;
+  color: var(--color-fd-muted-foreground);
   text-wrap: pretty;
 }
 .prose {
   font-size: 0.96875rem;
   line-height: 1.75;
-  color: color-mix(in oklab, var(--color-fd-foreground) 86%, var(--color-fd-background));
+  color: var(--color-ink-2);
 }
 .prose :where(h2, h3, h4) {
-  color: var(--color-fd-foreground);
+  color: var(--color-ink);
   scroll-margin-top: 5.5rem;
   text-wrap: balance;
 }
 .prose :where(h2) {
-  margin: 2.75em 0 0.8em;
+  margin: 3em 0 0.8em;
+  padding-top: 1.4em;
+  border-top: 1px solid var(--color-hairline);
   font-size: 1.4375rem;
   line-height: 1.3;
-  letter-spacing: -0.022em;
-  font-weight: 620;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+.prose > :first-child,
+.prose > div > :first-child,
+.prose > h2:first-child {
+  margin-top: 0;
 }
 .prose :where(h3) {
   margin: 2.1em 0 0.6em;
@@ -260,36 +469,33 @@ html > body[data-scroll-locked] {
   font-size: 1rem;
   font-weight: 600;
 }
-.prose > :first-child,
-.prose > div > :first-child {
-  margin-top: 0;
-}
 .prose :where(p) {
   margin: 1.05em 0;
   text-wrap: pretty;
 }
 .prose :where(strong) {
   font-weight: 600;
-  color: var(--color-fd-foreground);
+  color: var(--color-ink);
 }
 .prose :where(a):not(.heading-anchor) {
-  color: var(--color-fd-foreground);
+  color: var(--color-ink);
   font-weight: 500;
   text-decoration-line: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 0.22em;
-  text-decoration-color: color-mix(in oklab, var(--color-fd-foreground) 28%, transparent);
-  transition: text-decoration-color 120ms ease;
+  text-decoration-color: color-mix(in oklab, var(--color-signal) 55%, transparent);
+  transition: text-decoration-color 150ms ease-out, color 150ms ease-out;
 }
 .prose :where(a):not(.heading-anchor):hover {
-  text-decoration-color: var(--color-fd-primary);
+  color: var(--color-signal);
+  text-decoration-color: var(--color-signal);
 }
 .prose :where(code):not(pre code) {
   padding: 0.14em 0.38em;
   border: 0;
   border-radius: 0.375rem;
-  background: color-mix(in oklab, var(--color-fd-foreground) 6.5%, transparent);
-  color: var(--color-fd-foreground);
+  background: color-mix(in oklab, var(--color-ink) 6.5%, transparent);
+  color: var(--color-ink);
   font-family: var(--font-mono);
   font-size: 0.84em;
   font-weight: 450;
@@ -307,12 +513,17 @@ html > body[data-scroll-locked] {
   margin: 0.35em 0;
   padding-left: 0.2em;
 }
-.prose :where(li)::marker {
-  color: color-mix(in oklab, var(--color-fd-foreground) 40%, transparent);
+.prose :where(ul > li)::marker {
+  color: var(--color-signal);
+}
+.prose :where(ol > li)::marker {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--color-fd-muted-foreground);
 }
 .prose :where(hr) {
   margin: 2.5em 0;
-  border-color: var(--color-fd-border);
+  border-color: var(--color-hairline);
 }
 .heading-anchor {
   margin-left: 0.45rem;
@@ -320,42 +531,11 @@ html > body[data-scroll-locked] {
   font-weight: 400;
   text-decoration: none;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity 150ms ease-out;
 }
 :is(h2, h3):hover > .heading-anchor,
 .heading-anchor:focus-visible {
   opacity: 1;
-}
-
-/* Sidebar and table of contents: smaller than the page, quiet until active. */
-#nd-sidebar a[data-active] {
-  padding-block: 0.375rem;
-  font-size: 0.875rem;
-  line-height: 1.35;
-}
-#nd-sidebar a[data-active='true'] {
-  font-weight: 550;
-}
-#nd-sidebar p {
-  margin-top: 1.5rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--color-fd-foreground);
-}
-#nd-sidebar p:first-child {
-  margin-top: 0.5rem;
-}
-#nd-toc #toc-title {
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--color-fd-foreground);
-}
-#nd-toc a {
-  font-size: 0.8125rem;
-  line-height: 1.4;
-  padding-block: 0.3rem;
 }
 
 /* Tables: a rounded frame that scrolls sideways when wide. */
@@ -379,11 +559,22 @@ html > body[data-scroll-locked] {
   text-align: left;
   vertical-align: top;
 }
+.prose table:not(.perf-table) {
+  background: var(--color-surface);
+}
+.prose table:not(.perf-table) code {
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
 .prose table:not(.perf-table) th {
   background: var(--cb-head);
   border-bottom: 1px solid var(--cb-border);
-  color: var(--color-fd-foreground);
-  font-weight: 600;
+  color: var(--color-fd-muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 .prose table:not(.perf-table) tbody tr + tr td {
@@ -395,9 +586,10 @@ html > body[data-scroll-locked] {
   display: flex;
   gap: 0.75rem;
   margin: 1.75em 0;
-  padding: 0.9rem 1.1rem;
+  padding: 0.95rem 1.15rem;
   border: 1px solid var(--callout-border);
-  border-radius: 0.75rem;
+  border-left: 3px solid var(--callout-accent);
+  border-radius: 0.6rem;
   background: var(--callout-bg);
   font-size: 0.9375rem;
   line-height: 1.65;
@@ -438,53 +630,64 @@ html > body[data-scroll-locked] {
   margin: 0.5rem 0 2rem;
 }
 .perf-verdict {
-  font-size: clamp(1.25rem, 2.4vw, 1.6rem);
-  line-height: 1.3;
-  font-weight: 600;
-  letter-spacing: -0.015em;
+  font-family: var(--font-display);
+  font-size: clamp(1.75rem, 3vw, 2.25rem);
+  line-height: 1.12;
+  font-weight: 400;
+  letter-spacing: -0.01em;
   text-wrap: balance;
   margin: 0;
+  color: var(--color-ink);
 }
 .perf-meta {
-  margin: 0.5rem 0 1.25rem;
-  font-size: 0.85rem;
+  margin: 0.75rem 0 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
   color: var(--color-fd-muted-foreground);
 }
 .perf-meta a {
   color: inherit;
 }
+.perf-meta code {
+  font-size: inherit;
+  background: none;
+  padding: 0;
+}
 .perf-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
   margin: 0;
+  border: 1px solid var(--color-hairline);
+  border-radius: 1rem;
+  background: var(--color-surface);
+  overflow: hidden;
 }
 .perf-card {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.85rem 1rem;
-  border: 1px solid var(--color-fd-border);
-  border-radius: 0.75rem;
-  background: var(--color-fd-card);
+  gap: 0.2rem;
+  padding: 1.1rem 1.15rem 1rem;
+  box-shadow: -1px 0 0 var(--color-hairline), 0 -1px 0 var(--color-hairline);
 }
 .perf-card dt {
   order: 2;
+  margin-top: 0.3rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
   line-height: 1.35;
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--color-fd-foreground);
+  color: var(--color-ink);
 }
 .perf-card dd {
   margin: 0;
 }
 .perf-big {
   order: 1;
-  font-size: 1.75rem;
-  font-weight: 650;
+  font-family: var(--font-display);
+  font-size: 2.6rem;
+  line-height: 0.9;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
-  color: var(--color-zgx);
+  color: var(--color-signal);
 }
 .perf-detail {
   order: 3;
@@ -844,4 +1047,38 @@ tr[data-fw='zgx-luau'] .perf-bar {
 #nd-page a[href*='/edit/main/']:hover {
   background: none;
   color: var(--color-fd-foreground);
+}
+
+/* The page's actions (copy as Markdown, open in…): quiet, under the title. */
+#nd-page h1 ~ div button,
+#nd-page h1 ~ div a[data-slot],
+#nd-page h1 + p + div button {
+  border-color: var(--color-hairline);
+  background: transparent;
+  font-size: 0.75rem;
+  color: var(--color-fd-muted-foreground);
+}
+#nd-page h1 ~ div button:hover {
+  background: color-mix(in oklab, var(--color-ink) 5%, transparent);
+  color: var(--color-ink);
+}
+
+/* The chart's entrance: each mark travels from the zgx line to its value. */
+.dots .dot {
+  animation: dot-in 900ms cubic-bezier(0.2, 0.8, 0.2, 1) both paused;
+  animation-delay: calc(120ms + var(--row, 0) * 45ms);
+}
+.bench-card.in .dots .dot {
+  animation-play-state: running;
+}
+@keyframes dot-in {
+  from {
+    left: var(--one);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dots .dot {
+    animation: none;
+  }
 }

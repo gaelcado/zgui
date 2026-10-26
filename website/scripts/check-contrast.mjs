@@ -9,7 +9,7 @@ const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
 let bad = 0;
 for (const t of [zgxLight, zgxDark]) {
   // The block's own background, and the header's slightly different one.
-  for (const bg of [t.bg, t.type === 'light' ? '#f7f7f7' : '#161616']) {
+  for (const bg of [t.bg, t.type === 'light' ? '#faf9f6' : '#141614', t.type === 'light' ? '#f8f7f4' : '#0b0c0b']) {
     for (const color of new Set(t.tokenColors.map((r) => r.settings.foreground))) {
       const r = ratio(color, bg);
       if (r < 4.5) bad++;
