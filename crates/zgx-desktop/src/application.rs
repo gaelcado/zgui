@@ -2699,6 +2699,8 @@ impl Host {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        crate::services::add(window.id(), &self.context.ui);
         self.window = Some(window);
         #[cfg(target_os = "macos")]
         {
@@ -4867,6 +4869,8 @@ impl WindowManager {
             && let Some(window) = &host.window
         {
             self.native.remove(&window.id());
+            #[cfg(target_os = "macos")]
+            crate::services::remove(window.id());
             // Its drag, if X11's, goes with it.
             #[cfg(target_os = "linux")]
             if crate::native_drag::active(window.id()) {
