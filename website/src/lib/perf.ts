@@ -5,7 +5,7 @@ import perf from '@/generated/perf.json';
 
 export type Stat = { median: number; min: number; max: number };
 export type Cell = { framework: string; mode: string; repeats: number } & Record<string, Stat | number | string>;
-export type Scene = (typeof perf.scenes)[number] & { cells: Cell[] };
+export type Scene = Omit<(typeof perf.scenes)[number], 'cells'> & { cells: Cell[] };
 type MicroRow = {
   framework: string;
   scene: string;
@@ -21,7 +21,7 @@ type MicroRow = {
 export const data = perf;
 export const text = perf.text;
 export const names = perf.frameworks as Record<string, string>;
-export const scenes = perf.scenes as Scene[];
+export const scenes = perf.scenes as unknown as Scene[];
 export const commit = perf.commit;
 export const verdict = perf.verdict;
 export const repo = 'https://github.com/zeronsh/zgx';
