@@ -13,6 +13,7 @@ import { headline, fmt, scene, value, startupLead } from '@/lib/perf';
 import { repoUrl } from '@/lib/shared';
 import { publishedVersion, workspaceVersion } from '@/lib/repo';
 import { codeBlock, codeTabs } from '@/lib/highlight';
+import { available as hasWindows } from '@/lib/perf-windows';
 
 const published = await publishedVersion();
 const version = published ?? workspaceVersion();
@@ -137,7 +138,10 @@ const navName = (dir: string, title: string) => (dir === 'rust' ? 'Rust' : dir =
             ))
           }
         </dl>
-        <a class="more" href="/performance">Every scene and metric <ArrowRight size={14} aria-hidden="true" /></a>
+        <div class="more-row">
+          <a class="more" href="/performance">Every scene and metric <ArrowRight size={14} aria-hidden="true" /></a>
+          {hasWindows && <a class="more" href="/performance/windows">On Windows <ArrowRight size={14} aria-hidden="true" /></a>}
+        </div>
       </div>
       <div class="panel">
         <BenchOverview />
@@ -409,6 +413,11 @@ const navName = (dir: string, title: string) => (dir === 'rust' ? 'Rust' : dir =
   .more:hover {
     gap: 0.5rem;
     color: var(--color-signal);
+  }
+  .more-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 1.75rem;
   }
 
   /* ---- The ruled column ---- */
