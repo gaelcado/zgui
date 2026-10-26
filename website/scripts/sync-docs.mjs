@@ -224,6 +224,30 @@ function fence(src, node) {
   node.meta = title ? `title="${title}"` : null;
 }
 
+// --- Facts read from the source, for hand-written Markdown pages. -----------
+/** A Rust `const NAME: &str = "…";`, unescaped. */
+function rustString(file, name) {
+  const match = fs.readFileSync(path.join(root, file), 'utf8').match(new RegExp(`const ${name}: &str = "((?:[^"\\\\]|\\\\.)*)";`));
+  if (!match) return fail(`${file}: no const ${name}: &str`), '';
+  return match[1].replace(/\\(["\\n])/g, (_, c) => (c === 'n' ? '\n' : c));
+}
+/** `zgx lint`'s rules: `zgx_script::lint::RULES`. */
+function lintRules() {
+  const source = fs.readFileSync(path.join(root, 'crates/zgx-script/src/lint.rs'), 'utf8');
+  const start = source.indexOf('pub const RULES');
+  const table = source.slice(start, source.indexOf('];', start));
+  const rules = [...table.matchAll(/\(\s*"([^"]+)",\s*"((?:[^"\\\\]|\\\\.)*)",?\s*\)/g)].map((m) => [m[1], m[2].replace(/\\"/g, '"')]);
+  if (!rules.length) fail('crates/zgx-script/src/lint.rs: no RULES');
+  return rules;
+}
+function expandFromSource(text, page) {
+  return text
+    .replace(/<!-- usage (\S+) (\S+) -->/g, (_, file, name) => `\`\`\`text title="${file.split('/').pop()} · ${name}"\n${rustString(file, name)}\n\`\`\``)
+    .replace(/<!-- lint-rules -->/g, () =>
+      ['| Rule | Flags |', '| --- | --- |', ...lintRules().map(([rule, what]) => `| \`${rule}\` | ${what.replace(/\|/g, '\\|')} |`)].join('\n'))
+    .replace(/<!-- (usage|lint-rules)[^>]*-->/g, (m) => (fail(`${page}: ${m} is not a directive the sync knows`), m));
+}
+
 // --- Write. ------------------------------------------------------------------
 fs.rmSync(outDir, { recursive: true, force: true });
 // Astro keeps rendered pages by their files' contents, so a change to the
@@ -250,11 +274,11 @@ function firstSentence(nodes) {
 }
 
 for (const { set, page, url, parsed, nodes } of pages) {
-  const file = path.join(outDir, set.dir, `${page.slug}.${page.mdx ? 'mdx' : 'md'}`);
+  const file = path.join(outDir, set.dir, `${page.slug}.${page.mdx?.endsWith('.mdx') ? 'mdx' : 'md'}`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (page.mdx) {
     // Its source, for "Edit on GitHub", as the synced pages carry theirs.
-    const text = fs.readFileSync(path.join(handWritten, page.mdx), 'utf8');
+    const text = expandFromSource(fs.readFileSync(path.join(handWritten, page.mdx), 'utf8'), page.mdx);
     fs.writeFileSync(file, text.replace(/^---\n/, `---\nsource: "website/content-src/${page.mdx}"\n`));
     continue;
   }

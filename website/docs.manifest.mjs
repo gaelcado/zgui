@@ -15,7 +15,9 @@
 //   unwrap       drop the first section's heading (the page's title) and
 //                lift its subsections a level
 // Strings starting with `---` are sidebar separators. `page` with `mdx` is a
-// hand-written page in website/content-src/.
+// hand-written page in website/content-src/: MDX, or Markdown whose
+// `<!-- usage FILE CONST -->` and `<!-- lint-rules -->` the sync fills in
+// from the source.
 
 export const repo = 'https://github.com/zeronsh/zgx';
 
@@ -156,7 +158,7 @@ export const sets = [
       { slug: 'recipes', src: 'docs/agents/inspect.md', title: 'Recipes and safety', sections: ['Recipes', 'Safety and cost'],
         description: 'Common sequences, and what serving devtools costs and exposes.' },
       '---Tools---',
-      { slug: 'cli', mdx: 'devtools/cli.mdx' },
+      { slug: 'cli', mdx: 'devtools/cli.md' },
       { slug: 'profiling', src: 'scripts/perf/README.md', title: 'Profiling',
         description: 'ZGX_PROFILE splits a frame by phase; the perf suite compares two revisions in retired instructions.' },
     ],

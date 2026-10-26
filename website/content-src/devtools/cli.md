@@ -3,9 +3,6 @@ title: CLI reference
 description: Every command of zgx and zgx-run, as their --help prints it, with exit codes and the lint rules.
 ---
 
-import Usage from '@/components/Usage.astro';
-import LintRules from '@/components/LintRules.astro';
-
 Each block below is read from the binary's source when the site builds, so it says what `--help` says.
 
 ## Install
@@ -21,11 +18,11 @@ From crates.io; `--git https://github.com/zeronsh/zgx` before a crate's name ins
 
 ## zgx-run
 
-<Usage file="crates/zgx-run/src/main.rs" name="USAGE" />
+<!-- usage crates/zgx-run/src/main.rs USAGE -->
 
 ## zgx
 
-<Usage file="crates/zgx-script/src/bin/zgx.rs" name="USAGE" />
+<!-- usage crates/zgx-script/src/bin/zgx.rs USAGE -->
 
 | Command | Exit 0 | Exit 1 | Exit 2 | Exit 3 |
 | --- | --- | --- | --- | --- |
@@ -35,7 +32,7 @@ From crates.io; `--git https://github.com/zeronsh/zgx` before a crate's name ins
 
 ## zgx inspect
 
-<Usage file="crates/zgx-script/src/bin/zgx.rs" name="INSPECT_USAGE" />
+<!-- usage crates/zgx-script/src/bin/zgx.rs INSPECT_USAGE -->
 
 `--json` wraps every answer as `{"ok":true,"text":…,"data":…}` or `{"ok":false,"error":…}`. The commands are explained in [reading](/devtools/reading) and [acting](/devtools/acting), the selector syntax in [targets](/devtools/targets).
 
@@ -43,4 +40,4 @@ From crates.io; `--git https://github.com/zeronsh/zgx` before a crate's name ins
 
 `zgx lint --rules` prints these. `-- zgx-lint: allow(rule)` on a finding's line, or the line above it, accepts a deliberate exception.
 
-<LintRules />
+<!-- lint-rules -->
