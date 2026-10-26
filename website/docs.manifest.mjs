@@ -18,6 +18,13 @@
 // hand-written page in website/content-src/.
 
 export const repo = 'https://github.com/zeronsh/zgx';
+
+/** Links the docs make to what this site now is: [where, what to call it]. */
+export const rewrites = {
+  'https://zgui-performance.pages.dev': ['/performance', 'the performance results'],
+  'https://zgui-performance.pages.dev/': ['/performance', 'the performance results'],
+  'https://zgx.zeron.sh': ['/', 'zgx.zeron.sh'],
+};
 export const branch = 'main';
 
 /** Working notes, evidence and handoffs: not public pages (linked on GitHub). */

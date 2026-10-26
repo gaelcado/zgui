@@ -16,7 +16,7 @@ import remarkStringify from 'remark-stringify';
 import { toString } from 'mdast-util-to-string';
 import { visit } from 'unist-util-visit';
 import GithubSlugger from 'github-slugger';
-import { sets, internal, repo, branch } from '../docs.manifest.mjs';
+import { sets, internal, repo, branch, rewrites } from '../docs.manifest.mjs';
 
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const root = path.resolve(website, '..');
@@ -147,6 +147,7 @@ const githubUrl = (repoPath, hash = '') => {
 };
 
 function resolveLink(src, href) {
+  if (rewrites[href]) return rewrites[href][0];
   if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) return href;
   const [target, hash = ''] = href.split('#');
   let repoPath = src;
@@ -235,7 +236,13 @@ for (const { set, page, url, parsed, nodes } of pages) {
   }
   const tree = { type: 'root', children: nodes };
   visit(tree, (node) => {
-    if (node.type === 'link' || node.type === 'definition') node.url = resolveLink(page.src, node.url);
+    if (node.type === 'link' || node.type === 'definition') {
+      const before = node.url;
+      node.url = resolveLink(page.src, node.url);
+      // A link written as its old address says what it opens now.
+      if (node.type === 'link' && rewrites[before] && before.includes(toString(node).replace(/\/$/, '')))
+        node.children = [{ type: 'text', value: rewrites[before][1] }];
+    }
     else if (node.type === 'image') node.url = copyImage(page.src, node.url);
     else if (node.type === 'code') fence(page.src, node);
   });
