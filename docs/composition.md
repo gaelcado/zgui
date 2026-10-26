@@ -340,7 +340,12 @@ Committed editor text uses LF line endings: CRLF and lone CR become LF, then `te
 Undo goes back a run at a time, as AppKit's text views do. Consecutive typed
 graphemes join one step, as do consecutive deletions one way (Backspace, or
 forward Delete). A caret move, a selection change, a line break, a different
-kind of edit, a paste or multi-character insert, or undo/redo ends a run.
+kind of edit, a paste or multi-character insert, or undo/redo ends a run, and
+a paste, even of one character, is a step of its own.
+The arrows move in the order the text shows, as AppKit's text views do: through
+mixed left-to-right and right-to-left text (`abc אבג def`) Right always goes
+right on screen, a grapheme or, with Option (Control elsewhere), a word at a
+time.
 Option+Backspace / Control+Backspace delete a word; ⌘⌫ and ⌘⌦ on macOS delete
 to the line's start or end (at its edge, the line break). On macOS the Control
 keys work as in every Cocoa text field: A and E go to the line's start and end,
