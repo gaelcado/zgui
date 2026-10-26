@@ -4556,7 +4556,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-harfrust"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",

@@ -81,7 +81,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 # build these.
 [dev-dependencies]
 # Shaping with and without its kept advances (tests/variable_advances.rs).
-harfrust = { package = "zgx-harfrust", version = "0.5.2", path = "../../vendor/harfrust" }
+harfrust = { package = "zgx-harfrust", version = "0.5.3", path = "../../vendor/harfrust" }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.62", default-features = false, features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging"] }

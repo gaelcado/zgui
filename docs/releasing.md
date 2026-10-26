@@ -22,7 +22,7 @@ And four forks, as zgx's own crates, published first:
 | `zgx-taffy` | taffy 0.9.0 | auto margins that keep a flex line's gaps | `vendor/taffy/ZGX_PATCH.md` |
 | `zgx-mlua` | mlua 0.12.2 | table walks and userdata without a copy per key | `vendor/mlua/ZGX_PATCH.md` |
 
-Each keeps its upstream's license files, authors and library name (`harfrust`, `cosmic_text`, `taffy`, `mlua`), and its version (a fix of our own bumps the patch: `zgx-cosmic-text` is 0.19.1 since it shapes with `zgx-harfrust`). zgx's crates depend on them by path and version under their upstream names (`cosmic-text = { package = "zgx-cosmic-text", version = "0.19.1", path = "../../vendor/cosmic-text" }`, and `zgx-cosmic-text` on `zgx-harfrust` likewise), so code reads `cosmic_text::` as before. Only zgx's crates use them, so an app never sees two of one. Drop a fork, back to the upstream crate, once a release of it has the fix.
+Each keeps its upstream's license files, authors and library name (`harfrust`, `cosmic_text`, `taffy`, `mlua`), and its version (a fix of our own bumps the patch: `zgx-cosmic-text` is 0.19.1 since it shapes with `zgx-harfrust`; `zgx-harfrust` is 0.5.3, as 0.5.2, uploaded on 2026-10-26, never reached crates.io's index). zgx's crates depend on them by path and version under their upstream names (`cosmic-text = { package = "zgx-cosmic-text", version = "0.19.1", path = "../../vendor/cosmic-text" }`, and `zgx-cosmic-text` on `zgx-harfrust` likewise), so code reads `cosmic_text::` as before. Only zgx's crates use them, so an app never sees two of one. Drop a fork, back to the upstream crate, once a release of it has the fix.
 
 ## What stays patched in the repository alone
 
