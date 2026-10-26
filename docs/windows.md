@@ -443,13 +443,13 @@ the workspace's `dist` profile, which an app sets in its own `[profile.release]`
 or a profile like it (thin LTO is 0.7 MiB larger). What else changes it,
 measured on that app:
 - Image formats (zgx-desktop's features, see
-  [images-and-animation.md](images-and-animation.md)): SVG is 0.75 MiB,
+  [image loading](images-and-animation.md)): SVG is 0.75 MiB,
   JPEG 0.22, PNG 0.13. GIF's decoder is linked only into an app that shows a
   GIF.
 - The `vulkan` feature adds 1.1 MiB (see Presentation).
 - `panic = "abort"` saves 3.2 MiB, a quarter. It is the app's choice, not
   zgx's default: zgx contains a panic in an event handler, an effect or a
-  task by unwinding it ([application.md](application.md)), and with abort
+  task by unwinding it ([building an application](application.md)), and with abort
   such a panic ends the app instead.
 - `opt-level = "s"` saves 3.0 MiB; measure the app's own frames before
   shipping it, since zgx's hot paths are measured at `opt-level = 3`.
