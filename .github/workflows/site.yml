@@ -10,6 +10,7 @@ on:
       - "docs/**"
       - "README.md"
       - "CHANGELOG.md"
+      - "Cargo.toml"
       - "site/data.json"
       - "site/micro.jsonl"
       - "scripts/build_site.py"

@@ -9,7 +9,9 @@ import readme from '@/generated/readme.json';
 import { sets } from '../../docs.manifest.mjs';
 import { headline, verdict, date, commit, repo } from '@/lib/perf';
 import { repoUrl } from '@/lib/shared';
+import { publishedVersion, workspaceVersion } from '@/lib/repo';
 
+const published = await publishedVersion();
 const icons = { Box, FileCode, MonitorSmartphone, SquareTerminal, Gauge } as const;
 const h = headline();
 const themes = { light: 'github-light-default', dark: 'github-dark-default' } as const;
@@ -54,7 +56,7 @@ const [lede, ...more] = readme.lede.split(/(?<=\.) /);
 
   <main id="main">
     <section class="hero wrap" aria-labelledby="hero-title">
-      <p class="eyebrow"><span class="dot" aria-hidden="true"></span> 0.1 · macOS, Windows, Linux · MIT</p>
+      <p class="eyebrow"><span class="dot" aria-hidden="true"></span> <a href="/rust/changelog">{published ? `${published} on crates.io` : workspaceVersion()}</a> · macOS, Windows, Linux · MIT</p>
       <h1 id="hero-title">Native interfaces in Rust and Luau that do no work when nothing changes.</h1>
       <p class="hero-lede">{lede} {more.join(' ')}</p>
       <div class="cta">
