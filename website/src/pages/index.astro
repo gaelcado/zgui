@@ -22,11 +22,11 @@ const icons = { Box, FileCode, MonitorSmartphone, SquareTerminal, Gauge } as con
 const h = headline();
 const heavy = scene('heavy');
 
-const rust = codeBlock({ code: readme.samples.rust, lang: 'rust', title: 'counter.rs' });
-const luau = codeBlock({ code: readme.samples.luau, lang: 'luau', title: 'app.luau' });
-const install = codeBlock({ code: 'cargo add zgx zgx-desktop', lang: 'sh', title: 'Rust' });
-const installLuau = codeBlock({ code: 'cargo install zgx-run', lang: 'sh', title: 'Luau' });
-const agentCode = codeBlock({
+const rust = await codeBlock({ code: readme.samples.rust, lang: 'rust', title: 'counter.rs' });
+const luau = await codeBlock({ code: readme.samples.luau, lang: 'luau', title: 'app.luau' });
+const install = await codeBlock({ code: 'cargo add zgx zgx-desktop', lang: 'sh', title: 'Rust' });
+const installLuau = await codeBlock({ code: 'cargo install zgx-run', lang: 'sh', title: 'Luau' });
+const agentCode = await codeBlock({
   code: `claude mcp add zgx -- zgx inspect mcp   # or any MCP client\nzgx inspect tree --depth 2\nzgx inspect click '"Send"'\nzgx inspect frames 5`,
   lang: 'sh',
   title: 'terminal',
@@ -51,7 +51,7 @@ const sentence = (html: string) => {
 };
 const stats = [
   { value: `${fmt(value(heavy, 'zgx', 'idle', 'cpu_percent_one_core')!, 2)}%`, label: 'CPU while idle', note: 'An idle window does no work.' },
-  { value: h.cards[2].value, label: 'Frames over 25 ms', note: 'In every mode of every scene.' },
+  { value: h.cards[2].value, label: 'Frames over 25 ms, at most', note: `In any mode of any scene; GPUI Fast, MyGo and Rune ${h.cards[2].detail[0].text}.` },
   { value: h.cards[0].value, label: 'CPU, heavy dashboard', note: h.cards[0].detail.map((d) => `${d.name} ${d.text}`).join(' · ') },
 ];
 const words = 'Native interfaces that do'.split(' ');

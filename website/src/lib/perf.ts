@@ -75,7 +75,7 @@ export function headline() {
       },
       {
         value: `${longZgx === 0 ? '0' : (longZgx * 100).toFixed(1)}%`,
-        label: 'Long frames (over 25 ms)',
+        label: 'Long frames (over 25 ms), at most',
         detail: [{ name: 'rivals', text: `up to ${(longRivals * 100).toFixed(1)}%` }],
       },
       {
