@@ -352,3 +352,19 @@ tr[data-fw='zgx-luau'] .perf-bar {
   font-family: var(--font-mono);
   font-size: 0.85em;
 }
+
+/* Skip past the header or sidebar to the page, for the keyboard. */
+.skip {
+  position: fixed;
+  left: -999px;
+  top: 0.5rem;
+  z-index: 100;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  background: var(--color-fd-primary);
+  color: var(--color-fd-primary-foreground);
+  font-weight: 550;
+}
+.skip:focus {
+  left: 0.5rem;
+}

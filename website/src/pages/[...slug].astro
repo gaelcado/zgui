@@ -25,6 +25,7 @@ const sourceUrl = entry.data.source ? `${repoUrl}/blob/main/${entry.data.source}
 ---
 
 <Base title={page.data.title} description={page.data.description} image={ogImage(slugs)}>
+  <a href="#nd-page" class="skip">Skip to content</a>
   <Docs
     client:load
     tree={pageTree}
