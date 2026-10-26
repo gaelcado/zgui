@@ -8,10 +8,12 @@ const font = (file: string) => fs.readFileSync(path.join(process.cwd(), 'node_mo
 const fonts = [
   { name: 'Geist', data: font('geist/files/geist-latin-wght-normal.woff2') },
   { name: 'Geist Mono', data: font('geist-mono/files/geist-mono-latin-wght-normal.woff2') },
+  { name: 'Instrument Serif', data: fs.readFileSync(path.join(process.cwd(), 'node_modules/@fontsource/instrument-serif/files/instrument-serif-latin-400-normal.woff2')) },
+  { name: 'Instrument Serif Italic', data: fs.readFileSync(path.join(process.cwd(), 'node_modules/@fontsource/instrument-serif/files/instrument-serif-latin-400-italic.woff2')) },
 ];
 
-const green = '#5cbf7e';
-const bg = '#0a0a0a';
+const green = '#46d39a';
+const bg = '#0b0c0b';
 
 function mark(size: number) {
   return h(
@@ -32,26 +34,26 @@ function frame(eyebrow: string, children: ReactNode[]) {
         width: '100%',
         height: '100%',
         padding: '72px 80px',
-        color: '#fafafa',
+        color: '#f1f0ea',
         fontFamily: 'Geist',
         backgroundColor: bg,
-        backgroundImage: `radial-gradient(circle at 85% -10%, rgba(92,191,126,0.28), rgba(10,10,10,0) 55%), linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px)`,
-        backgroundSize: '100% 100%, 48px 48px, 48px 48px',
+        backgroundImage: `radial-gradient(circle at 88% -12%, rgba(70,211,154,0.24), rgba(11,12,11,0) 55%), radial-gradient(rgba(241,240,234,0.14) 1.2px, transparent 1.4px)`,
+        backgroundSize: '100% 100%, 28px 28px',
       },
     },
     h(
       'div',
       { style: { display: 'flex', alignItems: 'center', gap: 18 } },
       mark(44),
-      h('span', { style: { fontSize: 34, fontWeight: 650, letterSpacing: '-0.02em' } }, 'zgx'),
+      h('span', { style: { fontSize: 46, fontFamily: 'Instrument Serif Italic', lineHeight: 1 } }, 'zgx'),
       eyebrow
-        ? h('span', { style: { fontSize: 28, color: 'rgba(250,250,250,0.5)', marginLeft: 6 } }, `/  ${eyebrow}`)
+        ? h('span', { style: { fontSize: 28, color: 'rgba(241,240,234,0.5)', marginLeft: 6 } }, `/  ${eyebrow}`)
         : null,
     ),
     ...children,
     h(
       'div',
-      { style: { display: 'flex', marginTop: 'auto', fontFamily: 'Geist Mono', fontSize: 24, color: 'rgba(250,250,250,0.45)' } },
+      { style: { display: 'flex', marginTop: 'auto', fontFamily: 'Geist Mono', fontSize: 24, color: 'rgba(241,240,234,0.45)' } },
       'zgx.zeron.sh',
     ),
   );
@@ -65,13 +67,13 @@ export function docsImage(set: string, title: string, description?: string) {
     frame(set, [
       h(
         'div',
-        { style: { display: 'flex', fontSize: size(title, 84, 64, 26), fontWeight: 650, letterSpacing: '-0.035em', lineHeight: 1.05, marginTop: 88, maxWidth: 1000 } },
+        { style: { display: 'flex', fontFamily: 'Instrument Serif', fontSize: size(title, 112, 84, 22), letterSpacing: '-0.015em', lineHeight: 1, marginTop: 84, maxWidth: 1020 } },
         title,
       ),
       description
         ? h(
             'div',
-            { style: { display: 'flex', fontSize: 32, lineHeight: 1.4, color: 'rgba(250,250,250,0.62)', marginTop: 28, maxWidth: 980 } },
+            { style: { display: 'flex', fontSize: 32, lineHeight: 1.4, color: 'rgba(241,240,234,0.62)', marginTop: 30, maxWidth: 980 } },
             description.length > 150 ? `${description.slice(0, 147).replace(/\s+\S*$/, '')}…` : description,
           )
         : null,
@@ -86,8 +88,10 @@ export function homeImage(stats: { value: string; label: string }[]) {
     frame('', [
       h(
         'div',
-        { style: { display: 'flex', fontSize: 60, fontWeight: 650, letterSpacing: '-0.04em', lineHeight: 1.05, marginTop: 44, maxWidth: 1000 } },
-        'Native interfaces in Rust and Luau that do no work when nothing changes.',
+        { style: { display: 'flex', flexWrap: 'wrap', fontFamily: 'Instrument Serif', fontSize: 82, letterSpacing: '-0.015em', lineHeight: 0.98, marginTop: 40, maxWidth: 1040 } },
+        h('span', {}, 'Native interfaces that do\u00a0'),
+        h('span', { style: { fontFamily: 'Instrument Serif Italic', color: green } }, 'no work\u00a0'),
+        h('span', {}, 'when nothing changes.'),
       ),
       h(
         'div',
@@ -106,8 +110,8 @@ export function homeImage(stats: { value: string; label: string }[]) {
                 backgroundColor: 'rgba(255,255,255,0.03)',
               },
             },
-            h('span', { style: { fontSize: 46, fontWeight: 650, color: green, letterSpacing: '-0.03em' } }, s.value),
-            h('span', { style: { fontSize: 21, color: 'rgba(250,250,250,0.6)', marginTop: 6 } }, s.label),
+            h('span', { style: { fontSize: 56, fontFamily: 'Instrument Serif', color: green, lineHeight: 1 } }, s.value),
+            h('span', { style: { fontSize: 21, color: 'rgba(241,240,234,0.6)', marginTop: 8 } }, s.label),
           ),
         ),
       ),
