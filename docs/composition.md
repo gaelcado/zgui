@@ -231,6 +231,15 @@ the layouts a gesture moves over are kept until it ends. Changing the
 selection repaints only where a highlight changed, and an unchanged one
 repaints nothing. Hit testing maps the pointer through local transforms (scale, rotation, skew), as the scene's does.
 
+On macOS, selected text answers the system's text services as AppKit's text
+views do. Its context menu, and an editor's, offers Look Up “…” for the
+selection, and ⌃⌘D looks up a focused field's selection, else the selected
+display text. The menu bar's Services (a translator, Make New Sticky Note,
+Search With…) take the selection as plain text, and a service that returns
+text puts it in place of an editable field's selection. A password field
+offers neither, and elsewhere than macOS nothing changes. Selected text also
+drags, into fields and other apps ([dragging text](drag-drop.md#dragging-text)).
+
 ## Editable text
 
 `text_input(label, value)` and `text_area(label, value)` mount the same retained editor used by the native host. The first argument is its accessible name, and the `Signal<String>` is synchronized in both directions. `text_input_value` and `text_area_value` take a `Signal<TextValue>` instead: a `TextValue` (`zgx::text`) holds a long document (over 64 KiB) in shared chunks: the editor, its layout, its accessibility value and the signal then hold one copy of it, an edit's new value shares every chunk the edit did not touch, and a document set on the signal is taken as it is rather than copied. Use it for documents; a `String` is as cheap for short text. IME preedit remains local until committed. Selection, undo, clipboard, and native IME placement use the mounted editor's lifecycle.
