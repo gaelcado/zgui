@@ -6,7 +6,7 @@
 <script>
   const copied = new WeakMap<HTMLButtonElement, number>();
   function decorate() {
-    for (const pre of document.querySelectorAll<HTMLPreElement>('.prose pre.shiki')) {
+    for (const pre of document.querySelectorAll<HTMLPreElement>('.prose pre.shiki, .prose pre.astro-code')) {
       if (pre.parentElement?.classList.contains('code-frame')) continue;
       const frame = document.createElement('div');
       frame.className = 'code-frame';

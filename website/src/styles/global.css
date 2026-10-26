@@ -64,7 +64,7 @@ html > body[data-scroll-locked] {
   position: relative;
   margin: 1.25em 0;
 }
-.prose pre.shiki {
+.prose :is(pre.shiki, pre.astro-code) {
   margin: 0;
   padding: 0.9rem 1rem;
   overflow-x: auto;
@@ -74,11 +74,11 @@ html > body[data-scroll-locked] {
   font-size: 0.8125rem;
   line-height: 1.6;
 }
-.prose pre.shiki:focus-visible {
+.prose :is(pre.shiki, pre.astro-code):focus-visible {
   outline: 2px solid var(--color-fd-ring);
   outline-offset: 2px;
 }
-.prose pre.shiki code {
+.prose :is(pre.shiki, pre.astro-code) code {
   background: none;
   border: 0;
   padding: 0;
