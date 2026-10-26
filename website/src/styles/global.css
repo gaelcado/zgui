@@ -1082,3 +1082,10 @@ tr[data-fw='zgx-luau'] .perf-bar {
     animation: none;
   }
 }
+
+@media (max-width: 640px) {
+  /* A wide table scrolls sideways rather than squeezing its prose to a word a line. */
+  .prose table:not(.perf-table) td {
+    min-width: 9.5rem;
+  }
+}
