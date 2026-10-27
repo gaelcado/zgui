@@ -1,5 +1,6 @@
 ---
-// One scene of the Windows run: what it draws, then each metric it has.
+// One scene of the Windows run: what it draws, anything to read before its
+// figures (the slot), then each metric it has.
 import BarChart from './BarChart.astro';
 import { windows, scene as sceneOf, format } from '@/lib/perf-windows';
 
@@ -16,6 +17,7 @@ const info = windows.sceneText[scene];
 <p class="perf-note">
   {info?.note} {s.trials} trials. <a href={`https://github.com/zeronsh/zgx/tree/main/${s.run}`}>Raw data</a>
 </p>
+<slot />
 <div class="perf-charts">
   {metrics.map((metric) => <BarChart scene={scene} metric={metric} platform="windows" />)}
 </div>

@@ -6,8 +6,15 @@ description: zgx against GPUI Fast, MyGo and Rune on a Windows 11 PC, in its own
 import WinFacts from '@/components/perf/WinFacts.astro';
 import WinScene from '@/components/perf/WinScene.astro';
 import Startup from '@/components/perf/Startup.astro';
+import WinBehind from '@/components/perf/WinBehind.astro';
 
 <WinFacts />
+
+## Where zgx is furthest behind
+
+<WinBehind />
+
+## Startup
 
 <Startup platform="windows" />
 
@@ -25,9 +32,11 @@ import Startup from '@/components/perf/Startup.astro';
 
 ## Variable-height list
 
-<WinScene scene="vlist" />
+<WinScene scene="vlist">
 
-> **Why zgx's fling shows long frames here.** The list's fling ends slowly, under a pixel a refresh for its last ticks (160 px a tick decaying to 0.6). zgx scrolls in whole device pixels, as Chrome and Windows' own lists do, to keep text crisp, so in that tail some refreshes move nothing on screen and the capture counts them as long frames, though zgx presented on every refresh, its GPU work done within 0.2 ms of each present. At a steady 12 or 3 px a tick it shows none. Rune draws at fractional positions, which change its pixels on every tick.
+> **Why zgx's fling shows long frames here.** zgx scrolls in whole device pixels, as Chrome and Windows' own lists do, so text stays crisp. The fling ends slowly: its last ticks move the list less than a pixel each (160 px a tick, decaying to 0.6), so on some refreshes nothing moves on screen, and the capture counts those as long frames. zgx still presented on every refresh, its GPU work done within 0.2 ms of each present; scrolling a steady 12 or 3 px a tick, it shows none. Rune draws at fractional positions, so its pixels change on every tick.
+
+</WinScene>
 
 ## Data
 

@@ -1,7 +1,8 @@
 ---
 // Startup: launch to first content, from a run's `startup` (scripts/
 // build_site.py): macOS's against GPUI Fast with the same menu bar, or
-// Windows' against all three. Nothing when the run has none.
+// Windows' against all three. The page writes the heading; a run without
+// one says so under it.
 import { startup as macStartup, names as macNames, fmt, repo } from '@/lib/perf';
 import { windows } from '@/lib/perf-windows';
 
@@ -40,22 +41,21 @@ if (run?.medians.zgx) {
       rest: 'From launch to the window’s first drawn text.',
     };
   } else {
-    const at = order.indexOf('zgx');
-    const before = order.slice(0, at).map((f) => `${name(f)} (${ms(f)})`);
-    const after = order.slice(at + 1).map((f) => `${name(f)} (${ms(f)})`);
-    const list = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}` : xs[0]);
+    const ordinal = ['first', 'second', 'third', 'fourth', 'fifth'][order.indexOf('zgx')];
+    const counts = ['none', 'one', 'two', 'three', 'four', 'five'][order.length];
+    const rest = order.filter((f) => f !== 'zgx').map((f, i) => (i === 0 ? `${name(f)} takes ${ms(f)}` : `${name(f)} ${ms(f)}`));
     lead = {
-      strong: `zgx reaches its first content in ${ms('zgx')}.`,
-      rest: `After ${list(before)}${after.length ? `, before ${list(after)}` : ''}; from launch to the window’s first drawn text.`,
+      strong: `zgx draws its first text ${ms('zgx')} after launch, ${ordinal} of ${counts}.`,
+      rest: `${rest.slice(0, -1).join(', ')} and ${rest.at(-1)}.`,
     };
   }
 }
 ---
 
+{!(run && lead) && <p>This run measured no startup.</p>}
 {
   run && lead && (
-    <section class="startup not-prose" aria-labelledby={`startup-${platform}`}>
-      <h2 id={`startup-${platform}`}>Startup</h2>
+    <div class="startup not-prose">
       <p class="startup-lead">
         <strong>{lead.strong}</strong> <span>{lead.rest} {run.protocol}.</span>
       </p>
@@ -106,22 +106,13 @@ if (run?.medians.zgx) {
       <p class="startup-foot">
         Measured apart from the suite on {run.machine}, zgx at <a href={`${repo}/commit/${run.commit}`}><code>{run.commit.slice(0, 7)}</code></a>.
       </p>
-    </section>
+    </div>
   )
 }
 
 <style>
   .startup {
-    margin: 3rem 0 2rem;
-    padding-top: 1.4rem;
-    border-top: 1px solid var(--color-hairline);
-  }
-  .startup h2 {
-    margin: 0 0 0.8rem;
-    font-size: 1.4375rem;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    scroll-margin-top: 5.5rem;
+    margin: 0 0 2rem;
   }
   .startup-lead {
     margin: 0 0 1.5rem;

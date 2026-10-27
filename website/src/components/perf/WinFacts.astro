@@ -1,11 +1,10 @@
 ---
 // The Windows run's verdict, machine and what is different about its figures.
-import { windows, scene, worstRatios, repo } from '@/lib/perf-windows';
+import { windows, scene, repo } from '@/lib/perf-windows';
 
 const heavy = scene('heavy');
 const env = heavy.environment;
 const display = (env.displays ?? []).find((d: any) => d.main) ?? env.displays?.[0];
-const ratios = worstRatios();
 const date = heavy.started_utc.slice(0, 10);
 ---
 
@@ -22,31 +21,6 @@ const date = heavy.started_utc.slice(0, 10);
   <li><strong>GPU</strong> is time, not power: the app's own time on the GPU's 3D engines, and the compositor's (DWM) beside it. Windows reads no GPU power, so there is none here.</li>
   <li>Measured on its own and never ranked against the macOS run: the machines, displays and metrics differ.</li>
 </ul>
-{
-  ratios.length > 0 && (
-    <>
-      <h3 id="where-zgx-is-behind">Where zgx is furthest behind</h3>
-      <p>For each metric, zgx's median over the lowest rival's, in the test where it fares worst. Under 1, zgx uses less than every rival even there.</p>
-      <table>
-        <thead>
-          <tr><th scope="col">Metric</th><th scope="col">Ratio</th><th scope="col">Test</th><th scope="col">zgx</th><th scope="col">Lowest rival</th></tr>
-        </thead>
-        <tbody>
-          {ratios.map((r) => (
-            <tr>
-              <td>{r.metric}</td>
-              <td>{r.ratio.toFixed(2)}×</td>
-              <td>{r.where}</td>
-              <td>{r.ours}</td>
-              <td>{r.rival} {r.theirs}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  )
-}
-
 <style>
   .win-facts {
     margin: 0 0 1rem;
