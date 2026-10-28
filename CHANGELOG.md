@@ -39,6 +39,7 @@ Two behaviours change, each below with what to check: a radio's, check box's, sw
 - `ScriptHost::on_error` hears an error raised again with the same message; it heard only the first.
 - A script's error banner shows over an open modal or popover and dismisses with its ×. Under a modal, the click went to the modal's backdrop, which closed the modal and left the error.
 - **A Luau app starts with Luau 744's bytecode** (luau0-src 0.22.1, which compiles to bytecode version 13): mlua-sys took versions up to 11, read the rest as text and refused it (`attempt to load a text chunk`). zgx-mlua 0.12.5 checks bytecode by the versions Luau 0.22 loads, and the `luau0-src = "=0.22.0"` pin goes.
+- A list or a heading that is itself the selectable root (`column().role(Role::List).selectable(true)`, `text(..).heading(2).selectable(true)`) copies as HTML as a list (`<ol start="3">`, `<ul>`) or a heading (`<h2>`), as it does inside a selectable box. It copied as a paragraph.
 - A list that follows its end (`VariableHeights::anchor_end`, Luau `ui.list { follow = true }` with `measured` or `heights`) follows its first rows after being empty: a transcript with no messages yet, or one cleared and filled again, stayed at its top.
 - `on_event` hears the first event of a stream that starts with a byte order mark, which it dropped as an unknown field. `on_chunk` still gets the mark.
 - `on_chunk` text keeps a character split across two pieces of a body when an invalid byte comes before it. It turned the character into U+FFFDs, where decoding the whole body keeps it.
