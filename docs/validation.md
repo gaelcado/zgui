@@ -934,7 +934,14 @@ it sends its own key window ⌘=, ⌘=, ⌘- and ⌘0
 size as they change. It checks that the keys step through Chrome's levels,
 that the viewport in points follows the zoom (480×360 at 100%, 384×288 at
 125%), and that text keeps its size in points. Passed on macOS 26 (M5),
-2026-10-26.
+2026-10-26. Then again with `--inset` (an inset title bar, a mark beside the
+traffic lights in its 40-point strip): the close button's centre, read from
+AppKit, is 20 × the zoom points below the window's top at each step (22 at
+110%, 25 at 125%, 20 again at 100%), the traffic lights moving with the
+zoomed strip rather than staying where AppKit put them. A window opened
+zoomed or resized while zoomed keeps them there (zoom_probe `--inset --zoom
+2`, resized to 620×420: 40 points, read from screen captures). Passed on
+macOS 27 (M4), 2026-10-26.
 
 ## macOS caret (Core Animation's)
 

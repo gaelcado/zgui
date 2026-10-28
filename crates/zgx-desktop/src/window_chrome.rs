@@ -11,7 +11,8 @@ pub enum Titlebar {
     Standard,
     /// Transparent, without the title: content runs under it, the window
     /// buttons (the traffic lights) inset over it in a 40-point strip, as
-    /// Electron's `hiddenInset`. Mark the strip `View::window_drag` so it
+    /// Electron's `hiddenInset`; a zoomed window's strip is 40 of its zoomed
+    /// points, the traffic lights centred in it (`zoom_buttons`). Mark the strip `View::window_drag` so it
     /// moves the window. On Windows, zgx draws Windows 11's caption buttons
     /// over the content's top right (46 by 32 points each) and Windows takes
     /// them for its own: their tooltips, and snap layouts on maximize. On
@@ -133,6 +134,22 @@ pub(crate) fn apply(
         let _ = (window, titlebar, glass);
         0.
     }
+}
+
+/// Place an inset title bar's window buttons for a window zoomed to `zoom`
+/// (`Ui::zoom`): on macOS the traffic lights, which AppKit places in points
+/// the zoom does not touch, move to where the zoomed content's strip has
+/// them (centred in 40 × zoom points, as far in as the zoom makes AppKit's
+/// inset), so a title bar laid out around them lines up at any zoom. Back at
+/// 100%, AppKit's places. AppKit lays them out again as the window resizes:
+/// the host calls this after.
+pub(crate) fn zoom_buttons(window: &winit::window::Window, titlebar: Titlebar, zoom: f64) {
+    #[cfg(target_os = "macos")]
+    if titlebar == Titlebar::Inset {
+        mac::zoom_buttons(window, zoom);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, titlebar, zoom);
 }
 
 /// The title bar's free area and the window's buttons in it, in points
@@ -1966,6 +1983,104 @@ mod mac {
     /// title bar's own height, so a toolbar's taller bar, a right-to-left
     /// layout (buttons at the right, the strip left of them) and hidden
     /// buttons come out as AppKit lays them out. None in fullscreen.
+    /// AppKit's own places for a window's traffic lights, in its frame's
+    /// points: the first's left, the step from one to the next, the
+    /// centres' distance below the top, and the title bar container's
+    /// height. Kept from before zgx first moves them.
+    #[derive(Clone, Copy)]
+    struct Buttons {
+        left: f64,
+        step: f64,
+        centre: f64,
+        container: f64,
+    }
+    thread_local! {
+        static BUTTONS: std::cell::RefCell<std::collections::HashMap<isize, Buttons>> =
+            Default::default();
+    }
+
+    pub(super) fn zoom_buttons(window: &winit::window::Window, zoom: f64) {
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        let Some(window) = ns_window(window) else {
+            return;
+        };
+        if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
+            return;
+        }
+        // NSWindowCloseButton, MiniaturizeButton, ZoomButton.
+        let buttons: Vec<Retained<NSView>> = [0_usize, 1, 2]
+            .into_iter()
+            .filter_map(|button| {
+                // SAFETY: `-standardWindowButton:` takes an NSUInteger and
+                // returns an NSButton (a view) or nil, retained here.
+                unsafe { msg_send![&*window, standardWindowButton: button] }
+            })
+            .collect();
+        let [close, next, ..] = buttons.as_slice() else {
+            return;
+        };
+        let height = window.frame().size.height;
+        // A view's frame in the window's (bottom-up) points.
+        let in_window = |view: &NSView| view.convertRect_toView(view.bounds(), None);
+        // SAFETY: a superview clears its subviews' back pointer as it lets
+        // them go, so one still set is alive (main thread).
+        let Some(container) =
+            (unsafe { close.superview() }).and_then(|bar| unsafe { bar.superview() })
+        else {
+            return;
+        };
+        // AppKit's own layout first (a resize leaves it pending): done now, it
+        // has nothing left to put back over what follows.
+        container.layoutSubtreeIfNeeded();
+        let number = window.windowNumber();
+        let base = BUTTONS.with_borrow_mut(|known| {
+            *known.entry(number).or_insert_with(|| {
+                let (first, second) = (in_window(close), in_window(next));
+                Buttons {
+                    left: first.origin.x,
+                    step: second.origin.x - first.origin.x,
+                    centre: height - (first.origin.y + first.size.height / 2.),
+                    container: container.frame().size.height,
+                }
+            })
+        });
+        // Room for them: the container at the window's top (placed from the
+        // window's height, not its own frame: a resize moves it later) and at
+        // least as tall as they reach.
+        let size = close.frame().size;
+        let reach = (base.centre * zoom + size.height / 2. + 4.).max(base.container);
+        let wanted = if zoom == 1. { base.container } else { reach };
+        // SAFETY: as above, a set back pointer is a live superview.
+        if let Some(frame_view) = unsafe { container.superview() } {
+            let bounds = frame_view.bounds();
+            let y = match frame_view.isFlipped() {
+                true => 0.,
+                false => bounds.size.height - wanted,
+            };
+            let placed = NSRect::new(NSPoint::new(0., y), NSSize::new(bounds.size.width, wanted));
+            if container.frame() != placed {
+                container.setFrame(placed);
+            }
+        }
+        for (index, button) in buttons.iter().enumerate() {
+            let x = base.left * zoom + base.step * index as f64;
+            let y = height - base.centre * zoom - size.height / 2.;
+            // SAFETY: as above, a set back pointer is a live superview.
+            let Some(bar) = (unsafe { button.superview() }) else {
+                continue;
+            };
+            let origin = bar.convertPoint_fromView(NSPoint::new(x, y), None);
+            if button.frame().origin != origin {
+                button.setFrameOrigin(origin);
+            }
+        }
+        // Back in AppKit's places: read them again next time (another window
+        // may take this one's number).
+        if zoom == 1. {
+            BUTTONS.with_borrow_mut(|known| known.remove(&number));
+        }
+    }
+
     pub(super) fn titlebar_area(
         window: &winit::window::Window,
     ) -> (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>) {

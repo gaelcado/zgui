@@ -2716,6 +2716,11 @@ impl Host {
         self.state.maximized |= placed.maximized;
         let radius =
             crate::window_chrome::apply(&window, self.options.titlebar, self.options.glass);
+        // Opened zoomed: its buttons where the zoomed title bar has them.
+        let zoom = self.context.ui.zoom();
+        if zoom != 1. {
+            crate::window_chrome::zoom_buttons(&window, self.options.titlebar, zoom);
+        }
         // A saved frame keeps its size.
         if self.options.titlebar != crate::Titlebar::Standard && !placed.restored {
             // Content now spans the title bar: the window shrinks to give
@@ -3421,6 +3426,25 @@ impl Host {
                 {
                     self.reported_size = Some(size);
                 }
+                // AppKit lays the window's buttons out again: zoomed, they go
+                // back where the title bar has them, now and once its layout
+                // for the new size is done.
+                let zoom = self.context.ui.zoom();
+                if zoom != 1.
+                    && let Some(window) = &self.window
+                {
+                    let titlebar = self.options.titlebar;
+                    crate::window_chrome::zoom_buttons(window, titlebar, zoom);
+                    self.context.window_info.refresh(window, titlebar);
+                    #[cfg(target_os = "macos")]
+                    {
+                        let window = window.clone();
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            let zoom = crate::popup_window::zoom_of(window.id());
+                            crate::window_chrome::zoom_buttons(&window, titlebar, zoom);
+                        });
+                    }
+                }
                 if size.width > 0 && size.height > 0 {
                     self.presentation.expose();
                 }
@@ -4075,6 +4099,16 @@ impl Host {
                 window.inner_size(),
                 scale,
             );
+            // The platform's buttons where the zoomed title bar has them.
+            crate::window_chrome::zoom_buttons(
+                &window,
+                self.options.titlebar,
+                self.context.ui.zoom(),
+            );
+            // And where scripts read them (`ui.window.controls`).
+            self.context
+                .window_info
+                .refresh(&window, self.options.titlebar);
             window.request_redraw();
         }
         self.context.ui.refresh_text_geometry();
