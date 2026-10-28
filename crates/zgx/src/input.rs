@@ -1374,6 +1374,12 @@ impl InputDispatcher {
         }
         true
     }
+    /// The node a key went to, if it is still there and still focused: its
+    /// listeners may have removed it or moved focus on (a dialog's button
+    /// closing the dialog), and what has focus now did not hear the key.
+    fn still_targeted(&self, scene: &Rc<RefCell<Scene>>, target: Option<NodeId>) -> Option<NodeId> {
+        target.filter(|id| self.focused() == Some(*id) && scene.borrow().contains(*id))
+    }
     /// Whether `node` can take input now: shown, not disabled itself or by
     /// an ancestor, not transparent, and inside the active modal scope.
     pub fn is_enabled(&self, scene: &Scene, node: NodeId) -> bool {
@@ -2450,7 +2456,10 @@ impl InputDispatcher {
                     ..
                 } => {
                     self.state.borrow_mut().key_pressed = None;
-                    if let Some(id) = self.focused().filter(|id| self.activates(*id, &Key::Enter)) {
+                    if let Some(id) = self
+                        .still_targeted(scene, target)
+                        .filter(|id| self.activates(*id, &Key::Enter))
+                    {
                         self.dispatch_to(scene, id, InputEvent::Activate);
                     }
                 }
@@ -2461,7 +2470,7 @@ impl InputDispatcher {
                     ..
                 } => {
                     let pressed = self
-                        .focused()
+                        .still_targeted(scene, target)
                         .filter(|id| self.activates(*id, &Key::Space))
                         .map(|id| (id, Key::Space));
                     self.state.borrow_mut().key_pressed = pressed;
