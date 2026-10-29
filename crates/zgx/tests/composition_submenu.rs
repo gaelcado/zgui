@@ -1,6 +1,6 @@
 use std::{cell::Cell, rc::Rc};
 use zgx::{
-    compose::prelude::*,
+    compose::{Placement, prelude::*},
     input::{InputEvent, PointerButton},
     widgets::Ui,
 };
@@ -140,4 +140,33 @@ fn right_to_left_the_arrows_open_and_close_submenus_mirrored() {
     key(&mut ui, Key::ArrowRight);
     assert!(!child.get());
     assert_eq!(ui.input.focused(), Some(more), "back on its trigger");
+}
+
+#[test]
+fn a_submenu_opens_its_placements_offset_beside_its_trigger() {
+    // Four points away unless its placement says how far (Zeron's nested
+    // cards stand off their row by its card's inset and 6).
+    let mut starts = Vec::new();
+    for placement in [None, Some(10.)] {
+        let mut ui = Ui::new(900., 600.);
+        let (root, child) = (ui.signal(true), ui.signal(true));
+        let mut more = submenu("More", child.clone())
+            .trigger_id("more")
+            .child(menu_item("Child").id("child"));
+        if let Some(offset) = placement {
+            more = more.placement(Placement {
+                offset,
+                ..Default::default()
+            });
+        }
+        let mounted =
+            ui.mount(menu("Actions", root.clone(), button().child(text("Actions"))).child(more));
+        ui.prepare_frame();
+        ui.prepare_frame();
+        let scene = ui.scene.borrow();
+        let trigger = scene.bounds(mounted.find("more").unwrap());
+        let item = scene.bounds(mounted.find("child").unwrap());
+        starts.push(item.x - (trigger.x + trigger.width));
+    }
+    assert_eq!(starts[1] - starts[0], 6.);
 }

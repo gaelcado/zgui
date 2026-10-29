@@ -132,6 +132,43 @@ export type function VariantProps(recipe)
 	return out
 end
 
+-- An axis's option names alone, without the states and functions a recipe
+-- also takes: the type of a prop the component reads itself (a `size`
+-- choosing its metrics). `VariantOption<typeof(button), "size">` is
+-- `"sm" | "md" | "lg"`; an on-off axis is `boolean`.
+export type function VariantOption(recipe, axis)
+	if not recipe:is("function") then
+		return types.never
+	end
+	local head: { type } = recipe:parameters().head or {}
+	local choice: type? = head[1]
+	if not choice or not choice:is("table") then
+		return types.never
+	end
+	local option = choice:readproperty(axis)
+	if not option then
+		return types.never
+	end
+	local function keep(t: type): boolean
+		return t:is("singleton") or t:is("boolean")
+	end
+	if not option:is("union") then
+		return if keep(option) then option else types.never
+	end
+	local names: { type } = {}
+	for _, part in option:components() do
+		if keep(part) then
+			names[#names + 1] = part
+		end
+	end
+	if #names == 0 then
+		return types.never
+	elseif #names == 1 then
+		return names[1]
+	end
+	return types.unionof(table.unpack(names))
+end
+
 -- A table's fields, each optional: what `state:patch` takes.
 type function Partial(t)
 	if t:is("any") then
@@ -408,13 +445,6 @@ export type Tokens = {
 		bg: string,
 		hover: string,
 	},
-	monitor: {
-		cpu: string,
-		gpu: string,
-		memory: string,
-		panel: string,
-		wash: string,
-	},
 	motion: {
 		duration: {
 			fast: string,
@@ -637,6 +667,8 @@ export type SortedSpec<T> = {
 }
 -- What a property bound to state reads: any state whose value is a `T`.
 export type Readable<T> = { read get: (self: never) -> T }
+-- A textarea gutter's marked line (`gutter.marks`): its line from 1.
+export type GutterMark = { id: string, line: number }
 
 ---------------------------------------------------------------------------
 -- Engine objects.
@@ -927,6 +959,30 @@ export type LineJoin = "miter" | "round" | "bevel"
 export type LineOptions = { cap: LineCap?, join: LineJoin?, dash: { number }?, dash_offset: number?, [number]: never }
 -- `draw` strokes a fraction of the path (`0.5`) or a span of it
 -- (`{ start, end }`), as anime.js draws SVG lines.
+-- `ui.mermaid`'s colours: the theme's roles, as `#rrggbb` or `#rrggbbaa`.
+export type MermaidColours = {
+	dark: boolean?,
+	font: string?,
+	bg: string?,
+	text: string?,
+	muted: string?,
+	faint: string?,
+	border: string?,
+	strong: string?,
+	accent: string?,
+}
+-- A drawn diagram: its SVG and natural size.
+export type MermaidDiagram = { svg: string, w: number, h: number }
+-- A formula `ui.math` laid out, in ems of the text it sits in: its SVG
+-- (painted in `currentColor`), width, height, and how far it reaches above
+-- and below the baseline.
+export type MathFormula = { svg: string, w: number, h: number, ascent: number, descent: number }
+export type MathOptions = {
+	-- Display style (`$$…$$`): large operators, limits above and below.
+	display: boolean?,
+	-- The bundled face, Fira Math unless said.
+	face: ("fira" | "stix" | "computer_modern" | "libertinus" | "pagella" | "euler")?,
+}
 export type MarkdownOptions = {
 	-- Names a text that grows (a streaming reply): parsed incrementally.
 	key: string?,
@@ -934,23 +990,34 @@ export type MarkdownOptions = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files: runs with `f`.
 	paths: boolean?,
+	-- Each top-level block says the line it starts on (`line`, from 1):
+	-- what a comment on a document's block cites.
+	lines: boolean?,
+	-- TeX math: `$…$` a run with `m` (its source in `x`), `$$…$$` in a
+	-- paragraph a `math` block (its source in `tex`); dollars that read as
+	-- amounts or code stay text.
+	math: boolean?,
 }
 -- A run of a block's text: `x`, and whether it is bold (`b`), italic
 -- (`i`), code (`c`), struck (`s`), a link (`a`, where to) or a repository
 -- file (`f`, with `paths`).
-export type MarkdownRun = { x: string, b: boolean?, i: boolean?, c: boolean?, s: boolean?, a: string?, f: string? }
+-- A run of `ui.markdown`'s text; `img`, an image's source (`x` its alt).
+export type MarkdownRun =
+	{ x: string, b: boolean?, i: boolean?, c: boolean?, s: boolean?, a: string?, f: string?, img: string?, m: boolean? }
 -- A block of `ui.markdown`'s, by its `t`: refine on it (`if b.t == "code"`)
--- and its fields are typed.
+-- and its fields are typed. `line`: where a top-level block starts in the
+-- text, from 1 (with `lines`).
 export type MarkdownBlock =
-	{ t: "p", s: { MarkdownRun }, tight: boolean? }
-	| { t: "h", l: number, s: { MarkdownRun } }
-	| { t: "code", lang: string, text: string, [string]: any }
-	| { t: "ul", items: { { MarkdownBlock } } }
-	| { t: "ol", start: number, items: { { MarkdownBlock } } }
-	| { t: "quote", b: { MarkdownBlock } }
-	| { t: "hr" }
-	| { t: "table", head: { { MarkdownRun } }, rows: { { { MarkdownRun } } } }
-	| { t: "img", src: string, alt: string }
+	{ t: "p", s: { MarkdownRun }, tight: boolean?, line: number? }
+	| { t: "h", l: number, s: { MarkdownRun }, line: number? }
+	| { t: "code", lang: string, text: string, line: number?, open: boolean?, [string]: any }
+	| { t: "ul", items: { { MarkdownBlock } }, line: number? }
+	| { t: "ol", start: number, items: { { MarkdownBlock } }, line: number? }
+	| { t: "quote", b: { MarkdownBlock }, line: number? }
+	| { t: "hr", line: number? }
+	| { t: "table", head: { { MarkdownRun } }, rows: { { { MarkdownRun } } }, line: number? }
+	| { t: "img", src: string, alt: string, line: number? }
+	| { t: "math", tex: string, line: number? }
 
 export type StrokeOptions = {
 	cap: LineCap?,
@@ -983,6 +1050,9 @@ declare extern type Web with
 	can_go_forward: boolean
 	focused: boolean
 	error: string?
+	-- Whether the platform's page exists yet: a window showing pages
+	-- makes it as the view first mounts (false headless).
+	attached: boolean
 	-- The pointer over the page, in points from its top left; nil outside.
 	-- (Over a page zgx hears no pointer moves: its nodes had their leave.)
 	pointer: { x: number, y: number }?
@@ -1016,6 +1086,15 @@ export type WebOptions = {
 	[number]: never,
 }
 export type WebEvent = { kind: "started" | "committed" | "finished" | "failed" | "changed", url: string }
+-- A navigation about to start, as a web view's `navigation` decides it:
+-- where it goes, whether the top frame goes (not an iframe), what started
+-- it, and the page of the frame that did ("" for the app's own).
+export type NavigationRequest = {
+	url: string,
+	main_frame: boolean,
+	kind: "link" | "form" | "back_forward" | "reload" | "form_resubmission" | "other",
+	source_url: string,
+}
 
 -- `ui.term(id, opts)`: a terminal session (a Ghostty surface with the
 -- desktop host's `ghostty` feature). Sessions outlive reloads: the run that
@@ -1066,6 +1145,10 @@ declare extern type Term with
 	function paste(self, text: string): ()
 	-- A Ghostty binding action: "copy_to_clipboard", "clear_screen", ...
 	function binding(self, action: string): ()
+	-- Ghostty's configuration lines over the app's ("background = #090909",
+	-- "palette = 1=#f87171", "font-family = Geist Mono"), replacing what was
+	-- configured before; the same again does nothing.
+	function configure(self, config: string): ()
 	-- Whether closing would end something other than an idle shell.
 	function needs_confirm(self): boolean
 	-- A picture of what it shows now, at most `max_width` pixels wide (480
@@ -1082,6 +1165,8 @@ export type TermOptions = {
 	cwd: string?,
 	env: { [string]: string }?,
 	font_size: number?,
+	-- Ghostty's configuration lines over the app's (see `Term:configure`).
+	config: string?,
 	-- Handlers (the latest run's are called).
 	on_title: ((title: string) -> ...unknown)?,
 	on_pwd: ((pwd: string) -> ...unknown)?,
@@ -1105,13 +1190,21 @@ export type CommandOptions = {
 	id: string?,
 	-- Defaults to the id.
 	title: string?,
-	-- "File" (the default), "Edit", "View", "Window" or any other menu.
+	-- "File" (the default), "Edit", "View", "Window" or any other menu;
+	-- "app" is the application's own (on macOS, the one named for the
+	-- app, its items above Services, Hide and Quit).
 	menu: string?,
 	-- Modifiers and a key joined by "+": "cmd+shift+d", "cmd+alt+arrowleft".
 	key: string?,
 	run: (() -> ...unknown)?,
 	-- A separator line in `menu` instead of a command.
 	separator: boolean?,
+	-- One of the platform's own edit items instead of a command, sent to
+	-- whatever has focus (a field's or a page's selection): no id or run.
+	standard: ("undo" | "redo" | "cut" | "copy" | "paste" | "select_all")?,
+	-- The application's About item instead of a command (macOS's about
+	-- panel, with the app's name and version): no id or run.
+	about: { name: string, version: string? }?,
 	[number]: never,
 }
 
@@ -1153,6 +1246,9 @@ export type WindowApi = ((opts: WindowOptions) -> ()) & {
 	controls: State<WindowRect?>,
 	zoom: State<number>,
 	zoomable: State<boolean>,
+	-- Whether the app's window is the active one (false while another
+	-- app's is in front): what animates can hold still at the back.
+	active: State<boolean>,
 }
 
 ---------------------------------------------------------------------------
@@ -1165,6 +1261,10 @@ export type Reactive<T> = T | Readable<T> | (() -> T) | Binding
 export type TextValue = (string | number | boolean)?
 -- Text: a string (`"{name}"` shows the state named `name`), a number, or
 -- a function of state.
+-- A name for assistive technology (and what a menu item shows): a message
+-- (`ui.t`) or a state or function is followed, the locale or the state
+-- changing it.
+export type Label = string | Message | Readable<string> | (() -> string)
 export type Text = string | number | (() -> TextValue) | Message
 -- Children: nodes, strings (text), functions (computed text) and lists of
 -- them, which flatten; `false` and `nil` are skipped.
@@ -1346,10 +1446,10 @@ export type Styles = {
 	bg_fit: Fit?,
 	rounded: Num?,
 	corners: Corners?,
-	rounded_tl: number?,
-	rounded_tr: number?,
-	rounded_br: number?,
-	rounded_bl: number?,
+	rounded_tl: Num?,
+	rounded_tr: Num?,
+	rounded_br: Num?,
+	rounded_bl: Num?,
 	border: Num?,
 	border_sides: Sides?,
 	border_color: Color?,
@@ -1377,6 +1477,8 @@ export type Styles = {
 	fade_sides: Sides?,
 	-- Fade an edge only as far as content runs past it (a list at its top shows no top band).
 	fade_overflow: boolean?,
+	-- With fade_overflow, a band keeps its width and slides in as content runs past (a label's end fading as it grows too long).
+	fade_eased: boolean?,
 	-- Lay its edges on whole points (crisp borders where percentages leave fractions).
 	snap: boolean?,
 	-- Zoom what it holds, as CSS's `zoom`: its lengths and text this many times
@@ -1520,10 +1622,10 @@ export type StyleProps = {
 	bg_fit: Reactive<Fit>?,
 	rounded: Reactive<Num>?,
 	corners: Reactive<Corners>?,
-	rounded_tl: Reactive<number>?,
-	rounded_tr: Reactive<number>?,
-	rounded_br: Reactive<number>?,
-	rounded_bl: Reactive<number>?,
+	rounded_tl: Reactive<Num>?,
+	rounded_tr: Reactive<Num>?,
+	rounded_br: Reactive<Num>?,
+	rounded_bl: Reactive<Num>?,
 	border: Reactive<Num>?,
 	border_sides: Reactive<Sides>?,
 	border_color: Reactive<Color>?,
@@ -1546,6 +1648,7 @@ export type StyleProps = {
 	fade_x: Reactive<Pair>?,
 	fade_sides: Reactive<Sides>?,
 	fade_overflow: Reactive<boolean>?,
+	fade_eased: Reactive<boolean>?,
 	snap: Reactive<boolean>?,
 	zoom: Reactive<number>?,
 	zoom_fixed: Reactive<boolean>?,
@@ -1673,6 +1776,9 @@ export type NodeProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: ("vertical" | "horizontal" | "both")?,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: boolean?,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -1696,8 +1802,10 @@ export type NodeProps = {
 	selected_text_color: Reactive<Color>?,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
-	tooltip: (string | Node)?,
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: (string | Node | (() -> Node))?,
 	tooltip_placement: Placement?,
 	-- A hover card the pointer can move into and click in: it stays while
 	-- the pointer is over the node or the card.
@@ -1710,6 +1818,11 @@ export type NodeProps = {
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Styles?,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: boolean?,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -1742,6 +1855,9 @@ export type NodeProps = {
 	on_aux_click: (((e: AuxClickEvent) -> ...unknown) | Action)?,
 	on_hover: (((inside: boolean) -> ...unknown) | Action)?,
 	on_pointer_move: (((e: PointerEvent) -> ...unknown) | Action)?,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Return true to consume the key.
 	on_key: (((e: KeyEvent) -> ...boolean?) | Action)?,
 	on_key_up: (((key: string) -> ...unknown) | Action)?,
@@ -1914,6 +2030,7 @@ export type Props = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -2004,6 +2121,9 @@ export type Props = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -2027,7 +2147,9 @@ export type Props = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -2041,6 +2163,11 @@ export type Props = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2073,6 +2200,9 @@ export type Props = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -2206,10 +2336,10 @@ export type Props_bg_image = Reactive<string>?
 export type Props_bg_fit = Reactive<Fit>?
 export type Props_rounded = Reactive<Num>?
 export type Props_corners = Reactive<Corners>?
-export type Props_rounded_tl = Reactive<number>?
-export type Props_rounded_tr = Reactive<number>?
-export type Props_rounded_br = Reactive<number>?
-export type Props_rounded_bl = Reactive<number>?
+export type Props_rounded_tl = Reactive<Num>?
+export type Props_rounded_tr = Reactive<Num>?
+export type Props_rounded_br = Reactive<Num>?
+export type Props_rounded_bl = Reactive<Num>?
 export type Props_border = Reactive<Num>?
 export type Props_border_sides = Reactive<Sides>?
 export type Props_border_color = Reactive<Color>?
@@ -2231,6 +2361,7 @@ export type Props_fade = Reactive<Pair>?
 export type Props_fade_x = Reactive<Pair>?
 export type Props_fade_sides = Reactive<Sides>?
 export type Props_fade_overflow = Reactive<boolean>?
+export type Props_fade_eased = Reactive<boolean>?
 export type Props_snap = Reactive<boolean>?
 export type Props_zoom = Reactive<number>?
 export type Props_zoom_fixed = Reactive<boolean>?
@@ -2286,6 +2417,7 @@ export type Props_description = string?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = boolean?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
+export type Props_focus_wrap = boolean?
 export type Props_pointer_events = (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?
 export type Props_window_drag = boolean?
 export type Props_hook = (string | boolean)?
@@ -2293,7 +2425,7 @@ export type Props_private = boolean?
 export type Props_selectable = boolean?
 export type Props_selection_color = Reactive<Color>?
 export type Props_selected_text_color = Reactive<Color>?
-export type Props_tooltip = (string | Node)?
+export type Props_tooltip = (string | Node | (() -> Node))?
 export type Props_tooltip_placement = Placement?
 export type Props_tooltip_interactive = boolean?
 export type Props_tooltip_delay = number?
@@ -2301,6 +2433,8 @@ export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | St
 export type Props_hover = Styles?
 export type Props_active = Styles?
 export type Props_focus = Styles?
+export type Props_group_hover = Styles?
+export type Props_hover_group = boolean?
 export type Props_layout = ("height" | "width" | "size" | "position" | boolean)?
 export type Props_layout_id = string?
 export type Props_layout_ease = Easing?
@@ -2318,6 +2452,7 @@ export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_aux_click = (((e: AuxClickEvent) -> ...unknown) | Action)?
 export type Props_on_hover = (((inside: boolean) -> ...unknown) | Action)?
 export type Props_on_pointer_move = (((e: PointerEvent) -> ...unknown) | Action)?
+export type Props_on_press_move = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_key = (((e: KeyEvent) -> ...boolean?) | Action)?
 export type Props_on_key_up = (((key: string) -> ...unknown) | Action)?
 export type Props_on_focus = (Handler | Action)?
@@ -2447,6 +2582,7 @@ export type ContainerProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -2537,6 +2673,9 @@ export type ContainerProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -2560,7 +2699,9 @@ export type ContainerProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -2574,6 +2715,11 @@ export type ContainerProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2606,6 +2752,9 @@ export type ContainerProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -2674,7 +2823,7 @@ export type ContainerProps = {
 	-- The name assistive technology reads for it, instead of its text: a
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
-	label: (string | Readable<string> | (() -> string))?,
+	label: Label?,
 }
 export type ScrollProps = {
 	-- Size and position.
@@ -2778,6 +2927,7 @@ export type ScrollProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -2868,6 +3018,9 @@ export type ScrollProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -2891,7 +3044,9 @@ export type ScrollProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -2905,6 +3060,11 @@ export type ScrollProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -2937,6 +3097,9 @@ export type ScrollProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -3005,13 +3168,19 @@ export type ScrollProps = {
 	-- The name assistive technology reads for it, instead of its text: a
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
-	label: (string | Readable<string> | (() -> string))?,
+	label: Label?,
 	-- The scroll position in points, both ways.
 	offset: State<number>?,
-	-- Stays at the end while the content grows, until scrolled away.
 	-- An interactive scrollbar over the trailing edge (none by default).
 	scrollbar: boolean?,
-	follow: boolean?,
+	-- Stays at the end while the content grows, until scrolled away; a
+	-- state: only while it holds (a chat while a reply streams); what
+	-- grows otherwise extends below, the view staying where it is.
+	follow: (boolean | Readable<boolean>)?,
+	-- Written by the scroll: whether it shows its end (a "scroll to
+	-- bottom" pill shows while it does not). It changes only when that
+	-- does; set `offset` to `math.huge` to go to the end.
+	at_end: State<boolean>?,
 }
 -- `ui.text { "Count: {count}", text_size = 18 }`: the text first.
 export type TextProps = {
@@ -3116,6 +3285,7 @@ export type TextProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -3206,6 +3376,9 @@ export type TextProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -3229,7 +3402,9 @@ export type TextProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -3243,6 +3418,11 @@ export type TextProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3275,6 +3455,9 @@ export type TextProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -3446,6 +3629,7 @@ export type MarkdownViewProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -3536,6 +3720,9 @@ export type MarkdownViewProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -3559,7 +3746,9 @@ export type MarkdownViewProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -3573,6 +3762,11 @@ export type MarkdownViewProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3605,6 +3799,9 @@ export type MarkdownViewProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -3701,9 +3898,22 @@ export type SpanProps = {
 		src: string?,
 		code: string?,
 		size: number?,
+		-- Its width and height, if not `size` square (a formula's box).
+		w: number?,
+		h: number?,
+		-- How far below the baseline its bottom sits: set on the baseline
+		-- (a formula's descent), not centred on the line. A line grows to
+		-- hold an icon taller than it.
+		descent: number?,
 		gap: number?,
 		tint: Color?,
+		-- After the text instead (a file link's open glyph).
+		after: boolean?,
 	}?,
+	-- What copying the run gives, and assistive technology reads, in
+	-- place of what shows: a formula drawn as an icon copies as its
+	-- source (`"$x^2$"`).
+	copy: string?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held.
 	on_click: (ClickHandler | Handler | Action)?,
@@ -3719,6 +3929,16 @@ export type SpanProps = {
 	padding: (number | { number })?,
 	-- The background's corner radius.
 	radius: number?,
+	-- A link's tooltip while the pointer rests on it (where it goes).
+	tooltip: string?,
+	-- A link's own menu on a secondary click, in place of Open Link and
+	-- Copy Link: `menu_item`s, `submenu`s and separators.
+	context_menu: ((e: PointerEvent) -> ...{ Node }?)?,
+	context_menu_style: Styles?,
+	-- Colours its lines as a code editor's `highlight` does (the same
+	-- function): each line is asked once, so a text that grows asks only
+	-- for its new lines.
+	highlight: ((line: string, state: number) -> ({ { any } }?, number?))?,
 }
 -- Runs: spans, strings, functions, or span options. `literal`: the runs'
 -- strings as they are (a span's own `literal` wins).
@@ -3824,6 +4044,7 @@ export type RichProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -3914,6 +4135,9 @@ export type RichProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -3937,7 +4161,9 @@ export type RichProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -3951,6 +4177,11 @@ export type RichProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -3983,6 +4214,9 @@ export type RichProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -4045,6 +4279,10 @@ export type RichProps = {
 	context_menu_below: Props_context_menu_below,
 	[number]: Span | Text | SpanProps,
 	literal: boolean?,
+	-- Appended text fades in as it streams (true), the fade kept under a
+	-- key (a string) across rebuilds, so a block built again with more
+	-- text fades only what it gained.
+	veil: (boolean | string)?,
 }
 export type ImageProps = {
 	-- Size and position.
@@ -4148,6 +4386,7 @@ export type ImageProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -4238,6 +4477,9 @@ export type ImageProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -4261,7 +4503,9 @@ export type ImageProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -4275,6 +4519,11 @@ export type ImageProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4307,6 +4556,9 @@ export type ImageProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -4374,7 +4626,7 @@ export type ImageProps = {
 	-- one, shown as it is.
 	src: Reactive<string> | Bitmap | Readable<Bitmap?> | (() -> Bitmap?),
 	-- For accessibility.
-	label: string?,
+	label: Label?,
 	-- Shown in its place while a remote picture loads and if it fails (an
 	-- avatar's initials).
 	fallback: Node?,
@@ -4482,6 +4734,7 @@ export type SvgProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -4572,6 +4825,9 @@ export type SvgProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -4595,7 +4851,9 @@ export type SvgProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -4609,6 +4867,11 @@ export type SvgProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -4641,6 +4904,9 @@ export type SvgProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -4704,7 +4970,7 @@ export type SvgProps = {
 	[number]: never,
 	src: Reactive<string>?,
 	code: string?,
-	label: string?,
+	label: Label?,
 }
 -- A 3D object of `ui.scene3d` (`ui.mesh`, `ui.light`, `ui.group`).
 declare extern type Object3D with
@@ -4882,6 +5148,7 @@ export type Scene3DProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -4972,6 +5239,9 @@ export type Scene3DProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -4995,7 +5265,9 @@ export type Scene3DProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -5009,6 +5281,11 @@ export type Scene3DProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5041,6 +5318,9 @@ export type Scene3DProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5215,6 +5495,7 @@ export type CanvasProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -5305,6 +5586,9 @@ export type CanvasProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -5328,7 +5612,9 @@ export type CanvasProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -5342,6 +5628,11 @@ export type CanvasProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5374,6 +5665,9 @@ export type CanvasProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5449,7 +5743,7 @@ export type CanvasProps = {
 	-- What it shows, read by assistive technology as an image's name (a
 	-- chart's summary: "Price, now 143.9, high 150.1"). A state or
 	-- function is followed. Without one, it is decoration.
-	label: (string | Readable<string> | (() -> string))?,
+	label: Label?,
 	-- Its drawing's pan and zoom, `{ x, y, zoom }`: drawn at `zoom` times
 	-- its size, then moved by `x`, `y` (a board's view). Followed without
 	-- calling `draw` again: a pan or zoom places what it drew.
@@ -5571,6 +5865,7 @@ export type CheckboxProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -5661,6 +5956,9 @@ export type CheckboxProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -5684,7 +5982,9 @@ export type CheckboxProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -5698,6 +5998,11 @@ export type CheckboxProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -5730,6 +6035,9 @@ export type CheckboxProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -5796,7 +6104,7 @@ export type CheckboxProps = {
 	-- One of a `ui.form`'s fields (`form.fields.email`): its value, its
 	-- leaving, its error (and, a one-line input, Enter submitting the form).
 	field: FormField?,
-	label: string?,
+	label: Label?,
 	-- Neither on nor off while true: a dash, and "mixed" to assistive
 	-- technology (a "select all" box with some of its group on).
 	mixed: State<boolean>?,
@@ -5903,6 +6211,7 @@ export type InputProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -5993,6 +6302,9 @@ export type InputProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -6016,7 +6328,9 @@ export type InputProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -6030,6 +6344,11 @@ export type InputProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6062,6 +6381,9 @@ export type InputProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -6136,13 +6458,17 @@ export type InputProps = {
 	-- The text on Enter, or on leaving the input changed: where an
 	-- inspector's field applies, and undo records.
 	on_commit: ((text: string) -> ...unknown)?,
-	label: string?,
+	label: Label?,
 	-- input only: several lines (textarea always has them).
 	multiline: boolean?,
 	-- Shown while the value is empty (never part of it), in the input's
 	-- typography and `placeholder_color`.
 	placeholder: (Reactive<string> | Message)?,
 	placeholder_color: Reactive<Color>?,
+	-- What completing would add, faint after the text while the caret
+	-- rests at its end (a single-line input's; Tab accepting it is the
+	-- app's): "" for none.
+	ghost: Reactive<string>?,
 	-- Focusing it selects all its text (an address bar).
 	select_on_focus: boolean?,
 	-- A password field: its text shows as a bullet per character, and
@@ -6157,6 +6483,9 @@ export type InputProps = {
 	-- menu offers guesses, Learn Spelling and Ignore Spelling. Not in a
 	-- password field. A state or function follows it (a setting).
 	spellcheck: (boolean | Readable<boolean> | (() -> boolean))?,
+	-- Shown, selected and copied from, never edited by the user (a file
+	-- that can't be saved); writes to its value still show.
+	read_only: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Several lines only: numbered in a gutter at the left (a code editor).
 	line_numbers: boolean?,
 	-- Several lines only: a line's colours, asked for the lines in view and
@@ -6190,6 +6519,70 @@ export type InputProps = {
 	-- column in characters) and the selection's anchor and focus in bytes
 	-- from 0 (as `selection_bytes`).
 	on_caret: ((line: number, column: number, anchor: number, focus: number) -> ())?,
+	-- With line_numbers: marked lines and presses in the gutter, and a card
+	-- under a line (review comments). A mark shows `mark` (an SVG's src)
+	-- on a well in its number's place and follows its line through edits;
+	-- `add` is offered on a 16-point plate under the pointer (no script
+	-- runs as it moves). `on_press` gets a pressed cell's line and its
+	-- mark's id (no caret placed, no focus taken); `on_move`, every mark
+	-- after an edit moved one. `card` shows under `card_line` (nil:
+	-- hidden), beside the gutter, inside the view, following the scroll.
+	gutter: {
+		marks: (Readable<{ GutterMark }> | (() -> { GutterMark }))?,
+		mark: string?,
+		mark_color: Reactive<Color>?,
+		mark_fill: Reactive<Color>?,
+		add: string?,
+		add_color: Reactive<Color>?,
+		add_fill: Reactive<Color>?,
+		label: string?,
+		on_press: ((line: number, id: string?) -> ())?,
+		on_move: ((marks: { GutterMark }) -> ())?,
+		card: Node?,
+		card_line: Reactive<number?>?,
+	}?,
+	-- A textarea as tall as its text and padding, between min_h and max_h
+	-- (past which it scrolls): a composer growing as the user types.
+	auto_height: boolean?,
+	-- Finished references as chips: a word starting with one of these
+	-- characters and followed by a space (`"@"`: `@src/main.rs `, as a
+	-- completion leaves it) sits on a rounded fill in `chip_color` (the
+	-- selection's unless set), and a backspace at its end (a delete at its
+	-- start) takes it whole.
+	chips: string?,
+	chip_color: Reactive<Color>?,
+	-- How a chip shows: the label in place of its reference
+	-- (`"lib.rs"` for `@crates/zgx/src/lib.rs`; nil, as written) after a
+	-- well with the icon `chip_icon` gives (an SVG's src, in the text's
+	-- colour). The value keeps the reference; a caret steps over it whole.
+	-- Asked once for each new chip; a label of `false`, no chip at all (an
+	-- amount, `$5`).
+	chip_label: ((token: string) -> (string | false)?)?,
+	chip_icon: ((token: string) -> string?)?,
+	-- The card over a chip while the pointer rests on it (as a tooltip
+	-- shows), from its reference; made as it first shows.
+	chip_tooltip: ((token: string) -> Node?)?,
+	-- Several lines only: the text is a Markdown draft, edited as Zeron's
+	-- composer edits one. Bold, italics, strikethrough and code show in
+	-- their faces as it is typed (code in the monospace font, `code_color`
+	-- on `code_bg`, by default the text's on `$surface.sunken`); markers
+	-- hide off the caret's lines and bullets show as `•` (tasks `☐` `☑`);
+	-- a line break goes on with a list (or leaves an empty item) and Tab
+	-- and Shift+Tab indent and outdent its items, after the script's
+	-- `on_key`. The value stays the Markdown as written.
+	markdown: boolean?,
+	code_color: Reactive<Color>?,
+	code_bg: Reactive<Color>?,
+	-- What goes in for pasted text (nil: as pasted): references resolved
+	-- into chips. One step of undo all the same.
+	on_paste: ((text: string) -> string?)?,
+	-- Written whether the text fits on one line `fits_inset` points
+	-- narrower than its text box: a composer's one row while its draft is
+	-- short. A line break never fits, nor a line under 200 wide; once it
+	-- does not fit, it must fall 32 under before it does again. Written
+	-- only when that changes, by the engine (no script per key).
+	fits: State<boolean>?,
+	fits_inset: Reactive<number>?,
 }
 -- `value` from 0 to 1, or nil: indeterminate (work of unknown size), a
 -- stretch of the bar sweeping across.
@@ -6295,6 +6688,7 @@ export type ProgressProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -6385,6 +6779,9 @@ export type ProgressProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -6408,7 +6805,9 @@ export type ProgressProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -6422,6 +6821,11 @@ export type ProgressProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6454,6 +6858,9 @@ export type ProgressProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -6516,7 +6923,7 @@ export type ProgressProps = {
 	context_menu_below: Props_context_menu_below,
 	[number]: never,
 	value: State<number> | State<number?>,
-	label: string?,
+	label: Label?,
 }
 export type SliderProps = {
 	-- Size and position.
@@ -6620,6 +7027,7 @@ export type SliderProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -6710,6 +7118,9 @@ export type SliderProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -6733,7 +7144,9 @@ export type SliderProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -6747,6 +7160,11 @@ export type SliderProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -6779,6 +7197,9 @@ export type SliderProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -6845,7 +7266,7 @@ export type SliderProps = {
 	-- One of a `ui.form`'s fields (`form.fields.email`): its value, its
 	-- leaving, its error (and, a one-line input, Enter submitting the form).
 	field: FormField?,
-	label: string?,
+	label: Label?,
 	-- 0 and 1 by default; min < max.
 	min: number?,
 	max: number?,
@@ -6854,8 +7275,10 @@ export type SliderProps = {
 	step: number?,
 }
 -- One of a few options side by side (AppKit's segmented control; a radio
--- group to assistive technology): the arrows move the choice.
-export type SegmentedOption = string | number | { label: string, value: any? }
+-- group to assistive technology): the arrows move the choice. An option
+-- with children or styles draws its segment, a button: its styles its
+-- look, its children its face, its `label` its accessible name.
+export type SegmentedOption = string | number | Merge<ContainerProps, { label: string, value: any? }>
 export type SegmentedProps = {
 	-- Size and position.
 	w: Props_w,
@@ -6958,6 +7381,7 @@ export type SegmentedProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -7048,6 +7472,9 @@ export type SegmentedProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -7071,7 +7498,9 @@ export type SegmentedProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -7085,6 +7514,11 @@ export type SegmentedProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -7117,6 +7551,9 @@ export type SegmentedProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -7186,7 +7623,384 @@ export type SegmentedProps = {
 	-- A list of strings or of numbers as it is (Luau's tables are
 	-- invariant: `{ string }` is not a `{ SegmentedOption }`).
 	options: { string } | { number } | { SegmentedOption },
-	label: string?,
+	label: Label?,
+}
+-- What a voice glyph shows between voices.
+export type VoiceGlyphMode = "connecting" | "listening" | "thinking" | "asking" | "processing" | "muted"
+-- A call's dot-matrix glyph (Zeron's): a field, the call's disc, a voice
+-- pushed out ring by ring from its heart; or a beam, a strip filling its
+-- box that rises from its bottom as the voice does. The engine steps it at
+-- 30 frames a second while anything in it moves (a voice, its mode, a
+-- passage between modes, the pointer's light) and not at all at rest: no
+-- script runs as it animates. Its voices are a sample's: whoever
+-- `speaking` names talks.
+export type VoiceGlyphProps = {
+	-- Size and position.
+	w: Props_w,
+	h: Props_h,
+	size: Props_size,
+	min_w: Props_min_w,
+	max_w: Props_max_w,
+	min_h: Props_min_h,
+	max_h: Props_max_h,
+	w_full: Props_w_full,
+	h_full: Props_h_full,
+	aspect: Props_aspect,
+	absolute: Props_absolute,
+	relative: Props_relative,
+	top: Props_top,
+	left: Props_left,
+	inset_start: Props_inset_start,
+	inset_end: Props_inset_end,
+	right: Props_right,
+	bottom: Props_bottom,
+	-- Spacing.
+	p: Props_p,
+	px: Props_px,
+	py: Props_py,
+	pt: Props_pt,
+	pr: Props_pr,
+	pb: Props_pb,
+	pl: Props_pl,
+	ps: Props_ps,
+	pe: Props_pe,
+	m: Props_m,
+	mx: Props_mx,
+	my: Props_my,
+	mt: Props_mt,
+	mr: Props_mr,
+	mb: Props_mb,
+	ml: Props_ml,
+	ms: Props_ms,
+	me: Props_me,
+	gap: Props_gap,
+	gap_x: Props_gap_x,
+	gap_y: Props_gap_y,
+	-- Flex and grid.
+	direction: Props_direction,
+	dir: Props_dir,
+	grow: Props_grow,
+	shrink: Props_shrink,
+	basis: Props_basis,
+	flex_wrap: Props_flex_wrap,
+	wrap_reverse: Props_wrap_reverse,
+	items: Props_items,
+	justify: Props_justify,
+	self: Props_self,
+	content: Props_content,
+	grid: Props_grid,
+	cols: Props_cols,
+	rows: Props_rows,
+	col_start: Props_col_start,
+	row_start: Props_row_start,
+	col_span: Props_col_span,
+	row_span: Props_row_span,
+	col_span_full: Props_col_span_full,
+	row_span_full: Props_row_span_full,
+	overflow: Props_overflow,
+	overflow_x: Props_overflow_x,
+	overflow_y: Props_overflow_y,
+	hidden: Props_hidden,
+	invisible: Props_invisible,
+	-- Paint.
+	bg: Props_bg,
+	gradient: Props_gradient,
+	color: Props_color,
+	bg_image: Props_bg_image,
+	bg_fit: Props_bg_fit,
+	rounded: Props_rounded,
+	corners: Props_corners,
+	rounded_tl: Props_rounded_tl,
+	rounded_tr: Props_rounded_tr,
+	rounded_br: Props_rounded_br,
+	rounded_bl: Props_rounded_bl,
+	border: Props_border,
+	border_sides: Props_border_sides,
+	border_color: Props_border_color,
+	border_over: Props_border_over,
+	-- A function may return nil: a solid border.
+	border_dash: Props_border_dash,
+	outline_color: Props_outline_color,
+	outline_offset: Props_outline_offset,
+	shadow: Props_shadow,
+	inset_shadow: Props_inset_shadow,
+	opacity: Props_opacity,
+	brightness: Props_brightness,
+	contrast: Props_contrast,
+	saturate: Props_saturate,
+	blend: Props_blend,
+	blur: Props_blur,
+	backdrop_blur: Props_backdrop_blur,
+	fade: Props_fade,
+	fade_x: Props_fade_x,
+	fade_sides: Props_fade_sides,
+	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
+	snap: Props_snap,
+	zoom: Props_zoom,
+	zoom_fixed: Props_zoom_fixed,
+	clip_inset: Props_clip_inset,
+	clip_feather: Props_clip_feather,
+	layer: Props_layer,
+	fit: Props_fit,
+	tint: Props_tint,
+	dither: Props_dither,
+	characters: Props_characters,
+	cursor: Props_cursor,
+	-- Text.
+	text_size: Props_text_size,
+	weight: Props_weight,
+	bold: Props_bold,
+	italic: Props_italic,
+	align: Props_align,
+	font: Props_font,
+	wrap: Props_wrap,
+	truncate: Props_truncate,
+	lines: Props_lines,
+	line_height: Props_line_height,
+	letter_spacing: Props_letter_spacing,
+	-- Tabular figures: every digit the same width.
+	tabular: Props_tabular,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Props_underline,
+	underline_offset: Props_underline_offset,
+	-- Transforms: after layout, about `origin` (fractions of the node).
+	x: Props_x,
+	y: Props_y,
+	scale: Props_scale,
+	scale_x: Props_scale_x,
+	scale_y: Props_scale_y,
+	rotate: Props_rotate,
+	skew: Props_skew,
+	skew_x: Props_skew_x,
+	skew_y: Props_skew_y,
+	rotate_x: Props_rotate_x,
+	rotate_y: Props_rotate_y,
+	perspective: Props_perspective,
+	origin: Props_origin,
+	-- The subtree's theme: a theme's name (`"zgx-light"`), or tokens to
+	-- override (`{ accent = "#e5484d" }`, with `theme = name` to start from).
+	theme: Props_theme,
+	-- Values the components and rows built in this subtree read with
+	-- `ui.use_context(name)`, as React's context gives them: a state, a
+	-- table, a function. Nearer ones win.
+	provide: Props_provide,
+	-- Identity, for selectors, refs and animations.
+	id: Props_id,
+	-- Space-separated class names.
+	class: Props_class,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: Props_variants,
+	ref: Props_ref,
+	focusable: Props_focusable,
+	-- What assistive technology takes it for (ARIA's `role`), instead of
+	-- what it is: a clickable row as an "option", a row of buttons as a
+	-- "toolbar". It keeps what it does.
+	role: Props_role,
+	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
+	-- list headings and move between them.
+	heading: Props_heading,
+	-- Whether this option, tab or item is the chosen one (`aria-selected`).
+	selected: Props_selected,
+	-- Whether a switch, checkbox or radio of the app's own is on
+	-- (`aria-checked`), and whether what a control opens shows
+	-- (`aria-expanded`): a custom disclosure's.
+	checked: Props_checked,
+	expanded: Props_expanded,
+	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
+	-- note, a message arriving.
+	live: Props_live,
+	-- Read after its name, as a hint (`aria-description`).
+	description: Props_description,
+	-- What is wrong with its value (`aria-invalid`), followed: nil while it
+	-- is fine. Assistive technology hears it with the field.
+	error: Props_error,
+	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
+	-- decoration, or what is said elsewhere.
+	aria_hidden: Props_aria_hidden,
+	-- One Tab stop for the focusable things inside; the arrows along this
+	-- axis (and Home, End) move among them, as ARIA's composite widgets
+	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
+	-- horizontal, without asking.
+	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
+	-- A press on it (or on what inside takes no input) moves the window; a
+	-- double click zooms it. Buttons and inputs inside keep their clicks.
+	-- CSS pointer-events: "none" (or false) lets the pointer through to what
+	-- is under the node (presses, hover, the wheel, drops, a native view);
+	-- descendants with handlers still take it. A state or function follows.
+	pointer_events: Props_pointer_events,
+	window_drag: Props_window_drag,
+	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
+	-- a stable point the app declares. `false` keeps every plugin off the
+	-- element (a password field, a destructive confirm), as `private` does.
+	hook: Props_hook,
+	private: Props_private,
+	-- The pointer selects the text in it and everything it holds, as on a
+	-- web page (CSS `user-select: text`): drag, double/triple press, Shift,
+	-- ⌘A / Ctrl+A, ⌘C / Ctrl+C. `false` keeps a part out. Off unless set.
+	selectable: Props_selectable,
+	-- A selectable node's highlight and selected-text colours (CSS
+	-- `::selection`), over the theme's `$selection` and `$selection.text`
+	-- tokens; a state or function follows.
+	selection_color: Props_selection_color,
+	selected_text_color: Props_selected_text_color,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: Props_tooltip,
+	tooltip_placement: Props_tooltip_placement,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: Props_tooltip_interactive,
+	-- Milliseconds the pointer rests before it shows (300; once one
+	-- shows, the next shows at once). Keyboard focus shows it too.
+	tooltip_delay: Props_tooltip_delay,
+	-- A condition (true disables), or the styles it shows while disabled.
+	disabled: Props_disabled,
+	hover: Props_hover,
+	active: Props_active,
+	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
+	-- Size animation ("height", "width", "size"; `true` is "height") or
+	-- position animation ("position"). A `layout_id` node mounting as
+	-- another with the same id unmounts (or while it is mounted) moves and
+	-- scales from that one's box.
+	layout: Props_layout,
+	layout_id: Props_layout_id,
+	layout_ease: Props_layout_ease,
+	-- Milliseconds.
+	layout_duration: Props_layout_duration,
+	layout_enter: Props_layout_enter,
+	layout_clip: Props_layout_clip,
+	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
+	mask: Props_mask,
+	bg_shader: Props_bg_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	shader_params: Props_shader_params,
+	-- The subtree, cached as a layer, composites through it: each pixel of
+	-- the box passes through its `layer` function.
+	layer_shader: Props_layer_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	layer_params: Props_layer_params,
+	-- Events.
+	on_click: Props_on_click,
+	-- Primary pointer down and up.
+	on_press: Props_on_press,
+	on_release: Props_on_release,
+	-- The middle (or another extra) button pressed and released on it: a
+	-- browser tab closes on it, a link opens in the background.
+	on_aux_click: Props_on_aux_click,
+	on_hover: Props_on_hover,
+	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
+	-- Return true to consume the key.
+	on_key: Props_on_key,
+	on_key_up: Props_on_key_up,
+	on_focus: Props_on_focus,
+	on_blur: Props_on_blur,
+	-- Return true to take the gesture from the scroll views around it.
+	on_wheel: Props_on_wheel,
+	on_pinch: Props_on_pinch,
+	-- Its zoom, bound to this state: Control-wheel or a pinch over it zooms it (0.25 to 5).
+	zoomable: Props_zoomable,
+	on_mount: Props_on_mount,
+	-- When layout gives it a new size, and at its first layout.
+	on_resize: Props_on_resize,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: Props_on_visible,
+	-- Drag and drop within the window. Payloads are what `on_drag`
+	-- returns: the script's own plain values, so they are `any` here.
+	-- A source: `on_drag` returns the payload once the pointer moves 4
+	-- points; `drag_preview` builds what follows the pointer.
+	on_drag: Props_on_drag,
+	drag_preview: Props_drag_preview,
+	-- Where the preview goes: its point `drag_preview_anchor` (fractions
+	-- of its size, `{ 0.5, 0 }` its top middle) `drag_preview_offset`
+	-- points from the pointer. `{ 0.5, 0 }` and `{ 0, 16 }` hang it below
+	-- the pointer, leaving what the drag is over in view; without either,
+	-- it keeps the grab point under the pointer.
+	drag_preview_anchor: Props_drag_preview_anchor,
+	drag_preview_offset: Props_drag_preview_offset,
+	on_drag_end: Props_on_drag_end,
+	-- What the drag carries to other apps as it leaves the window (macOS):
+	-- Finder takes files, Mail text, a browser links.
+	drag_export: Props_drag_export,
+	-- Released outside every window of the app (macOS): a tab torn off its
+	-- window. `grab_x`/`grab_y` are where the source was held.
+	on_drag_outside: Props_on_drag_outside,
+	-- The drag moves its window instead, with no preview (macOS): a
+	-- window's only tab. Dropped on another window's destination it drops
+	-- there; elsewhere the window stays where it was let go.
+	drag_moves_window: Props_drag_moves_window,
+	-- A destination: `drop_when` filters payloads (default: all).
+	drop_when: Props_drop_when,
+	on_drag_over: Props_on_drag_over,
+	on_drag_leave: Props_on_drag_leave,
+	on_drop: Props_on_drop,
+	-- Spring-loading: an accepted drag has rested on it for the system's
+	-- delay (0.5 s by default), or Space was pressed. Open what it stands
+	-- for (show a tab); return `false` to decline. Once per stay.
+	on_drag_spring: Props_on_drag_spring,
+	-- A secondary click (control-click on macOS) shows the returned
+	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
+	-- returning nil (or nothing) shows none.
+	context_menu: Props_context_menu,
+	-- The context menu panel's look: bg, rounded, p, gap, backdrop_blur,
+	-- border, shadow, w, …
+	context_menu_style: Props_context_menu_style,
+	-- Open the context menu under the node, from its left edge (a tab's),
+	-- rather than at the pointer.
+	context_menu_below: Props_context_menu_below,
+	[number]: never,
+	-- "field" (the default) or "beam".
+	kind: ("field" | "beam")?,
+	-- A field's dots across and down (44 by default): a number, or
+	-- `{ cols, rows }`. Its box is theirs.
+	dots: (number | { number })?,
+	-- A dot's width (3 for a field, 2.4 for a beam); the gap is a third.
+	dot: number?,
+	-- The outline the dots keep: "square" (default), "disc", "stadium",
+	-- "rounded" or "under" (round at the bottom only), with `radius` (a
+	-- field's in dots, a beam's in points).
+	outline: ("square" | "disc" | "stadium" | "rounded" | "under")?,
+	radius: number?,
+	-- A field: how much of a voice it loses by its reach (0.35), whether
+	-- its rim goes quiet, whether it thins out with no edge.
+	falloff: number?,
+	soft_rim: boolean?,
+	dissolve: boolean?,
+	-- How present the dots are at rest, 0 to 1.
+	rest: number?,
+	mode: (VoiceGlyphMode | State<VoiceGlyphMode> | () -> VoiceGlyphMode)?,
+	-- Who talks in the sample call: "user", "agent", or nobody.
+	speaking: (string | State<string> | () -> string)?,
+	-- Held still (reduced motion): its mode's pattern, nothing moving it.
+	still: (boolean | State<boolean> | () -> boolean)?,
+	-- The pointer over it lights the dots under it.
+	touch: boolean?,
+	-- Codex's three inks (the sunrise rows by default) and the user's (the
+	-- accent's; lifted toward white): colours or theme tokens. Each dot
+	-- takes one of its voice's, scattered at random, never blended.
+	agent_inks: { string }?,
+	user_inks: { string }?,
+	label: Label?,
 }
 -- A number field with buttons that step it; the arrows step it, Page Up
 -- and Down ten steps, Home and End to its ends; typing applies on Enter.
@@ -7292,6 +8106,7 @@ export type StepperProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -7382,6 +8197,9 @@ export type StepperProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -7405,7 +8223,9 @@ export type StepperProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -7419,6 +8239,11 @@ export type StepperProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -7451,6 +8276,9 @@ export type StepperProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -7517,7 +8345,7 @@ export type StepperProps = {
 	-- One of a `ui.form`'s fields (`form.fields.email`): its value, its
 	-- leaving, its error (and, a one-line input, Enter submitting the form).
 	field: FormField?,
-	label: string?,
+	label: Label?,
 	min: number?,
 	max: number?,
 	step: number?,
@@ -7627,6 +8455,7 @@ export type DisclosureProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -7717,6 +8546,9 @@ export type DisclosureProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -7740,7 +8572,9 @@ export type DisclosureProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -7754,6 +8588,11 @@ export type DisclosureProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -7786,6 +8625,9 @@ export type DisclosureProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -7854,9 +8696,14 @@ export type DisclosureProps = {
 	-- The name assistive technology reads for it, instead of its text: a
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
-	label: (string | Readable<string> | (() -> string))?,
+	label: Label?,
 	open: State<boolean>,
 	summary: string | Node,
+	-- The app draws it: the summary node dresses the bare summary button,
+	-- which keeps its expanded state and toggles; no chevron, padding or wash
+	-- of the disclosure's own. The children stay mounted, folding as the app
+	-- has them follow `open`: a `ui.presence` with `layout = "height"`.
+	bare: boolean?,
 }
 -- Sections, one open at a time: `open` is its `id`, or nil.
 export type AccordionProps = {
@@ -7961,6 +8808,7 @@ export type AccordionProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -8051,6 +8899,9 @@ export type AccordionProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -8074,7 +8925,9 @@ export type AccordionProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -8088,6 +8941,11 @@ export type AccordionProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -8120,6 +8978,9 @@ export type AccordionProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8285,6 +9146,7 @@ export type SectionProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -8373,6 +9235,9 @@ export type SectionProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -8396,7 +9261,9 @@ export type SectionProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -8410,6 +9277,11 @@ export type SectionProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -8442,6 +9314,9 @@ export type SectionProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8510,7 +9385,7 @@ export type SectionProps = {
 	-- The name assistive technology reads for it, instead of its text: a
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
-	label: (string | Readable<string> | (() -> string))?,
+	label: Label?,
 	id: any,
 	title: string,
 }
@@ -8616,6 +9491,7 @@ export type SeparatorProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -8706,6 +9582,9 @@ export type SeparatorProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -8729,7 +9608,9 @@ export type SeparatorProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -8743,6 +9624,11 @@ export type SeparatorProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -8775,6 +9661,9 @@ export type SeparatorProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -8946,6 +9835,7 @@ export type TabsProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -9036,6 +9926,9 @@ export type TabsProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -9059,7 +9952,9 @@ export type TabsProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -9073,6 +9968,11 @@ export type TabsProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -9105,6 +10005,9 @@ export type TabsProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -9166,16 +10069,33 @@ export type TabsProps = {
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
 	[number]: never,
-	-- The tabs, two-way: closing removes one, reordering moves it.
-	items: State<{ TabItem }>,
+	-- The tabs, two-way: closing removes one, reordering moves it. A bare
+	-- string is its own id.
+	items: State<{ TabItem }> | State<{ any }>,
 	-- The chosen tab's id; closing it chooses its neighbour.
 	value: State<string>,
-	-- The chosen tab's panel, built as it is chosen.
-	panel: (id: string) -> Node,
+	-- The chosen tab's panel, built as it is chosen; without it, the strip
+	-- alone (its panels the app's to place).
+	panel: ((id: string) -> Node)?,
+	-- Each tab as the app draws it: the node's styles, children and
+	-- handlers dress the bare tab. The strip keeps its role, focus, keys and
+	-- drag, and draws no × of its own: `close` closes it, asking `on_close`.
+	-- Tabs that can shrink share the strip before it scrolls.
+	tab: ((item: any, close: () -> ()) -> Node)?,
 	reorderable: boolean?,
+	-- Every tab closes, bare strings included.
+	closable: boolean?,
 	-- Asked before a tab closes: false keeps it (an editor asking to save).
 	on_close: ((id: string) -> boolean?)?,
-	label: string?,
+	-- A tab moved, dragged or by the keys: its id and its place now (from 1).
+	on_move: ((id: string, index: number) -> ...unknown)?,
+	-- What follows the pointer as a tab is dragged (the tab lifted), from
+	-- its item: its corner kept where the tab was grabbed.
+	preview: ((item: any) -> Node)?,
+	-- Written the id of the tab being dragged, "" once it is let go: for
+	-- the tab to show where it was.
+	dragging: State<string>?,
+	label: Label?,
 }
 -- An item of `ui.tree`: `children` (items) open under it; `lazy = true`
 -- without children: loading until the app adds them (`on_open`).
@@ -9284,6 +10204,7 @@ export type TreeProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -9374,6 +10295,9 @@ export type TreeProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -9397,7 +10321,9 @@ export type TreeProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -9411,6 +10337,11 @@ export type TreeProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -9443,6 +10374,9 @@ export type TreeProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -9513,7 +10447,21 @@ export type TreeProps = {
 	on_open: ((id: string) -> ...unknown)?,
 	-- Enter or a double click.
 	on_activate: ((id: string) -> ...unknown)?,
-	label: string?,
+	-- Each row as the app draws it, from its item (the app's own table) and
+	-- its level, 1 at the roots: the node's styles, children and handlers
+	-- dress the bare row, which keeps its role, level, choice and keys; the
+	-- tree draws no indent, chevron or fill of its own.
+	row: ((item: any, level: number) -> Node)?,
+	-- A row's height: 26 unless set (the rows are virtual).
+	row_height: number?,
+	-- A press on a parent opens or closes it as it chooses it, as a file
+	-- explorer's folders do; otherwise its chevron does.
+	open_on_click: boolean?,
+	-- The chosen items' ids, both ways, choosing several as a file explorer
+	-- does: ⌘ (Ctrl) and a click adds or takes away, Shift and a click or
+	-- an arrow chooses from the anchor, Escape keeps the current item alone.
+	selection: State<{ string }>?,
+	label: Label?,
 }
 -- A column of `ui.data_grid`: its cells show each row's field `id`.
 export type GridColumn = {
@@ -9632,6 +10580,7 @@ export type DataGridProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -9722,6 +10671,9 @@ export type DataGridProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -9745,7 +10697,9 @@ export type DataGridProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -9759,6 +10713,11 @@ export type DataGridProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -9791,6 +10750,9 @@ export type DataGridProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -9868,7 +10830,7 @@ export type DataGridProps = {
 	on_edit: ((row: number, column: string, text: string) -> ...unknown)?,
 	-- Enter on a cell that doesn't edit, or a double click.
 	on_activate: ((row: number) -> ...unknown)?,
-	label: string?,
+	label: Label?,
 }
 -- A month of days to choose a date from (WAI-ARIA's date picker grid): one
 -- Tab stop keeping focus; Left and Right move a day, Up and Down a week,
@@ -9976,6 +10938,7 @@ export type CalendarProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -10066,6 +11029,9 @@ export type CalendarProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -10089,7 +11055,9 @@ export type CalendarProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -10103,6 +11071,11 @@ export type CalendarProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -10135,6 +11108,9 @@ export type CalendarProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10206,7 +11182,7 @@ export type CalendarProps = {
 	-- Days that can't be chosen (a weekend, a booked one); `weekday` is 0
 	-- for Sunday to 6 for Saturday.
 	unavailable: ((date: string, weekday: number) -> boolean)?,
-	label: string?,
+	label: Label?,
 }
 -- A button showing a date that opens a calendar to choose it; chosen, the
 -- calendar closes. Down opens it too.
@@ -10312,6 +11288,7 @@ export type DatePickerProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -10402,6 +11379,9 @@ export type DatePickerProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -10425,7 +11405,9 @@ export type DatePickerProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -10439,6 +11421,11 @@ export type DatePickerProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -10471,6 +11458,9 @@ export type DatePickerProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10539,7 +11529,7 @@ export type DatePickerProps = {
 	unavailable: ((date: string, weekday: number) -> boolean)?,
 	-- How the button writes the date (`"2026-10-23"` unless set).
 	format: ((date: string) -> string)?,
-	label: string?,
+	label: Label?,
 }
 -- A time of day in hour and minute segments, each a spin button: Up and
 -- Down step, digits type, Left and Right move between them, Backspace
@@ -10646,6 +11636,7 @@ export type TimeFieldProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -10736,6 +11727,9 @@ export type TimeFieldProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -10759,7 +11753,9 @@ export type TimeFieldProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -10773,6 +11769,11 @@ export type TimeFieldProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -10805,6 +11806,9 @@ export type TimeFieldProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -10872,7 +11876,7 @@ export type TimeFieldProps = {
 	hour12: boolean?,
 	-- What Up and Down step the minutes by.
 	minute_step: number?,
-	label: string?,
+	label: Label?,
 }
 export type ComboItem = string | { label: string, value: any?, detail: string? }
 -- A field with suggestions listed under it as it is typed in (WAI-ARIA's
@@ -10979,6 +11983,7 @@ export type ComboboxProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -11069,6 +12074,9 @@ export type ComboboxProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -11092,7 +12100,9 @@ export type ComboboxProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -11106,6 +12116,11 @@ export type ComboboxProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -11138,6 +12153,9 @@ export type ComboboxProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11213,7 +12231,7 @@ export type ComboboxProps = {
 	loading: State<boolean>?,
 	-- What the list says with no options ("No results").
 	empty: string?,
-	label: string?,
+	label: Label?,
 }
 export type PaletteCommand = { id: string, title: string?, detail: string?, shortcut: string? }
 -- A field over a list of commands, filtered by a fuzzy match: Up and Down
@@ -11321,6 +12339,7 @@ export type CommandPaletteProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -11411,6 +12430,9 @@ export type CommandPaletteProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -11434,7 +12456,9 @@ export type CommandPaletteProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -11448,6 +12472,11 @@ export type CommandPaletteProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -11480,6 +12509,9 @@ export type CommandPaletteProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11546,9 +12578,17 @@ export type CommandPaletteProps = {
 	-- Given the chosen id; without it, the app's command runs.
 	on_run: ((id: string) -> ...unknown)?,
 }
-export type SelectOption = string | number | { label: string, value: any?, disabled: boolean? }
+-- An option with children or styles draws its menu item: its styles its
+-- look, its children its face (the check included), its `label` its
+-- accessible name and what typing finds.
+export type SelectOption =
+	string
+	| number
+	| Merge<ContainerProps, { label: string, value: any?, disabled: boolean? }>
 -- A button showing the chosen option that opens a menu of them over
--- itself; closed, typing chooses (as a native select), Down opens it.
+-- itself; closed, typing chooses (as a native select), Down opens it. Its
+-- styles are its button's, and children its face (instead of the chosen
+-- option's label and a chevron).
 export type SelectProps = {
 	-- Size and position.
 	w: Props_w,
@@ -11651,6 +12691,7 @@ export type SelectProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -11741,6 +12782,9 @@ export type SelectProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -11764,7 +12808,9 @@ export type SelectProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -11778,6 +12824,11 @@ export type SelectProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -11810,6 +12861,9 @@ export type SelectProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -11870,7 +12924,11 @@ export type SelectProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
-	[number]: never,
+	[number]: Child,
+	-- A button's look where its own styles don't say: "primary" (the
+	-- accent), "ghost" (no background until hovered), "danger", "default".
+	-- Other containers don't take it.
+	variant: ("primary" | "ghost" | "danger" | "default")?,
 	-- Required unless `field` gives it.
 	value: (State<any>)?,
 	-- One of a `ui.form`'s fields (`form.fields.email`): its value, its
@@ -11879,7 +12937,12 @@ export type SelectProps = {
 	options: { string } | { number } | { SelectOption },
 	-- Shown while no option is chosen.
 	placeholder: string?,
-	label: string?,
+	label: Label?,
+	-- The menu's panel: its styles, and its motion as it opens and closes.
+	menu: Merge<ContainerProps, { enter: ElementParams?, exit: ElementParams? }>?,
+	-- Where the menu opens: over the button, the chosen option over it,
+	-- unless placed.
+	placement: Placement?,
 }
 -- Two panes (its two children) and a divider between them that drags to
 -- resize the first; the second fills the rest.
@@ -11984,6 +13047,7 @@ export type SplitProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -12074,6 +13138,9 @@ export type SplitProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -12097,7 +13164,9 @@ export type SplitProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -12111,6 +13180,11 @@ export type SplitProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -12143,6 +13217,9 @@ export type SplitProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -12211,7 +13288,7 @@ export type SplitProps = {
 	-- The name assistive technology reads for it, instead of its text: a
 	-- switch, a button showing only an icon. A state or function is
 	-- followed: a list row's name made from what it shows now.
-	label: (string | Readable<string> | (() -> string))?,
+	label: Label?,
 	-- The first pane's size in points, both ways: the divider writes it as
 	-- it drags (a `ui.persist` keeps it across launches).
 	size: State<number>,
@@ -12329,6 +13406,7 @@ export type ListProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -12419,6 +13497,9 @@ export type ListProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -12442,7 +13523,9 @@ export type ListProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -12456,6 +13539,11 @@ export type ListProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -12488,6 +13576,9 @@ export type ListProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -12550,7 +13641,7 @@ export type ListProps = {
 	context_menu_below: Props_context_menu_below,
 	[number]: never,
 	-- The name assistive technology reads for it: "Messages".
-	label: string?,
+	label: Label?,
 	-- The row count (with `heights`, their length).
 	count: Reactive<number>?,
 	-- An interactive scrollbar over the trailing edge (none by default).
@@ -12595,10 +13686,14 @@ export type ListProps = {
 	heights: ({ number } | Readable<{ number }> | (() -> { number }))?,
 	-- Rows (from 1, in order) that stick to the top while their section
 	-- scrolls past, each pushed up by the next: section headers. With
-	-- `heights`.
+	-- `heights` or `measured`.
 	sticky: ({ number } | Readable<{ number }> | (() -> { number }))?,
 	-- How far below the top the sticky rows stick (CSS's sticky `top`).
 	sticky_top: number?,
+	-- With `heights`: a change that keeps the count eases the rows there
+	-- (a section folding to rows of 0, which are not built), as `each`'s
+	-- `animate` takes it; in Rust, no script per frame.
+	animate: Motion?,
 	-- Rows built beyond each edge (2 by default).
 	overscan: number?,
 	offset: State<number>?,
@@ -12611,6 +13706,10 @@ export type ModalPlacement = {
 	y: ("start" | "center" | "end")?,
 	inset: (number | { number })?,
 }
+-- An overlay's motion on its panel: `enter` plays each time it opens (give
+-- it its starting values), `exit` as it closes, the panel drawn (and
+-- inert, focus already given back) until the exit ends.
+export type OverlayMotion = { enter: ElementParams?, exit: ElementParams? }
 export type LayerProps = {
 	-- Size and position.
 	w: Props_w,
@@ -12713,6 +13812,7 @@ export type LayerProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -12803,6 +13903,9 @@ export type LayerProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -12826,7 +13929,9 @@ export type LayerProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -12840,6 +13945,11 @@ export type LayerProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -12872,6 +13982,9 @@ export type LayerProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -12937,8 +14050,10 @@ export type LayerProps = {
 	-- accent), "ghost" (no background until hovered), "danger", "default".
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
+	enter: ElementParams?,
+	exit: ElementParams?,
 	open: State<boolean>?,
-	label: string?,
+	label: Label?,
 	placement: ModalPlacement?,
 }
 export type ModalProps = {
@@ -13043,6 +14158,7 @@ export type ModalProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -13133,6 +14249,9 @@ export type ModalProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -13156,7 +14275,9 @@ export type ModalProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -13170,6 +14291,11 @@ export type ModalProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -13202,6 +14328,9 @@ export type ModalProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13267,16 +14396,18 @@ export type ModalProps = {
 	-- accent), "ghost" (no background until hovered), "danger", "default".
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
-	open: State<boolean>,
-	-- Its content, built each time it opens (a form starting from what it
-	-- edits, its state new), and kept while it closes.
-	build: (() -> Node)?,
-	label: string?,
-	placement: ModalPlacement?,
-	autofocus: boolean?,
-	-- false: a click outside doesn't close it (a dialog that must be
-	-- answered; Escape still does).
-	dismiss_on_backdrop: boolean?,
+	enter: ElementParams?,
+	exit: ElementParams?,
+		open: State<boolean>,
+		-- Its content, built each time it opens (a form starting from what it
+		-- edits, its state new), and kept while it closes.
+		build: (() -> Node)?,
+		label: Label?,
+		placement: ModalPlacement?,
+		autofocus: boolean?,
+		-- false: a click outside doesn't close it (a dialog that must be
+		-- answered; Escape still does).
+		dismiss_on_backdrop: boolean?,
 }
 -- Where an anchored popover or menu opens: on `side` of its trigger
 -- (flipping when that side lacks room), lined up with its start, centre
@@ -13388,6 +14519,7 @@ export type PopoverProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -13478,6 +14610,9 @@ export type PopoverProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -13501,7 +14636,9 @@ export type PopoverProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -13515,6 +14652,11 @@ export type PopoverProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -13547,6 +14689,9 @@ export type PopoverProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13612,12 +14757,15 @@ export type PopoverProps = {
 	-- accent), "ghost" (no background until hovered), "danger", "default".
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
+	-- See `OverlayMotion`.
+	enter: ElementParams?,
+	exit: ElementParams?,
 	open: State<boolean>,
 	-- Its content, built each time it opens, and kept while it closes.
 	build: (() -> Node)?,
 	-- The trigger, shown where the popover is written.
 	anchor: Node,
-	label: string?,
+	label: Label?,
 	placement: Placement?,
 	-- Focus its first control as it opens (true); false keeps the panel
 	-- itself focused (a menu whose search field waits to be clicked).
@@ -13738,6 +14886,7 @@ export type MenuItemProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -13824,6 +14973,9 @@ export type MenuItemProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -13847,7 +14999,9 @@ export type MenuItemProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -13861,6 +15015,11 @@ export type MenuItemProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -13893,6 +15052,9 @@ export type MenuItemProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -13954,7 +15116,7 @@ export type MenuItemProps = {
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
 	[number]: Child,
-	label: string?,
+	label: Label?,
 	-- Chosen, it leaves the menu open (a toggle, a pin).
 	keep_open: boolean?,
 	-- A check in its gutter while true (a toggle item); `radio = true`: a
@@ -14067,6 +15229,7 @@ export type SubmenuProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -14157,6 +15320,9 @@ export type SubmenuProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -14180,7 +15346,9 @@ export type SubmenuProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -14194,6 +15362,11 @@ export type SubmenuProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -14226,6 +15399,9 @@ export type SubmenuProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14292,11 +15468,16 @@ export type SubmenuProps = {
 	-- Other containers don't take it.
 	variant: ("primary" | "ghost" | "danger" | "default")?,
 	open: State<boolean>,
-	label: string?,
+	label: Label?,
 	-- Its trigger row, drawn by the app (a `ui.menu_item` with an icon, the
 	-- label, a value, a chevron); the label and a "›" otherwise. It opens
 	-- when the pointer moves onto it.
 	trigger: Node?,
+	-- Its `offset`: how far beside the trigger it opens (4 unless set).
+	placement: Placement?,
+	-- See `OverlayMotion`.
+	enter: ElementParams?,
+	exit: ElementParams?,
 }
 export type WebViewProps = {
 	-- Size and position.
@@ -14400,6 +15581,7 @@ export type WebViewProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -14490,6 +15672,9 @@ export type WebViewProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -14513,7 +15698,9 @@ export type WebViewProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -14527,6 +15714,11 @@ export type WebViewProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -14559,6 +15751,9 @@ export type WebViewProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14644,6 +15839,10 @@ export type WebViewProps = {
 	on_message: ((value: any, origin: string, main_frame: boolean) -> ...unknown)?,
 	on_error: ((url: string, err: string) -> ...unknown)?,
 	on_new_window: ((url: string) -> ...unknown)?,
+	-- Decides each navigation before it starts: true lets it go ahead.
+	-- Asked as the platform asks, so it answers at once; one that fails
+	-- lets nothing through.
+	navigation: ((r: NavigationRequest) -> boolean)?,
 }
 export type TerminalProps = {
 	-- Size and position.
@@ -14747,6 +15946,7 @@ export type TerminalProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -14837,6 +16037,9 @@ export type TerminalProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -14860,7 +16063,9 @@ export type TerminalProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -14874,6 +16079,11 @@ export type TerminalProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -14906,6 +16116,9 @@ export type TerminalProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -14968,6 +16181,8 @@ export type TerminalProps = {
 	context_menu_below: Props_context_menu_below,
 	[number]: never,
 	term: Term,
+	-- An overlay scrollbar over its right edge, following its scrollback.
+	scrollbar: boolean?,
 }
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = {
@@ -15072,6 +16287,7 @@ export type SlotProps = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -15162,6 +16378,9 @@ export type SlotProps = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -15185,7 +16404,9 @@ export type SlotProps = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -15199,6 +16420,11 @@ export type SlotProps = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -15231,6 +16457,9 @@ export type SlotProps = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -15333,6 +16562,349 @@ export type HookFilter = {
 	-- Its children's ids (a position, from 1, for one without): those it
 	-- returns go first, in that order, the rest after them.
 	order: ((ids: { string | number }) -> { string | number })?,
+}
+-- `name`: the plugin it runs as (its grants and its state go by it);
+-- `fallback(why)`: shown while it can't be; `on_error(why)`: told of an
+-- error as it runs (a handler's), what it shows staying.
+export type SandboxProps = {
+	-- Size and position.
+	w: Props_w,
+	h: Props_h,
+	size: Props_size,
+	min_w: Props_min_w,
+	max_w: Props_max_w,
+	min_h: Props_min_h,
+	max_h: Props_max_h,
+	w_full: Props_w_full,
+	h_full: Props_h_full,
+	aspect: Props_aspect,
+	absolute: Props_absolute,
+	relative: Props_relative,
+	top: Props_top,
+	left: Props_left,
+	inset_start: Props_inset_start,
+	inset_end: Props_inset_end,
+	right: Props_right,
+	bottom: Props_bottom,
+	-- Spacing.
+	p: Props_p,
+	px: Props_px,
+	py: Props_py,
+	pt: Props_pt,
+	pr: Props_pr,
+	pb: Props_pb,
+	pl: Props_pl,
+	ps: Props_ps,
+	pe: Props_pe,
+	m: Props_m,
+	mx: Props_mx,
+	my: Props_my,
+	mt: Props_mt,
+	mr: Props_mr,
+	mb: Props_mb,
+	ml: Props_ml,
+	ms: Props_ms,
+	me: Props_me,
+	gap: Props_gap,
+	gap_x: Props_gap_x,
+	gap_y: Props_gap_y,
+	-- Flex and grid.
+	direction: Props_direction,
+	dir: Props_dir,
+	grow: Props_grow,
+	shrink: Props_shrink,
+	basis: Props_basis,
+	flex_wrap: Props_flex_wrap,
+	wrap_reverse: Props_wrap_reverse,
+	items: Props_items,
+	justify: Props_justify,
+	self: Props_self,
+	content: Props_content,
+	grid: Props_grid,
+	cols: Props_cols,
+	rows: Props_rows,
+	col_start: Props_col_start,
+	row_start: Props_row_start,
+	col_span: Props_col_span,
+	row_span: Props_row_span,
+	col_span_full: Props_col_span_full,
+	row_span_full: Props_row_span_full,
+	overflow: Props_overflow,
+	overflow_x: Props_overflow_x,
+	overflow_y: Props_overflow_y,
+	hidden: Props_hidden,
+	invisible: Props_invisible,
+	-- Paint.
+	bg: Props_bg,
+	gradient: Props_gradient,
+	color: Props_color,
+	bg_image: Props_bg_image,
+	bg_fit: Props_bg_fit,
+	rounded: Props_rounded,
+	corners: Props_corners,
+	rounded_tl: Props_rounded_tl,
+	rounded_tr: Props_rounded_tr,
+	rounded_br: Props_rounded_br,
+	rounded_bl: Props_rounded_bl,
+	border: Props_border,
+	border_sides: Props_border_sides,
+	border_color: Props_border_color,
+	border_over: Props_border_over,
+	-- A function may return nil: a solid border.
+	border_dash: Props_border_dash,
+	outline: Props_outline,
+	outline_color: Props_outline_color,
+	outline_offset: Props_outline_offset,
+	shadow: Props_shadow,
+	inset_shadow: Props_inset_shadow,
+	opacity: Props_opacity,
+	brightness: Props_brightness,
+	contrast: Props_contrast,
+	saturate: Props_saturate,
+	blend: Props_blend,
+	blur: Props_blur,
+	backdrop_blur: Props_backdrop_blur,
+	fade: Props_fade,
+	fade_x: Props_fade_x,
+	fade_sides: Props_fade_sides,
+	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
+	snap: Props_snap,
+	zoom: Props_zoom,
+	zoom_fixed: Props_zoom_fixed,
+	clip_inset: Props_clip_inset,
+	clip_feather: Props_clip_feather,
+	layer: Props_layer,
+	fit: Props_fit,
+	tint: Props_tint,
+	dither: Props_dither,
+	characters: Props_characters,
+	cursor: Props_cursor,
+	-- Text.
+	text_size: Props_text_size,
+	weight: Props_weight,
+	bold: Props_bold,
+	italic: Props_italic,
+	align: Props_align,
+	font: Props_font,
+	wrap: Props_wrap,
+	truncate: Props_truncate,
+	lines: Props_lines,
+	line_height: Props_line_height,
+	letter_spacing: Props_letter_spacing,
+	-- Tabular figures: every digit the same width.
+	tabular: Props_tabular,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Props_underline,
+	underline_offset: Props_underline_offset,
+	-- Transforms: after layout, about `origin` (fractions of the node).
+	x: Props_x,
+	y: Props_y,
+	scale: Props_scale,
+	scale_x: Props_scale_x,
+	scale_y: Props_scale_y,
+	rotate: Props_rotate,
+	skew: Props_skew,
+	skew_x: Props_skew_x,
+	skew_y: Props_skew_y,
+	rotate_x: Props_rotate_x,
+	rotate_y: Props_rotate_y,
+	perspective: Props_perspective,
+	origin: Props_origin,
+	-- The subtree's theme: a theme's name (`"zgx-light"`), or tokens to
+	-- override (`{ accent = "#e5484d" }`, with `theme = name` to start from).
+	theme: Props_theme,
+	-- Values the components and rows built in this subtree read with
+	-- `ui.use_context(name)`, as React's context gives them: a state, a
+	-- table, a function. Nearer ones win.
+	provide: Props_provide,
+	-- Identity, for selectors, refs and animations.
+	id: Props_id,
+	-- Space-separated class names.
+	class: Props_class,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: Props_variants,
+	ref: Props_ref,
+	focusable: Props_focusable,
+	-- What assistive technology takes it for (ARIA's `role`), instead of
+	-- what it is: a clickable row as an "option", a row of buttons as a
+	-- "toolbar". It keeps what it does.
+	role: Props_role,
+	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
+	-- list headings and move between them.
+	heading: Props_heading,
+	-- Whether this option, tab or item is the chosen one (`aria-selected`).
+	selected: Props_selected,
+	-- Whether a switch, checkbox or radio of the app's own is on
+	-- (`aria-checked`), and whether what a control opens shows
+	-- (`aria-expanded`): a custom disclosure's.
+	checked: Props_checked,
+	expanded: Props_expanded,
+	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
+	-- note, a message arriving.
+	live: Props_live,
+	-- Read after its name, as a hint (`aria-description`).
+	description: Props_description,
+	-- What is wrong with its value (`aria-invalid`), followed: nil while it
+	-- is fine. Assistive technology hears it with the field.
+	error: Props_error,
+	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
+	-- decoration, or what is said elsewhere.
+	aria_hidden: Props_aria_hidden,
+	-- One Tab stop for the focusable things inside; the arrows along this
+	-- axis (and Home, End) move among them, as ARIA's composite widgets
+	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
+	-- horizontal, without asking.
+	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
+	-- A press on it (or on what inside takes no input) moves the window; a
+	-- double click zooms it. Buttons and inputs inside keep their clicks.
+	-- CSS pointer-events: "none" (or false) lets the pointer through to what
+	-- is under the node (presses, hover, the wheel, drops, a native view);
+	-- descendants with handlers still take it. A state or function follows.
+	pointer_events: Props_pointer_events,
+	window_drag: Props_window_drag,
+	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
+	-- a stable point the app declares. `false` keeps every plugin off the
+	-- element (a password field, a destructive confirm), as `private` does.
+	hook: Props_hook,
+	private: Props_private,
+	-- The pointer selects the text in it and everything it holds, as on a
+	-- web page (CSS `user-select: text`): drag, double/triple press, Shift,
+	-- ⌘A / Ctrl+A, ⌘C / Ctrl+C. `false` keeps a part out. Off unless set.
+	selectable: Props_selectable,
+	-- A selectable node's highlight and selected-text colours (CSS
+	-- `::selection`), over the theme's `$selection` and `$selection.text`
+	-- tokens; a state or function follows.
+	selection_color: Props_selection_color,
+	selected_text_color: Props_selected_text_color,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
+	tooltip: Props_tooltip,
+	tooltip_placement: Props_tooltip_placement,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: Props_tooltip_interactive,
+	-- Milliseconds the pointer rests before it shows (300; once one
+	-- shows, the next shows at once). Keyboard focus shows it too.
+	tooltip_delay: Props_tooltip_delay,
+	-- A condition (true disables), or the styles it shows while disabled.
+	disabled: Props_disabled,
+	hover: Props_hover,
+	active: Props_active,
+	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
+	-- Size animation ("height", "width", "size"; `true` is "height") or
+	-- position animation ("position"). A `layout_id` node mounting as
+	-- another with the same id unmounts (or while it is mounted) moves and
+	-- scales from that one's box.
+	layout: Props_layout,
+	layout_id: Props_layout_id,
+	layout_ease: Props_layout_ease,
+	-- Milliseconds.
+	layout_duration: Props_layout_duration,
+	layout_enter: Props_layout_enter,
+	layout_clip: Props_layout_clip,
+	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
+	mask: Props_mask,
+	bg_shader: Props_bg_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	shader_params: Props_shader_params,
+	-- The subtree, cached as a layer, composites through it: each pixel of
+	-- the box passes through its `layer` function.
+	layer_shader: Props_layer_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	layer_params: Props_layer_params,
+	-- Events.
+	on_click: Props_on_click,
+	-- Primary pointer down and up.
+	on_press: Props_on_press,
+	on_release: Props_on_release,
+	-- The middle (or another extra) button pressed and released on it: a
+	-- browser tab closes on it, a link opens in the background.
+	on_aux_click: Props_on_aux_click,
+	on_hover: Props_on_hover,
+	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
+	-- Return true to consume the key.
+	on_key: Props_on_key,
+	on_key_up: Props_on_key_up,
+	on_focus: Props_on_focus,
+	on_blur: Props_on_blur,
+	-- Return true to take the gesture from the scroll views around it.
+	on_wheel: Props_on_wheel,
+	on_pinch: Props_on_pinch,
+	-- Its zoom, bound to this state: Control-wheel or a pinch over it zooms it (0.25 to 5).
+	zoomable: Props_zoomable,
+	on_mount: Props_on_mount,
+	-- When layout gives it a new size, and at its first layout.
+	on_resize: Props_on_resize,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: Props_on_visible,
+	-- Drag and drop within the window. Payloads are what `on_drag`
+	-- returns: the script's own plain values, so they are `any` here.
+	-- A source: `on_drag` returns the payload once the pointer moves 4
+	-- points; `drag_preview` builds what follows the pointer.
+	on_drag: Props_on_drag,
+	drag_preview: Props_drag_preview,
+	-- Where the preview goes: its point `drag_preview_anchor` (fractions
+	-- of its size, `{ 0.5, 0 }` its top middle) `drag_preview_offset`
+	-- points from the pointer. `{ 0.5, 0 }` and `{ 0, 16 }` hang it below
+	-- the pointer, leaving what the drag is over in view; without either,
+	-- it keeps the grab point under the pointer.
+	drag_preview_anchor: Props_drag_preview_anchor,
+	drag_preview_offset: Props_drag_preview_offset,
+	on_drag_end: Props_on_drag_end,
+	-- What the drag carries to other apps as it leaves the window (macOS):
+	-- Finder takes files, Mail text, a browser links.
+	drag_export: Props_drag_export,
+	-- Released outside every window of the app (macOS): a tab torn off its
+	-- window. `grab_x`/`grab_y` are where the source was held.
+	on_drag_outside: Props_on_drag_outside,
+	-- The drag moves its window instead, with no preview (macOS): a
+	-- window's only tab. Dropped on another window's destination it drops
+	-- there; elsewhere the window stays where it was let go.
+	drag_moves_window: Props_drag_moves_window,
+	-- A destination: `drop_when` filters payloads (default: all).
+	drop_when: Props_drop_when,
+	on_drag_over: Props_on_drag_over,
+	on_drag_leave: Props_on_drag_leave,
+	on_drop: Props_on_drop,
+	-- Spring-loading: an accepted drag has rested on it for the system's
+	-- delay (0.5 s by default), or Space was pressed. Open what it stands
+	-- for (show a tab); return `false` to decline. Once per stay.
+	on_drag_spring: Props_on_drag_spring,
+	-- A secondary click (control-click on macOS) shows the returned
+	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
+	-- returning nil (or nothing) shows none.
+	context_menu: Props_context_menu,
+	-- The context menu panel's look: bg, rounded, p, gap, backdrop_blur,
+	-- border, shadow, w, …
+	context_menu_style: Props_context_menu_style,
+	-- Open the context menu under the node, from its left edge (a tab's),
+	-- rather than at the pointer.
+	context_menu_below: Props_context_menu_below,
+	[number]: never,
+	name: string,
+	fallback: ((why: string) -> Node)?,
+	on_error: ((why: string) -> ())?,
 }
 -- How `ui.each` rows slide when the list moves them: `true` (a spring,
 -- bounce .1 over 400 ms), an ease, `{ duration, ease }`, `{ bounce,
@@ -15441,6 +17013,7 @@ export type EachOptions = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -15531,6 +17104,9 @@ export type EachOptions = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -15554,7 +17130,9 @@ export type EachOptions = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -15568,6 +17146,11 @@ export type EachOptions = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -15600,6 +17183,9 @@ export type EachOptions = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -15774,6 +17360,7 @@ export type PresenceOptions = {
 	fade_x: Props_fade_x,
 	fade_sides: Props_fade_sides,
 	fade_overflow: Props_fade_overflow,
+	fade_eased: Props_fade_eased,
 	snap: Props_snap,
 	zoom: Props_zoom,
 	zoom_fixed: Props_zoom_fixed,
@@ -15864,6 +17451,9 @@ export type PresenceOptions = {
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
 	-- horizontal, without asking.
 	focus_group: Props_focus_group,
+	-- Whether its arrows go round past the ends: a tab list and a menu do
+	-- unless told, other groups only when told.
+	focus_wrap: Props_focus_wrap,
 	-- A press on it (or on what inside takes no input) moves the window; a
 	-- double click zooms it. Buttons and inputs inside keep their clicks.
 	-- CSS pointer-events: "none" (or false) lets the pointer through to what
@@ -15887,7 +17477,9 @@ export type PresenceOptions = {
 	selected_text_color: Props_selected_text_color,
 	-- Shown over it while the pointer rests on it (after 300 ms; at once
 	-- within a second of another): text in the theme's look, or a node of
-	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	-- the app's own (or a function making one as it first shows: a hover
+	-- card on every row costs nothing until one shows). Above it, centred,
+	-- unless `tooltip_placement` says.
 	tooltip: Props_tooltip,
 	tooltip_placement: Props_tooltip_placement,
 	-- A hover card the pointer can move into and click in: it stays while
@@ -15901,6 +17493,11 @@ export type PresenceOptions = {
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
+	-- Styles while the nearest `hover_group` ancestor is hovered (a row's
+	-- close button showing as the pointer enters the row).
+	group_hover: Props_group_hover,
+	-- Descendants' `group_hover` styles follow this node's hover.
+	hover_group: Props_hover_group,
 	-- Size animation ("height", "width", "size"; `true` is "height") or
 	-- position animation ("position"). A `layout_id` node mounting as
 	-- another with the same id unmounts (or while it is mounted) moves and
@@ -15933,6 +17530,9 @@ export type PresenceOptions = {
 	on_aux_click: Props_on_aux_click,
 	on_hover: Props_on_hover,
 	on_pointer_move: Props_on_pointer_move,
+	-- The pointer moving while a press that began on it is held (a
+	-- divider's drag), wherever it goes; passing over, nothing runs.
+	on_press_move: Props_on_press_move,
 	-- Return true to consume the key.
 	on_key: Props_on_key,
 	on_key_up: Props_on_key_up,
@@ -16047,7 +17647,7 @@ export type ThemeApi = {
 	-- Declare the app's tokens with defaults in terms of the standard ones.
 	tokens: (tokens: { [string]: string | number | { [string]: any } }) -> (),
 	-- A token's value (tracked): colours as "#rrggbbaa", numbers, font names.
-	get: (name: TokenName | "monitor.cpu" | "monitor.gpu" | "monitor.memory" | "monitor.panel" | "monitor.wash" | string) -> any,
+	get: (name: TokenName | string) -> any,
 	follow_system: (themes: { dark: string, light: string } | false) -> (),
 	-- The design lint: styles that hard-code a colour, spacing, radius,
 	-- type size, weight, font or shadow warn ("warn", true) or fail
@@ -16065,9 +17665,9 @@ declare ui: {
 	-- tracked). The themes' tokens already take them (zero motion
 	-- durations, stronger borders, opaque glass); read them for the rest.
 	prefers: {
-		reduced_motion: Readable<boolean>,
-		more_contrast: Readable<boolean>,
-		reduced_transparency: Readable<boolean>,
+		reduced_motion: State<boolean>,
+		more_contrast: State<boolean>,
+		reduced_transparency: State<boolean>,
 	},
 	-- Call `fn` every `ms` milliseconds on zgx's clock (no frames between);
 	-- returning false stops it. Returns a function that stops it. It lives as
@@ -16075,6 +17675,11 @@ declare ui: {
 	every: (ms: number, fn: () -> ...unknown) -> () -> (),
 	-- Call `fn` once, after `ms` milliseconds; returns a function that cancels it.
 	after: (ms: number, fn: () -> ()) -> () -> (),
+	-- A state the engine moves on at each `every` ms (1000) since `since`
+	-- (ms since the epoch, now unless given): the time since then ("59s",
+	-- "1m 32s", "1h 20m", "2d 3h") or, with `cycle`, its words in turn from
+	-- `offset`. Given as a text's content, it shows with no script per tick.
+	clock: (opts: { since: number?, every: number?, cycle: { string }?, offset: number? }?) -> State<string>,
 	column: (props: ContainerProps?) -> Node,
 	row: (props: ContainerProps?) -> Node,
 	div: (props: ContainerProps?) -> Node,
@@ -16102,6 +17707,11 @@ declare ui: {
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
+	-- Whether this window shows pages (`web`) and terminals (`terminals`,
+	-- Ghostty: the desktop host's `ghostty` feature) as the platform's own;
+	-- where not (headless, a platform without them) each shows a labelled
+	-- placeholder box. Both false until the interface mounts in a window.
+	native: State<{ web: boolean, terminals: boolean, temporary_stores: boolean }>,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
@@ -16111,6 +17721,9 @@ declare ui: {
 	-- elsewhere); a lone modifier ("cmd") as itself, "⌘" or "Ctrl".
 	shortcut_text: (keys: string) -> string,
 	window: WindowApi,
+	-- The modifier keys held now (none while the window is at the back):
+	-- what a held key offers shows while it is down (⌘1 to ⌘9 beside rows).
+	keys: State<{ shift: boolean, ctrl: boolean, alt: boolean, meta: boolean }>,
 	checkbox: (props: CheckboxProps) -> Node,
 	input: (props: InputProps) -> Node,
 	textarea: (props: InputProps) -> Node,
@@ -16121,6 +17734,7 @@ declare ui: {
 	-- and resets on a double click.
 	split: (props: SplitProps) -> Node,
 	segmented: (props: SegmentedProps) -> Node,
+	voice_glyph: (props: VoiceGlyphProps) -> Node,
 	tabs: (props: TabsProps) -> Node,
 	tree: (props: TreeProps) -> Node,
 	data_grid: (props: DataGridProps) -> Node,
@@ -16166,6 +17780,14 @@ declare ui: {
 	-- it: a contributed component gets it as `props.slot` (one component,
 	-- an instance per slot: a panel per pane).
 	slot: (name: string, props: SlotProps?) -> Node,
+	-- A script held as text (an agent's visual) run in a VM of its own,
+	-- sandboxed as a plugin named `name` (its grants, the plugins' memory
+	-- and time limits; no `require`), the node it returns shown here and
+	-- built again from a new VM as the source changes. A script that fails
+	-- to load or returns no node shows `fallback(why)` instead; an error as
+	-- it runs (a handler's) is `on_error`'s, or the fallback's without one.
+	-- The app's own error stays clear.
+	sandbox: (source: string | Readable<string> | (() -> string), props: SandboxProps) -> Node,
 	contribute: ((name: string, node: Node) -> ()) & ((HookContribution) -> ()),
 	-- A plugin's target by role or name, as written (`'role:button "Save"'`):
 	-- the app's internals, which may change with its next version.
@@ -16207,6 +17829,16 @@ declare ui: {
 	-- reply's id), text growing under it parses only its new end, and its
 	-- earlier blocks are the same tables as before.
 	markdown: (text: string, opts: MarkdownOptions?) -> { MarkdownBlock },
+	-- A Mermaid diagram drawn as Zeron draws one, as SVG for `ui.svg`, in
+	-- the theme's colours as `ui.theme.get` reads them; it renders off the
+	-- main thread (await it in a task: `ui.resource`), or rejects with why
+	-- it can't be drawn.
+	mermaid: (source: string, colours: MermaidColours?) -> Promise<MermaidDiagram>,
+	-- A TeX formula laid out as Zeron sets one (zatex, over a bundled
+	-- OpenType math face), in ems, or nil and why it can't be (a command it
+	-- doesn't know). Laid out once per source: show it as a span's icon on
+	-- the baseline (`w`, `h`, `descent` times the size, `copy` its source).
+	math: (tex: string, opts: MathOptions?) -> (MathFormula?, string?),
 	-- Markdown drawn: paragraphs, headings, lists, quotes, tables, and code
 	-- blocks with a Copy button, in the theme's colours and sizes,
 	-- selectable. As its text changes it parses only what changed and
@@ -16272,13 +17904,14 @@ declare ui: {
 	fetch: (url: string, opts: FetchOptions?) -> Promise<Response>,
 	-- The clipboard's text (nil if it holds none), and putting text on it;
 	-- its image as a `Bitmap` (nil if it holds none), and putting one on
-	-- it: promises, as a large image is decoded and encoded off the main
-	-- thread.
+	-- it (a `Bitmap`, or an image's `src` as `ui.image` takes it: Copy
+	-- Image): promises, as a large image is decoded and encoded off the
+	-- main thread.
 	clipboard: {
 		read: () -> string?,
 		write: (text: string) -> boolean,
 		read_image: () -> Promise<Bitmap?>,
-		write_image: (image: Bitmap) -> Promise<boolean>,
+		write_image: (image: Bitmap | string) -> Promise<boolean>,
 	},
 	-- The files the user picks: a promise of a list of `File` (empty if
 	-- they cancel).
@@ -16297,6 +17930,29 @@ declare ui: {
 	-- are the user's choice, as a dialog's are (`ui.read_file` takes them).
 	-- The app's only: a plugin's is an error.
 	on_open: (handler: (e: { files: { File }, urls: { string } }) -> ()) -> (),
+	-- Opens a web or mail link (`http:`, `https:`, `mailto:`) with the
+	-- system's handler, as a text's link opens, or a pane of the system's
+	-- settings (`x-apple.systempreferences:`, `ms-settings:`): whether it
+	-- asked. Headless, or another scheme, nothing opens. A plugin needs the
+	-- host's grant.
+	open_url: (url: string) -> boolean,
+	-- Tap the trackpad now (macOS, a haptic trackpad; elsewhere nothing):
+	-- "level" (default) a control's detent, "alignment" a snap into place.
+	-- Whether a trackpad could.
+	haptic: (pattern: ("level" | "alignment" | "generic")?) -> boolean,
+	-- Play a sound file (WAV, AIFF, MP3; a path from the script's
+	-- directory) now, starting it over if it plays: whether it could
+	-- (macOS; elsewhere and headless nothing). A plugin needs the host's
+	-- grant.
+	play_sound: (path: string) -> boolean,
+	-- Post the desktop's banner, the app's name and icon on it (macOS;
+	-- elsewhere and headless nothing). `background`: only while the app is
+	-- not frontmost. Whether it posted. A plugin needs the host's grant.
+	-- `data`: what a click on it hands to `ui.on_notification` (macOS).
+	notify: (opts: { title: string?, body: string?, background: boolean?, data: any? }) -> boolean,
+	-- `handler` hears a click on a banner this script posted with `data`,
+	-- and gets that data; the latest run's handler is called.
+	on_notification: (handler: (data: any) -> ()) -> (),
 	-- `T` comes from the state's `set`, so a literal fits a state of a
 	-- union (`ui.set(density, "compact")` for `"comfortable" | "compact"`)
 	-- and anything else is still an error.

@@ -9,6 +9,7 @@ on_release: (((e: PointerEvent) -> ()) | Action)?
 on_aux_click: (((e: AuxClickEvent) -> ()) | Action)?
 on_hover: (((inside: boolean) -> ()) | Action)?
 on_pointer_move: (((e: PointerEvent) -> ()) | Action)?
+on_press_move: (((e: PointerEvent) -> ()) | Action)?
 on_key: (((e: KeyEvent) -> boolean?) | Action)?
 on_key_up: (((key: string) -> ()) | Action)?
 on_focus: (Handler | Action)?
@@ -43,6 +44,7 @@ on_drag_spring: ((payload: any) -> boolean?)?
 | `on_aux_click` | `{ button, x, y, local_x, local_y, shift, ctrl, alt, meta, cmd }` (`button`: `"middle"`, or the platform's number for another extra button) | the middle button (or another beyond the primary and secondary) goes down and comes back up on the node or anything in it, the pointer not leaving it in between, as the DOM's `auxclick`: a tab closing on a middle click, a link opening in the background. The innermost node with `on_aux_click` takes it. The secondary button opens `context_menu` |
 | `on_hover` | `true`, then `false` | once when the pointer comes inside the node or anything in it, once when it is outside all of them (the DOM's `mouseenter` and `mouseleave`); leaving the window, the window going to the back, and the pointer moving onto a page or a terminal count as leaving |
 | `on_pointer_move` | `{ x, y, local_x, local_y }` | the pointer moves over it (or anywhere, while it holds the pointer) |
+| `on_press_move` | the same | the pointer moves while a primary press that began on it is held, wherever it goes (it keeps the pointer until release), once it has gone past the desktop's drag threshold from the press (as a drag starts; a click that wobbles runs nothing): a divider's drag, with nothing run as the pointer merely passes over |
 | `on_key` | `{ key, code, shift, ctrl, alt, meta, cmd, repeat, editing }` (`code`: the physical key, as the DOM's `KeyboardEvent.code`, `"KeyA"`, `"Digit1"`; `editing`: a text field holds focus, so a bare-key shortcut gives way) | a key goes down while it, or a node inside it, has focus. Return `true` to consume the key: the default action and the ancestors' handlers do not see it |
 | `on_key_up` | the key's name | the key comes up |
 | `on_focus`, `on_blur` | nothing | it takes or loses keyboard focus |
@@ -63,6 +65,8 @@ on_drag_spring: ((payload: any) -> boolean?)?
 | `on_drag_leave` | the payload | the drag leaves it |
 | `on_drop` | the payload, `{ x, y, local_x, local_y, w, h }` | an accepted drag is released over it |
 | `on_drag_spring` | the payload; returns `false` to decline | spring-loading: an accepted drag has rested on it for the system's delay (macOS's setting, 0.5 s by default; never where it is turned off), or Space was pressed while it is over it. Open what it stands for, as a tab shows or a folder opens; once per stay (moving within it does not start the delay again, leaving does) |
+
+`ui.keys` is the modifier keys held now, `{ shift, ctrl, alt, meta }`, as a state: the window says each change of them (none while it is at the back), so what a held key offers can show while it is down, without a key handler (a sidebar's ⌘1 to ⌘9 beside its rows, bound to a `ui.computed` of it). A Rust view reads the same from `Ui::held_keys`, which the desktop host keeps.
 
 `cmd` is the platform's command key, as `cmd` in a command's keys: Command (`meta`) on macOS, Ctrl (`ctrl`) elsewhere; test it for a shortcut (`e.cmd and e.key == "z"`) rather than `meta or ctrl`, which takes Super+Z on Linux and Ctrl+Z on macOS. `x` and `y` are in points from the window's top left, `local_x` and `local_y` from the node's, `w` and `h` its size. Key names are the character typed (`"a"`, `"A"`, `"/"`), `" "` for Space, `"F1"` to `"F35"`, or one of `"Tab"`, `"Enter"`, `"Escape"`, `"Backspace"`, `"Delete"`, `"ArrowLeft"`, `"ArrowRight"`, `"ArrowUp"`, `"ArrowDown"`, `"Home"`, `"End"`, `"PageUp"`, `"PageDown"`, `"Insert"`.
 
@@ -229,4 +233,5 @@ Query a box whose size does not depend on what the query changes (here the windo
 - `on_hover` reports entering and leaving the node as a whole: moving between its children tells it nothing.
 - `on_resize` reports size changes only, not moves, and `on_visible` changes only; both are called outside any tracking: reading state in them subscribes nothing.
 - Drag payloads are the script's own values (`any` to the types): annotate the parameters of `drag_preview`, `drop_when` and `on_drop` with your payload type. The nearest destination that accepts a payload gets the drag; `drop_when` returning nothing (or `false`) refuses it.
+- Files dragged in from another app (Finder, a file manager) come to the same destinations as the payload `{ files = { path, … } }`: `on_drag_over` as they come in and as the pointer moves with them, `on_drag_leave` as they leave, `on_drop` with every path where they are let go. Over the window it names the files the platform has told of so far (macOS one at a time as they enter). A `drop_when` that takes only the app's own payloads refuses them.
 - `on_mount` runs once, when the node mounts; a node that is rebuilt (a row with a new key, a `show` toggled back) mounts again.

@@ -76,16 +76,23 @@ def main():
         # A genuine subsequent Space must activate exactly once.
         xdo("key", "space")
         time.sleep(.2)
+        # Control held over the source window shows as held there, and as
+        # released once it comes up.
+        focus("source")
+        xdo("keydown", "ctrl")
+        time.sleep(.15)
+        xdo("keyup", "ctrl")
+        time.sleep(.15)
         from PIL import ImageGrab
         ImageGrab.grab(xdisplay=display).save(args.output / "held-keys.png")
         output, _ = app.communicate(timeout=12)
         (args.output / "held-keys.log").write_text(output)
         if app.returncode:
             raise RuntimeError(output)
-        expected = ['HELD source value="x " actions=0', 'HELD target value="b" actions=1']
+        expected = ['HELD source value="x " actions=0', 'HELD target value="b" actions=1', "MODS source saw_control=true now_control=false"]
         if not all(line in output for line in expected):
             raise AssertionError(output)
-        (args.output / "results.json").write_text(json.dumps({"passed": True, "backend": "X11", "binary_sha256": binary_sha256, "script_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(), "checks": ["held printable focus transfer does not type into target", "held Space focus transfer does not activate target", "normal subsequent text and Space remain functional"]}, indent=2) + "\n")
+        (args.output / "results.json").write_text(json.dumps({"passed": True, "backend": "X11", "binary_sha256": binary_sha256, "script_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(), "checks": ["held printable focus transfer does not type into target", "held Space focus transfer does not activate target", "normal subsequent text and Space remain functional", "held modifiers reach the view and clear on release"]}, indent=2) + "\n")
         print("Native held-key focus-transfer checks passed")
     finally:
         for process in (app, wm, xvfb):

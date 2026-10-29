@@ -161,6 +161,27 @@ fn a_modal_builds_its_content_each_time_it_opens() {
 }
 
 #[test]
+fn a_components_children_have_no_holes() {
+    // A `nil` child (`cond and node`) leaves no hole: `#props`, `ipairs`
+    // and `table.unpack(props)` reach every child after it.
+    let mut h = Harness::inline(
+        r##"local Turn = ui.component(function(props)
+            local n = 0
+            for _ in ipairs(props) do n += 1 end
+            return ui.column {
+                ui.text { id = "count", `{#props} {n} {#props.children}` },
+                { table.unpack(props) },
+            }
+        end)
+        local tools = {}
+        return Turn { who = "Claude", tools[1], ui.text { id = "reply", "Reply" }, false and ui.div {}, ui.text { id = "end", "End" } }"##,
+    );
+    assert!(h.error().is_none(), "{:?}", h.error());
+    assert_eq!(h.text("count"), "2 2 2");
+    assert!(h.find("reply").is_some() && h.find("end").is_some());
+}
+
+#[test]
 fn computed_state_follows_its_inputs() {
     let mut h = Harness::inline(
         r##"local a = ui.state("a", 2)
@@ -738,6 +759,94 @@ fn popovers_can_open_without_focusing_their_first_control() {
 }
 
 #[test]
+fn an_overlays_exit_plays_before_it_hides_and_its_enter_on_every_opening() {
+    let mut h = Harness::inline(
+        r##"local open = ui.state("o", false)
+        return ui.column { p = 20,
+            ui.button { id = "t", w = 20, h = 20, on_click = ui.toggle(open), "t" },
+            ui.popover { id = "p", open = open, w = 100, h = 40,
+                enter = { opacity = { 0, 1 }, duration = 100, ease = "linear" },
+                exit = { opacity = 0, duration = 100, ease = "linear" },
+                anchor = ui.button { id = "a", w = 20, h = 20, "a" },
+                ui.text "inside" } }"##,
+    );
+    h.frames(2);
+    let open = |h: &mut Harness, on: bool| {
+        if on {
+            h.click("t");
+        } else {
+            h.key(zgx::input::Key::Escape);
+        }
+    };
+    open(&mut h, true);
+    h.frames(1);
+    let panel = h.find("p").unwrap();
+    let overlay = {
+        let scene = h.ui.scene.borrow();
+        scene.parent(scene.parent(panel).unwrap()).unwrap()
+    };
+    let shown = |h: &Harness| h.ui.scene.borrow().effects(overlay).opacity;
+    assert!(h.opacity("p") < 0.5, "entering: {}", h.opacity("p"));
+    h.frames(10);
+    assert_eq!(h.opacity("p"), 1.);
+    open(&mut h, false);
+    h.frames(3);
+    assert_eq!(shown(&h), 1., "drawn while the exit plays");
+    assert!(h.opacity("p") < 1. && h.opacity("p") > 0., "fading out");
+    h.frames(10);
+    assert_eq!(shown(&h), 0., "hidden once it has played");
+    // The entrance plays again on the next opening.
+    open(&mut h, true);
+    h.frames(1);
+    assert!(h.opacity("p") < 0.5, "entering again: {}", h.opacity("p"));
+    h.frames(10);
+    assert_eq!((shown(&h), h.opacity("p")), (1., 1.));
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
+fn what_a_presence_lets_go_takes_no_pointer_while_it_leaves() {
+    let mut h = Harness::inline(
+        r##"local page = ui.state("page", "a")
+        local hits = ui.state("hits", "")
+        return ui.column {
+            ui.presence(page, function(p)
+                return ui.button { id = p, w = 100, h = 40,
+                    on_click = function()
+                        hits:set(hits:peek() .. p)
+                        page:set(if p == "a" then "b" else "a")
+                    end, p }
+            end, { w = 100, h = 40, exit = { opacity = 0, duration = 400 } }),
+            ui.text { id = "hits", function() return "hits " .. hits:get() end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("a");
+    h.frames(3);
+    // "a" still fades out over "b": the press reaches "b".
+    h.click("b");
+    h.frames(2);
+    assert_eq!(h.text("hits"), "hits ab");
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
+fn a_scroll_offset_that_is_not_a_number_settles() {
+    let mut h = Harness::inline(
+        r##"local offset = ui.state("offset", 0)
+        return ui.column {
+            ui.button { id = "nan", w = 40, h = 20, on_click = function() offset:set(0 / 0) end, "x" },
+            ui.scroll { id = "s", h = 100, w = 100, offset = offset, ui.div { h = 400 } },
+        }"##,
+    );
+    h.frames(2);
+    // NaN equals nothing: written back and forth it would never settle.
+    h.click("nan");
+    h.frames(2);
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
 fn layers_stay_live_over_an_open_modal() {
     let mut h = Harness::inline(
         r##"local n = ui.state("n", 0)
@@ -759,6 +868,37 @@ fn layers_stay_live_over_an_open_modal() {
         "1",
         "the layer's button takes clicks under a modal's focus"
     );
+    assert_eq!(h.host.error().get(), None);
+}
+
+/// A layer takes no focus: a button in it that goes (a toast's action,
+/// dismissing its toast) leaves focus to the app, whose keys work on.
+#[test]
+fn keys_reach_the_app_once_a_layers_focused_button_goes() {
+    let mut h = Harness::inline(
+        r##"local heard = ui.state("heard", 0)
+        local shown = ui.state("shown", true)
+        return ui.column { id = "root", w_full = true, h_full = true, focusable = true,
+            on_key = function(e: KeyEvent): boolean
+                if e.key == "k" then
+                    heard:set(heard:peek() + 1)
+                    return true
+                end
+                return false
+            end,
+            ui.button { id = "app", w = 40, h = 20, "app" },
+            ui.text { id = "heard", "{heard}" },
+            ui.layer { placement = { x = "end", y = "end", inset = 8 },
+                ui.show(shown, ui.button { id = "act", w = 80, h = 30,
+                    on_click = function() shown:set(false) end, "act" }) } }"##,
+    );
+    h.frames(3);
+    h.click("act");
+    h.frames(3);
+    assert!(h.find("act").is_none());
+    h.key(Key::Character("k".into()));
+    h.frames(2);
+    assert_eq!(h.text("heard"), "1", "the app's keys, not the layer's");
     assert_eq!(h.host.error().get(), None);
 }
 
@@ -885,6 +1025,58 @@ fn tooltips_show_after_a_rest_and_at_once_after_another() {
     to(&mut h, "b");
     h.frames(1);
     assert!(visible(&mut h, "bee"), "at once just after another");
+}
+#[test]
+fn a_tooltip_waits_as_long_as_it_is_told() {
+    use zgx::input::InputEvent;
+    // A hover card's 550 ms: not yet at the usual 300, shown by 550.
+    let mut h = Harness::inline(
+        r##"return ui.column { p = 40,
+            ui.button { id = "b", w = 40, h = 20, tooltip_delay = 550,
+                tooltip = ui.text { "Card", id = "card" }, "b" } }"##,
+    );
+    h.frames(2);
+    let visible = |h: &mut Harness| {
+        h.frames(1);
+        h.find("card").is_some_and(|n| {
+            let scene = h.ui.scene.borrow();
+            scene.visible_bounds(n).is_some_and(|b| b.width > 0.) && scene.effects(n).opacity > 0.
+        })
+    };
+    let b = h.bounds("b");
+    h.ui.dispatch(InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + 5.,
+    });
+    wait_ms(&mut h, 420);
+    assert!(!visible(&mut h), "still resting");
+    wait_ms(&mut h, 350);
+    assert!(visible(&mut h), "after its delay");
+}
+#[test]
+fn a_tooltip_function_builds_its_card_only_as_it_shows() {
+    use zgx::input::InputEvent;
+    let mut h = Harness::inline(
+        r##"local built = ui.state("built", 0)
+        return ui.column { p = 40,
+            ui.button { id = "b", w = 40, h = 20, "b",
+                tooltip = function()
+                    built:add(1)
+                    return ui.text { "Card", id = "card" }
+                end },
+            ui.text { id = "n", function() return tostring(built:get()) end } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.text("n"), "0", "not built at rest");
+    let b = h.bounds("b");
+    h.ui.dispatch(InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + 5.,
+    });
+    wait_ms(&mut h, 600);
+    h.frames(2);
+    assert!(h.find("card").is_some());
+    assert_eq!(h.text("n"), "1");
 }
 #[test]
 fn a_key_closes_a_tooltip_and_escape_an_interactive_card() {
@@ -1385,6 +1577,244 @@ fn a_following_list_follows_its_first_rows_and_after_being_cleared() {
 }
 
 #[test]
+fn ui_keys_follow_the_modifiers_the_window_says_are_held() {
+    let mut h = Harness::inline(
+        r##"return ui.text { id = "k", function()
+            local k = ui.keys:get()
+            return (if k.meta then "meta " else "") .. (if k.shift then "shift" else "")
+        end }"##,
+    );
+    assert_eq!(h.text("k"), "");
+    h.ui.set_held_keys(Modifiers {
+        meta: true,
+        ..Default::default()
+    });
+    h.settle();
+    assert_eq!(h.text("k"), "meta ");
+    h.ui.set_held_keys(Modifiers {
+        meta: true,
+        shift: true,
+        ..Default::default()
+    });
+    h.settle();
+    assert_eq!(h.text("k"), "meta shift");
+    // Gone to the back: nothing held.
+    h.ui.set_held_keys(Modifiers::default());
+    h.settle();
+    assert_eq!(h.text("k"), "");
+}
+
+#[test]
+fn ui_window_active_follows_the_windows_activation() {
+    // Read, it runs again only as the window comes and goes.
+    let mut h = Harness::inline(
+        r##"local reads = ui.state("reads", 0)
+        ui.effect(function()
+            ui.window.active:get()
+            reads:set(reads:peek() + 1)
+        end)
+        return ui.text { id = "a", function()
+            return (if ui.window.active:get() then "front" else "back") .. " " .. reads:get()
+        end }"##,
+    );
+    assert_eq!(h.text("a"), "front 1");
+    h.ui.set_window_active(false);
+    h.settle();
+    assert_eq!(h.text("a"), "back 2");
+    // Said again, nothing changes.
+    h.ui.set_window_active(false);
+    h.settle();
+    assert_eq!(h.text("a"), "back 2");
+    h.ui.set_window_active(true);
+    h.settle();
+    assert_eq!(h.text("a"), "front 3");
+}
+
+#[test]
+fn press_moves_are_heard_only_while_pressed() {
+    // A divider's drag: passing over it runs nothing; pressed, every move
+    // is heard, outside it too, until release.
+    let mut h = Harness::inline(
+        r##"local moves = ui.state("moves", 0)
+        return ui.column {
+            ui.div { id = "seam", w = 20, h = 100, on_press = function() end,
+                on_press_move = function() moves:add(1) end },
+            ui.text { id = "n", function() return tostring(moves:get()) end },
+        }"##,
+    );
+    let b = h.bounds("seam");
+    let (x, y) = (b.x + 10., b.y + 50.);
+    let calls = h.calls();
+    for dx in [0., 2., 4.] {
+        h.ui.dispatch(InputEvent::PointerMove { x: x + dx, y });
+    }
+    h.settle();
+    assert_eq!(h.calls(), calls, "hovering ran the script");
+    let button = zgx::input::PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    for dx in [10., 40., 80.] {
+        h.ui.dispatch(InputEvent::PointerMove { x: x + dx, y });
+    }
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: x + 80.,
+        y,
+        button,
+    });
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.settle();
+    assert_eq!(h.text("n"), "3");
+}
+
+#[test]
+fn press_moves_start_past_the_desktops_drag_threshold() {
+    // A click that wobbles is no drag: within the threshold (12 here, as a
+    // desktop set for shaking hands gives) nothing runs; past it, every
+    // move does, back inside it too.
+    let mut h = Harness::inline(
+        r##"local moves = ui.state("moves", 0)
+        return ui.column {
+            ui.div { id = "seam", w = 20, h = 100, on_press = function() end,
+                on_press_move = function() moves:add(1) end },
+            ui.text { id = "n", function() return tostring(moves:get()) end },
+        }"##,
+    );
+    h.ui.input.set_drag_threshold(12.);
+    let b = h.bounds("seam");
+    let (x, y) = (b.x + 10., b.y + 50.);
+    let button = zgx::input::PointerButton::Primary;
+    let press = |h: &mut Harness, moves: &[(f32, f32)]| {
+        h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+        for (dx, dy) in moves {
+            h.ui.dispatch(InputEvent::PointerMove {
+                x: x + dx,
+                y: y + dy,
+            });
+        }
+        h.ui.dispatch(InputEvent::PointerUp { x, y, button });
+        h.settle();
+    };
+    press(&mut h, &[(3., 0.), (6., 4.), (8., 8.)]);
+    assert_eq!(h.text("n"), "0", "a wobble within 12 points");
+    press(&mut h, &[(6., 0.), (13., 0.), (2., 0.), (30., 0.)]);
+    assert_eq!(h.text("n"), "3", "past it, then every move");
+}
+
+#[test]
+fn a_keyed_lists_rows_move_with_their_keys() {
+    // Rows keyed by name: one put first moves the others down without
+    // building them again; a key that changes builds its row again.
+    let mut h = Harness::inline(
+        r##"local names = ui.state("names", { "b", "c" })
+        return ui.column {
+            ui.button { id = "first", on_click = function() names:insert(1, "a") end, "first" },
+            ui.button { id = "rename", on_click = function() names:set_key(3, "c2") end, "rename" },
+            ui.list { id = "l", w = 200, h = 200,
+                heights = function() local hs = {} for i = 1, names:len() do hs[i] = 20 end return hs end,
+                key = function(i) return names:peek()[i] end,
+                row = function(name) return ui.text { id = "row_" .. name, name } end } }"##,
+    );
+    let (b, c) = (h.find("row_b").unwrap(), h.find("row_c").unwrap());
+    let y = h.bounds("row_b").y;
+    h.click("first");
+    h.frames(2);
+    assert!(h.find("row_a").is_some());
+    assert_eq!(h.find("row_b"), Some(b), "b moved, not built again");
+    assert_eq!(h.find("row_c"), Some(c));
+    assert_eq!(h.bounds("row_b").y, y + 20.);
+    h.click("rename");
+    h.frames(2);
+    assert!(
+        h.find("row_c").is_none() && h.find("row_c2").is_some(),
+        "c built again as c2"
+    );
+    assert_eq!(h.find("row_b"), Some(b));
+}
+
+#[test]
+fn a_lists_rows_fold_away_and_back_eased() {
+    // A header, three 20-point rows, a footer. Folding takes the rows to
+    // nothing over 200 ms (linear): the last goes first, as a body clipped
+    // at its foot; folded, they are not built; unfolding brings them back
+    // in order. A change of count lands at once.
+    let mut h = Harness::inline(
+        r##"local open = ui.state("open", true)
+        local more = ui.state("more", false)
+        return ui.column {
+            ui.button { id = "fold", on_click = function() open:toggle() end, "fold" },
+            ui.button { id = "more", on_click = function() more:toggle() end, "more" },
+            ui.list { id = "l", w = 200, h = 300, animate = { duration = 200, ease = "linear" },
+                heights = function()
+                    local r = if open:get() then 20 else 0
+                    local hs = { 30, r, r, r, 30 }
+                    if more:get() then table.insert(hs, 30) end
+                    return hs
+                end,
+                row = function(i) return ui.text { "row " .. i, id = "r" .. i } end } }"##,
+    );
+    let y = |h: &mut Harness, id: &str| -> Option<f32> {
+        h.ui.prepare_frame();
+        let node = h.find(id)?;
+        let list = h.find("l").unwrap();
+        let scene = h.ui.scene.borrow();
+        Some(scene.transformed_bounds(node).y - scene.transformed_bounds(list).y)
+    };
+    assert_eq!(y(&mut h, "r5"), Some(90.));
+    h.click("fold");
+    h.frames(1);
+    assert_eq!(y(&mut h, "r5"), Some(90.), "it starts where it was");
+    h.frames(6);
+    let mid = y(&mut h, "r5").unwrap();
+    assert!(mid > 30. && mid < 90., "halfway: {mid}");
+    // The last row went first: the first is still whole.
+    assert_eq!(y(&mut h, "r2"), Some(30.));
+    assert!(y(&mut h, "r4").is_none(), "the last row is folded away");
+    h.frames(10);
+    assert_eq!(y(&mut h, "r5"), Some(30.));
+    assert_eq!(h.count_text("row "), 2, "folded rows are not built");
+    // Back, in order.
+    h.click("fold");
+    h.frames(4);
+    assert!(y(&mut h, "r2").is_some());
+    assert!(y(&mut h, "r4").is_none(), "the last comes last");
+    h.frames(20);
+    assert_eq!(y(&mut h, "r5"), Some(90.));
+    assert_eq!(h.count_text("row "), 5);
+    // A new row lands at once.
+    h.click("more");
+    assert_eq!(y(&mut h, "r6"), Some(120.));
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
+fn a_keyed_lists_keys_run_once_a_change_not_each_frame_it_eases() {
+    // Three keyed rows folding over 200 ms: the list places its rows each
+    // frame of the ease, from keys read once (with the heights) as the
+    // fold begins: no script runs a row a frame.
+    let mut h = Harness::inline(
+        r##"local open = ui.state("open", true)
+        local names = { "a", "b", "c" }
+        return ui.column {
+            ui.button { id = "fold", on_click = function() open:toggle() end, "fold" },
+            ui.list { id = "l", w = 200, h = 300, animate = { duration = 200, ease = "linear" },
+                heights = function() local r = if open:get() then 20 else 0 return { 30, r, r, r } end,
+                key = function(i) return if i == 1 then "head" else names[i - 1] end,
+                row = function(name) return ui.text { id = "row_" .. name, name } end } }"##,
+    );
+    h.frames(2);
+    assert!(h.find("row_c").is_some());
+    let calls = h.calls();
+    h.click("fold");
+    h.frames(20);
+    // The click, the heights and every key (one loop): once each.
+    assert_eq!(h.calls() - calls, 3, "no script a frame as it folds");
+    assert!(h.find("row_c").is_none(), "folded rows are not built");
+    h.click("fold");
+    h.frames(20);
+    assert!(h.find("row_c").is_some(), "back, built again");
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
 fn sticky_rows_hold_the_top_until_the_next_arrives() {
     // Sections of a 30-point header and three 10-point rows, 60 points each.
     let mut h = Harness::inline(
@@ -1428,6 +1858,116 @@ fn sticky_rows_hold_the_top_until_the_next_arrives() {
     // At 40, the next header (natural top 60, 20 down) pushes it up by 10.
     h.click("b");
     assert_eq!(ys(&mut h, "row 1"), vec![-40., -10.]);
+}
+
+#[test]
+fn a_read_only_field_takes_no_typing_until_it_is_editable() {
+    let mut h = Harness::inline(
+        r##"local text = ui.state("text", "fixed")
+        local locked = ui.state("locked", true)
+        return ui.column {
+            ui.button { id = "unlock", on_click = function() locked:set(false) end, "u" },
+            ui.textarea { id = "t", value = text, read_only = locked, w = 200, h = 60 },
+            ui.text { id = "shown", function() return text:get() end },
+        }"##,
+    );
+    h.type_text("t", " more");
+    assert_eq!(h.text("shown"), "fixed", "read-only");
+    h.click("unlock");
+    h.type_text("t", "!");
+    assert!(h.text("shown").contains('!'), "{}", h.text("shown"));
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
+fn sticky_rows_of_a_measured_list_stick_at_their_measured_height() {
+    // As above, the rows taking their content's height (a 30-point header,
+    // three of 10) with a guess of 20 each until they mount.
+    let mut h = Harness::inline(
+        r##"local off = ui.state("off", 0)
+        local sticky = {}
+        for s = 0, 9 do table.insert(sticky, s * 4 + 1) end
+        return ui.column {
+            ui.button { id = "a", on_click = function() off:set(25) end, "a" },
+            ui.button { id = "b", on_click = function() off:set(40) end, "b" },
+            ui.list { id = "l", count = 40, measured = true, height = 20, sticky = sticky,
+                offset = off, w = 200, h = 100, row = function(i)
+                    return ui.column { ui.text { "row " .. i, h = if i % 4 == 1 then 30 else 10 } }
+                end } }"##,
+    );
+    let ys = |h: &mut Harness, name: &str| -> Vec<f32> {
+        h.ui.prepare_frame();
+        let list = h.find("l").unwrap();
+        let scene = h.ui.scene.borrow();
+        let top = scene.bounds(list).y;
+        let mut out = Vec::new();
+        let mut stack = vec![scene.parent(list).unwrap()];
+        while let Some(n) = stack.pop() {
+            if let zgx::scene::NodeKind::Text { text, .. } = scene.kind(n)
+                && &**text == name
+            {
+                out.push(scene.transformed_bounds(n).y - top);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        out.sort_by(f32::total_cmp);
+        out
+    };
+    h.settle();
+    h.click("a");
+    h.settle();
+    assert_eq!(ys(&mut h, "row 1"), vec![-25., 0.]);
+    // The next header, measured at 60, pushes the 30-point one up by 10.
+    h.click("b");
+    h.settle();
+    assert_eq!(ys(&mut h, "row 1"), vec![-40., -10.]);
+    assert_eq!(h.host.error().get(), None);
+}
+
+#[test]
+fn a_sticky_row_comes_down_with_its_list_pulled_past_the_top() {
+    let mut h = Harness::inline(
+        r##"local hs, sticky = {}, {}
+        for s = 0, 9 do
+            table.insert(sticky, #hs + 1)
+            table.insert(hs, 30)
+            for _ = 1, 3 do table.insert(hs, 10) end
+        end
+        return ui.list { id = "l", heights = hs, sticky = sticky, w = 200, h = 100,
+            row = function(i) return ui.text { "row " .. i, h = hs[i] } end }"##,
+    );
+    h.ui.set_elastic_scrolling(true);
+    let list = h.bounds("l");
+    // Where "row 1" shows: the list's own row, and the sticky copy over it.
+    let ys = |h: &mut Harness| -> Vec<f32> {
+        h.ui.prepare_frame();
+        let list = h.find("l").unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut out = Vec::new();
+        let mut stack = vec![scene.parent(list).unwrap()];
+        while let Some(n) = stack.pop() {
+            if let zgx::scene::NodeKind::Text { text, .. } = scene.kind(n)
+                && &**text == "row 1"
+            {
+                out.push(scene.transformed_bounds(n).y);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        out
+    };
+    let rest = ys(&mut h);
+    assert!(rest.len() == 2 && rest[0] == rest[1], "{rest:?}");
+    h.ui.dispatch(InputEvent::ScrollGesture(zgx::input::ScrollGesture::Began));
+    h.ui.dispatch(InputEvent::Scroll {
+        x: list.x + 50.,
+        y: list.y + 50.,
+        delta_x: 0.,
+        delta_y: -40.,
+    });
+    let pulled = ys(&mut h);
+    assert_eq!(pulled.len(), 2);
+    assert!(pulled[0] > rest[0], "the rows came down: {pulled:?}");
+    assert_eq!(pulled[0], pulled[1], "and the sticky row with them");
 }
 
 #[test]
@@ -3576,4 +4116,126 @@ fn a_spring_or_tween_between_far_values_settles() {
         assert!(retargeted_far_settles(curve, 1e36), "{curve} 1e36");
         assert!(retargeted_far_settles(curve, 3e38), "{curve} 3e38");
     }
+}
+
+#[test]
+fn a_scroll_says_whether_it_shows_its_end() {
+    let mut h = Harness::inline(
+        r##"local at_end = ui.state("at_end", true)
+        local offset = ui.state("offset", 0)
+        local rows = ui.state("rows", 2)
+        return ui.column {
+            ui.scroll {
+                id = "view",
+                h = 100,
+                w = 200,
+                offset = offset,
+                at_end = at_end,
+                ui.column { h = function() return rows:get() * 40 end },
+            },
+            ui.show(function() return not at_end:get() end, ui.button { id = "jump", w = 20, h = 20, on_click = function() offset:set(math.huge) end }),
+            ui.button { id = "grow", w = 20, h = 20, on_click = function() rows:set(10) end },
+        }"##,
+    );
+    assert!(h.error().is_none(), "{:?}", h.error());
+    assert!(h.find("jump").is_none(), "short content: at its end");
+    h.click("grow");
+    h.frames(2);
+    assert!(h.find("jump").is_some(), "content past the view");
+    let calls = h.calls();
+    h.click("jump");
+    h.frames(2);
+    assert!(h.find("jump").is_none(), "the jump went to the end");
+    assert!(h.calls() > calls);
+}
+
+#[test]
+fn a_sticky_list_takes_a_scrollbar() {
+    // The scrollbar is the list's own, inside the overlay that holds the
+    // sticky row over it.
+    let mut h = Harness::inline(
+        r##"return ui.list {
+            id = "rows", w = 200, h = 100, scrollbar = true,
+            heights = { 30, 20, 20, 30, 20, 20, 20, 20 },
+            sticky = { 1, 4 },
+            row = function(i) return ui.text { id = `row_{i}`, `Row {i}` } end,
+        }"##,
+    );
+    assert!(h.error().is_none(), "{:?}", h.error());
+    assert!(h.find("row_1").is_some());
+}
+
+/// The paragraph under node `id`.
+fn paragraph(h: &mut Harness, id: &str) -> std::sync::Arc<zgx::rich_text::RichText> {
+    let node = h.find(id).unwrap_or_else(|| panic!("no `{id}`"));
+    let scene = h.ui.scene.borrow();
+    match scene.kind(scene.children(node)[0]) {
+        NodeKind::RichText { text } => text.clone(),
+        other => panic!("not a paragraph: {other:?}"),
+    }
+}
+
+#[test]
+fn a_highlighted_span_colours_its_lines_and_asks_for_each_line_once() {
+    let mut h = Harness::inline(
+        r##"local code = ui.state("code", "let a\nlet b")
+        local asked = 0
+        local function highlight(line: string, state: number)
+            asked += 1
+            local s, e = string.find(line, "let")
+            return if s then { { s, e, "#ff0000" } } else {}, state
+        end
+        return ui.column { w = 300,
+            ui.button { id = "grow", "Grow", on_click = function() code:set(code:peek() .. "\nlet c") end },
+            ui.rich { id = "code", ui.span { function() return code:get() end, highlight = highlight } },
+            ui.text { function() return `{code:get()}|{asked}` end, id = "asked" } }"##,
+    );
+    h.frames(2);
+    let text = paragraph(&mut h, "code");
+    assert_eq!(text.text(), "let a\nlet b");
+    let red: Vec<_> = text
+        .runs()
+        .iter()
+        .filter(|r| r.color == zgx::scene::Color(255, 0, 0, 255))
+        .map(|r| &text.text()[r.range.clone()])
+        .collect();
+    assert_eq!(red, ["let", "let"]);
+    h.click("grow");
+    h.frames(2);
+    assert_eq!(paragraph(&mut h, "code").text(), "let a\nlet b\nlet c");
+    // Three lines, each asked once: the first two were kept.
+    assert!(h.text("asked").ends_with("|3"), "{}", h.text("asked"));
+}
+
+#[test]
+fn a_links_span_takes_a_tooltip_and_a_menu_of_its_own() {
+    use zgx::{
+        input::{InputEvent, PointerButton},
+        semantics::Role,
+    };
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 300, p = 40,
+            ui.rich { veil = "test-reply:1", ui.span { "docs", literal = true, href = "https://example.org",
+                tooltip = "https://example.org",
+                context_menu = function()
+                    return { ui.menu_item { "Open here", id = "own" } }
+                end } } }"##,
+    );
+    h.frames(2);
+    let link = {
+        let semantics = h.ui.semantics.borrow();
+        semantics
+            .iter()
+            .find(|(_, s)| s.role == Role::Link)
+            .map(|(id, _)| id)
+            .expect("a link")
+    };
+    let b = h.ui.scene.borrow().bounds(link);
+    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+    let button = PointerButton::Secondary;
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    h.ui.dispatch(InputEvent::PointerUp { x, y, button });
+    h.frames(2);
+    assert!(h.find("own").is_some(), "its own menu");
+    assert!(h.find("link-copy").is_none(), "not the default one");
 }

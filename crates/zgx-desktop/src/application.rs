@@ -867,6 +867,12 @@ impl Application {
             // shows (`WindowManager::install_menu_bar`).
             crate::app_menu::validate(&self.menus)?;
         }
+        // The app's fonts are its native views' too (a terminal's font,
+        // a page's CSS name them as they name the system's).
+        #[cfg(target_os = "macos")]
+        for font in &self.fonts {
+            crate::native_fonts::register(font.bytes());
+        }
         let factory = WindowFactory {
             fonts: Rc::new(RefCell::new(self.fonts)),
             #[cfg(target_os = "linux")]
@@ -3744,6 +3750,8 @@ impl Host {
                     alt: s.alt_key(),
                     meta: s.super_key(),
                 };
+                // What a held key offers shows while it is down.
+                self.context.ui.set_held_keys(self.modifiers);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(self.scale_factor);
@@ -4011,6 +4019,8 @@ impl Host {
                 // Menus and popovers close as their window or the app
                 // loses focus, as AppKit's do.
                 self.context.ui.dismiss_popups();
+                // Keys held as it went to the back are not held here.
+                self.context.ui.set_held_keys(Modifiers::default());
                 // A drag the platform has goes on: it deactivates as that
                 // ends (`Handoff`).
                 if self.native_drag.deactivate() {
@@ -5530,23 +5540,31 @@ impl WindowManager {
             }
             return;
         }
-        // Find in page's items, which zgx puts in the Edit menu.
+        // Find in page's items, which zgx puts in the Edit menu: their keys,
+        // as typed in the window. The app's own key handlers hear them
+        // first (an app's ⌘E or ⌘F, with a page or a terminal focused too),
+        // and find takes what they leave (`find::after_dispatch`).
         if let Some(find) = crate::app_menu::find_action(&action) {
             if let Some(host) = self.hosts.get_mut(&token)
                 && !host.context.window.is_closed()
             {
                 use crate::app_menu::FindAction;
-                let ui = &mut host.context.ui;
-                match find {
-                    FindAction::Open => {
-                        ui.open_find();
-                    }
-                    FindAction::Next => ui.find_next(),
-                    FindAction::Previous => ui.find_previous(),
-                    FindAction::UseSelection => {
-                        ui.find_selection();
-                    }
-                }
+                let (key, shift) = match find {
+                    FindAction::Open => ("f", false),
+                    FindAction::Next => ("g", false),
+                    FindAction::Previous => ("g", true),
+                    FindAction::UseSelection => ("e", false),
+                };
+                let _ = host.dispatch_prevented(InputEvent::KeyDown {
+                    key: Key::Character(key.into()),
+                    modifiers: zgx::input::Modifiers {
+                        shift,
+                        control: !cfg!(target_os = "macos"),
+                        meta: cfg!(target_os = "macos"),
+                        alt: false,
+                    },
+                    repeat: false,
+                });
             }
             return;
         }

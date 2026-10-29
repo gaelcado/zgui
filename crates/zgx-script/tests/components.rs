@@ -111,6 +111,40 @@ fn disclosures_and_accordions_show_their_content() {
 }
 
 #[test]
+fn a_bare_disclosure_is_the_scripts_header_and_fold() {
+    let mut h = Harness::inline(
+        r#"local open = ui.state("open", false)
+        return ui.column {
+            ui.disclosure {
+                id = "group",
+                open = open,
+                bare = true,
+                summary = ui.row { id = "header", h = 30, px = 4, ui.text { "Ran 3 commands" } },
+                ui.presence(function() return if open:get() then "rows" else nil end, function()
+                    return ui.column { id = "rows", ui.text { "ls" } }
+                end, { layout = "height", layout_clip = true }),
+            },
+            ui.text { id = "open", "{open}" },
+        }"#,
+    );
+    assert_eq!(h.error(), None);
+    let header = node(&mut h, "header");
+    assert_eq!((header.role, header.expanded), (Role::Button, Some(false)));
+    assert_eq!(h.bounds("header").height, 30., "the script's look");
+    assert!(!h.texts().iter().any(|t| t == "›"), "no chevron of its own");
+    h.click("header");
+    h.frames(20);
+    assert_eq!(h.text("open"), "true");
+    assert!(h.find("rows").is_some(), "the script's fold shows it");
+    assert_eq!(node(&mut h, "header").expanded, Some(true));
+    // From the keyboard, as any disclosure.
+    let header = h.find("header").unwrap();
+    h.ui.input.focus(&h.ui.scene, Some(header));
+    h.key(Key::Enter);
+    assert_eq!(h.text("open"), "false");
+}
+
+#[test]
 fn menu_items_check_and_show_shortcuts_and_nodes_say_their_state() {
     let mut h = Harness::inline(
         r#"local open = ui.state("open", true)
@@ -241,6 +275,80 @@ fn tabs_choose_close_and_keep_the_scripts_tables() {
 }
 
 #[test]
+fn tabs_the_script_draws_keep_their_behaviour_and_its_ids() {
+    let mut h = Harness::inline(
+        r##"local ids = ui.state("ids", { "a", "b", "c" })
+        local names = ui.state("names", { a = "Alpha", b = "Beta", c = "Gamma" })
+        local value = ui.state("value", "a")
+        local moves = ui.state("moves", 0)
+        return ui.column {
+            w = 400,
+            ui.tabs {
+                label = "Spaces",
+                items = ids,
+                value = value,
+                closable = true,
+                reorderable = true,
+                gap = 3,
+                on_move = function(id, index) moves:set(moves:peek() + 1) end,
+                tab = function(id: string, close: () -> ())
+                    local hovered = ui.use_state(false)
+                    return ui.button {
+                        id = `tab_{id}`,
+                        h = 28,
+                        px = 8,
+                        bg = function() return if value:get() == id then "#334455" else "#00000000" end,
+                        ui.text { function() return names:get()[id] end },
+                        ui.button { id = `tab_{id}_close`, focusable = false, w = 16, h = 16, on_click = close },
+                    }
+                end,
+            },
+            ui.text { id = "order", function() return table.concat(ids:get(), ",") end },
+            ui.text { id = "value", "{value}" },
+            ui.text { id = "moves", "{moves}" },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let tabs = with_role(&mut h, Role::Tab);
+    assert_eq!(tabs.len(), 3);
+    assert_eq!(
+        tabs[1],
+        h.find("tab_b").unwrap(),
+        "the script's node is the tab"
+    );
+    assert!(
+        with_role(&mut h, Role::TabPanel).is_empty(),
+        "no panel: the strip alone"
+    );
+    let (a, b) = (h.bounds("tab_a"), h.bounds("tab_b"));
+    assert!(
+        (b.x - a.x - a.width - 3.).abs() < 0.5,
+        "the node's gap: {a:?} {b:?}"
+    );
+    // Chosen as pressed; a background tab's × closes it, the choice kept.
+    click_node(&mut h, tabs[1]);
+    assert_eq!(h.text("value"), "b");
+    h.click("tab_c_close");
+    assert_eq!(h.text("order"), "a,b");
+    assert_eq!(h.text("value"), "b");
+    // Delete closes the focused one (every tab closes), ⌘⇧→ moves one.
+    let moved = Modifiers {
+        meta: true,
+        shift: true,
+        ..Default::default()
+    };
+    let tabs = with_role(&mut h, Role::Tab);
+    h.ui.input.focus(&h.ui.scene, Some(tabs[0]));
+    h.key_with(Key::ArrowRight, moved);
+    assert_eq!(h.text("order"), "b,a");
+    assert_eq!(h.text("moves"), "1", "told");
+    h.key(Key::Delete);
+    assert_eq!(h.text("order"), "b");
+    assert_eq!(h.error(), None);
+}
+
+#[test]
 fn a_select_chooses_values_from_its_menu_and_by_typing() {
     let mut h = Harness::inline(
         r#"local size = ui.state("size", 2)
@@ -280,6 +388,93 @@ fn a_select_chooses_values_from_its_menu_and_by_typing() {
     h.key(Key::Enter);
     h.frames(2);
     assert_eq!(h.text("chosen"), "2");
+}
+
+#[test]
+fn a_select_the_script_draws_takes_its_styles_on_its_button_and_items() {
+    let mut h = Harness::inline(
+        r#"local scope = ui.state("scope", "turn")
+        local function item(value: string, label: string): SelectOption
+            return {
+                value = value, label = label, id = `scope_{value}`, h = 30,
+                ui.text { id = `mark_{value}`, function() return if scope:get() == value then "✓" else "" end },
+                ui.text { label },
+            }
+        end
+        return ui.column {
+            p = 20,
+            ui.select {
+                id = "scope", label = "Scope", value = scope, h = 26, px = 8,
+                placement = { side = "bottom", align = "start", offset = 4 },
+                menu = { id = "scopes", w = 200, p = 4 },
+                options = { item("turn", "Last turn"), item("branch", "Branch") },
+                ui.text { id = "face", function() return if scope:get() == "turn" then "Last turn" else "Branch" end },
+            },
+        }"#,
+    );
+    assert_eq!(h.error(), None);
+    let trigger = with_role(&mut h, Role::ComboBox)[0];
+    assert_eq!(h.find("scope"), Some(trigger), "the node is its button");
+    assert_eq!(h.bounds("scope").height, 26.);
+    assert_eq!(node(&mut h, "scope").value.as_deref(), Some("Last turn"));
+    assert!(
+        !h.texts().iter().any(|t| t == "⌄"),
+        "its face is the script's"
+    );
+    click_node(&mut h, trigger);
+    h.frames(2);
+    assert_eq!(h.bounds("scopes").width, 200.);
+    assert!(
+        h.bounds("scopes").y >= h.bounds("scope").y + 26.,
+        "placed under it"
+    );
+    assert_eq!(h.text("mark_turn"), "✓");
+    assert_eq!(node(&mut h, "scope_branch").checked, Some(false));
+    assert_eq!(h.bounds("scope_branch").height, 30.);
+    h.click("scope_branch");
+    h.frames(2);
+    assert_eq!(h.text("face"), "Branch");
+    assert_eq!(node(&mut h, "scope").value.as_deref(), Some("Branch"));
+    assert_eq!(h.error(), None);
+}
+
+#[test]
+fn segments_the_script_draws_are_the_groups_radios() {
+    let mut h = Harness::inline(
+        r##"local mode = ui.state("mode", "list")
+        local function segment(id: string): SegmentedOption
+            return {
+                value = id, label = id, id = `mode_{id}`, w = 28, h = 24,
+                ui.div { w = 14, h = 14, bg = function(): Color return if mode:get() == id then "#ffffff" else "#808080" end },
+            }
+        end
+        return ui.column {
+            ui.segmented { id = "modes", label = "Layout", value = mode, p = 3, options = { segment("list"), segment("grid") } },
+            ui.text { id = "mode", "{mode}" },
+        }"##,
+    );
+    assert_eq!(h.error(), None);
+    let radios = with_role(&mut h, Role::RadioButton);
+    assert_eq!(radios.len(), 2);
+    assert_eq!(
+        h.find("mode_grid"),
+        Some(radios[1]),
+        "the option's own button"
+    );
+    assert_eq!(node(&mut h, "mode_grid").label, "grid");
+    assert_eq!(h.bounds("mode_grid").width, 28.);
+    assert_eq!(
+        h.bounds("modes").height,
+        32.,
+        "its padding over the default, and its border"
+    );
+    h.click("mode_grid");
+    assert_eq!(h.text("mode"), "grid");
+    assert_eq!(node(&mut h, "mode_grid").checked, Some(true));
+    h.ui.input.focus(&h.ui.scene, Some(radios[1]));
+    h.key(Key::ArrowRight);
+    assert_eq!(h.text("mode"), "list", "round past the end");
+    assert_eq!(h.error(), None);
 }
 
 #[test]
@@ -382,6 +577,144 @@ impl ClickRole for Harness {
         click_node(self, node);
         self.frames(1);
     }
+}
+
+#[test]
+fn a_trees_rows_the_script_draws_keep_its_keys() {
+    let mut h = Harness::inline(
+        r##"local items = ui.state("items", {
+            { id = "src", label = "src", folder = true, children = {
+                { id = "main", label = "main.rs", git = "modified" },
+            } },
+            { id = "readme", label = "README.md" },
+        })
+        local open = ui.state("open", { "src" })
+        local current = ui.state("current", nil :: string?)
+        local renaming = ui.state("renaming", "")
+        local name = ui.state("name", "")
+        return ui.column {
+            h = 200,
+            ui.tree {
+                label = "Files",
+                items = items,
+                open = open,
+                value = current,
+                row_height = 27,
+                open_on_click = true,
+                row = function(item: any, level: number)
+                    return ui.row {
+                        id = `row_{item.id}`,
+                        pl = 8 + level * 14,
+                        ui.text { if item.git then `{item.label} M` else item.label },
+                        ui.show(function() return renaming:get() == item.id end,
+                            ui.input { id = `rename_{item.id}`, value = name }),
+                    }
+                end,
+            },
+            ui.text { id = "open", function() return table.concat(open:get(), ",") end },
+            ui.text { id = "current", function() return tostring(current:get()) end },
+            ui.button { id = "rename", on_click = function() renaming:set("main") end, "Rename" },
+            ui.button { id = "clean", on_click = function()
+                items:set_key({ 1, "children", 1, "git" }, nil)
+            end, "Clean" },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let rows = with_role(&mut h, Role::TreeItem);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[1],
+        h.find("row_main").unwrap(),
+        "the script's row is the item"
+    );
+    assert_eq!(node(&mut h, "row_main").level, Some(2));
+    assert_eq!(h.bounds("row_main").height, 27.);
+    assert_eq!(h.text("row_main"), "main.rs M", "its own table's fields");
+    // A press on a folder chooses it and closes it.
+    h.click("row_src");
+    assert_eq!(h.text("current"), "src");
+    assert_eq!(h.text("open"), "");
+    assert_eq!(with_role(&mut h, Role::TreeItem).len(), 2);
+    h.click("row_src");
+    assert_eq!(h.text("open"), "src");
+    // The keys as ever.
+    h.key(Key::ArrowDown);
+    assert_eq!(h.text("current"), "main");
+    // A field in a row keeps what is typed in it.
+    h.click("rename");
+    h.frames(2);
+    let field = h.find("rename_main").expect("the field");
+    h.ui.input.focus(&h.ui.scene, Some(field));
+    h.ui.dispatch(zgx::input::InputEvent::Text("ab".into()));
+    h.key(Key::ArrowLeft);
+    h.key(Key::Home);
+    h.settle();
+    assert_eq!(h.text("current"), "main", "the tree took no key");
+    assert_eq!(h.text("open"), "src");
+    // An item's own fields changing (its status), its id the same: its row
+    // is drawn again.
+    h.click("clean");
+    h.frames(2);
+    assert_eq!(
+        h.text("row_main"),
+        "main.rs",
+        "drawn from the item as it is"
+    );
+    assert_eq!(h.error(), None);
+}
+
+/// `selection`: a tree choosing several, both ways, as a file explorer.
+#[test]
+fn a_tree_chooses_several_into_its_selection() {
+    let mut h = Harness::inline(
+        r##"local items = ui.state("items", {
+            { id = "a", label = "a.rs" },
+            { id = "b", label = "b.rs" },
+            { id = "c", label = "c.rs" },
+        })
+        local open = ui.state("open", {} :: { string })
+        local current = ui.state("current", nil :: string?)
+        local chosen = ui.state("chosen", {} :: { string })
+        return ui.column {
+            h = 200,
+            ui.tree {
+                label = "Files",
+                items = items,
+                open = open,
+                value = current,
+                selection = chosen,
+                row = function(item: any)
+                    return ui.row {
+                        id = `row_{item.id}`,
+                        bg = function()
+                            return if table.find(chosen:get(), item.id) then "#ff0000" else "#00000000"
+                        end,
+                        ui.text { item.label },
+                    }
+                end,
+            },
+            ui.text { id = "chosen", function()
+                local list = table.clone(chosen:get())
+                table.sort(list)
+                return table.concat(list, ",")
+            end },
+            ui.button { id = "reset", on_click = function() current:set("a") end, "Reset" },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    h.click("row_a");
+    assert_eq!(h.text("chosen"), "a");
+    h.click_with("row_c", "cmd");
+    assert_eq!(h.text("chosen"), "a,c");
+    h.click_with("row_b", "shift");
+    assert_eq!(h.text("chosen"), "b,c", "from the anchor");
+    assert_eq!(node(&mut h, "row_b").selected, Some(true));
+    assert_eq!(node(&mut h, "row_a").selected, Some(false));
+    h.click("reset");
+    assert_eq!(h.text("chosen"), "a", "the current item set alone");
+    assert_eq!(h.error(), None);
 }
 
 #[test]

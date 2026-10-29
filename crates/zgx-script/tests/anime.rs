@@ -1178,3 +1178,31 @@ fn a_delayed_animation_takes_over_where_an_earlier_one_left_its_property() {
     h.run_ms(500.);
     close(h.x("box"), 200., "the second half way, from 100");
 }
+
+#[test]
+fn a_clip_started_beside_an_unseen_loop_eases_from_the_next_frame() {
+    // An endless loop under a faded-out parent slows the engine to a few
+    // looks a second; a finite clip started then still plays every frame
+    // instead of waiting for the slow look and landing in one step.
+    let mut h = Harness::inline(
+        r##"local x = ui.state("x", 0)
+        anime.animate("#spin", { rotate = 360, loop = true, duration = 1000 })
+        return ui.column {
+            ui.div { opacity = 0, ui.div { id = "spin", w = 10, h = 10 } },
+            ui.div { id = "box", w = 10, h = 10, x = x },
+            ui.button { id = "go", w = 10, h = 10, on_click = function()
+                local live = { v = 0 }
+                anime.animate(live, { v = 100, duration = 300, ease = "linear",
+                    onUpdate = function() x:set(live.v) end })
+            end },
+        }"##,
+    );
+    h.run_ms(600.);
+    h.click("go");
+    h.run_ms(100.);
+    let x = h.x("box");
+    assert!(
+        x > 10. && x < 60.,
+        "eases, not waiting for the slow frame: {x}"
+    );
+}

@@ -1,4 +1,4 @@
-# Web views, terminals, commands: webview, web, terminal, term, command
+# Web views, terminals, commands: webview, web, terminal, term, native, command
 
 Native content laid out as nodes, and the app's menu commands. A web view is a WebKit page (macOS) or a WebView2 page (Windows, the desktop host's `webview2` feature; Linux has none yet, see [the Linux notes](../linux.md#web-views)), and a terminal a Ghostty surface (macOS, the `ghostty` feature); each is placed, sized, rounded and clipped like any node, and zgx draws over it (a frosted popover over a page works). Without a native host (headless, other platforms) each shows a labelled placeholder box and its controller still answers. Pages and sessions belong to the host, not to a run, so a reload keeps them.
 
@@ -8,6 +8,7 @@ ui.web(opts: WebOptions?) -> Web
 ui.web(id: string, opts: WebOptions?) -> Web
 ui.terminal(props: TerminalProps) -> Node
 ui.term(id: string, opts: TermOptions?) -> Term
+ui.native: State<{ web: boolean, terminals: boolean, temporary_stores: boolean }>
 ui.command(opts: CommandOptions) -> ()
 ```
 
@@ -17,7 +18,8 @@ ui.command(opts: CommandOptions) -> ()
 | `web` | a page's controller, usable before and after its view mounts. `ui.web(opts)` makes a page for this run; `ui.web(id, opts)` returns the host's page for `id`, made with `opts` the first time, kept across reloads until `web:close()` |
 | `terminal` | shows a session (`term = ui.term(id)`) |
 | `term` | the session for `id`, started the first time with `opts`; later calls return the same session, their handlers replacing the previous run's |
-| `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
+| `native` | whether this window shows pages (`web`) and terminals (`terminals`) as the platform's own, so an app can draw its own stand-in where it shows the placeholder instead: terminals need the desktop host's `ghostty` feature (macOS), pages a WebKit or WebView2 window. Both false headless and until the interface mounts in a window. `temporary_stores`: a page's named `profile` keeps nothing past the run here (macOS before 14 has no persistent stores of an app's own), for an app that says logins will not last |
+| `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is. Its `menu` names the menu it goes in ("File" unless set); `"app"` is the application's own, where macOS keeps an app's About, Check for Updates… and Settings above Services, Hide and Quit (`zgx_run::menus` makes it `AppMenu::application`) |
 
 ## Web view options
 
@@ -40,12 +42,13 @@ ui.command(opts: CommandOptions) -> ()
 | `on_message` | `(value: any, origin: string, main_frame: boolean) -> ()` | none | what the page posted, as Luau data, and who posted it: the sending frame's origin (`https://example.com`) and whether it is the top frame. Any page the view shows, and any iframe in it, can post: check `origin` before acting on a message |
 | `on_error` | `(url: string, err: string) -> ()` | none | a navigation failed, or the page's process ended (`url` empty) |
 | `on_new_window` | `(url: string) -> ()` | none | |
+| `navigation` | `(r: NavigationRequest) -> boolean` | none | decides each navigation before it starts, true letting it go ahead: `r` is `{ url, main_frame, kind, source_url }`, `kind` one of `"link"`, `"form"`, `"back_forward"`, `"reload"`, `"form_resubmission"`, `"other"` (a script, a redirect, the app's own `load`), `source_url` the page of the frame that started it. Asked inside the platform's callback, so it answers at once; one that fails lets nothing through. The run that mounted the view last decides |
 
-A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused`, `error` and `pointer` (`{ x, y }` in points while the pointer is over the page, else nil) are tracked like state: a text or computed reading them follows the page. Its methods: `load(url)`, `html(html, base_url?)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `zoom(z)`, `run(js)`, `eval(js, function(value, err) … end)` (the script's value as Luau data, or nil and the error), and `close()`.
+A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused`, `error`, `attached` (whether the platform's page exists yet: made as the view first mounts in a window that shows pages, false headless) and `pointer` (`{ x, y }` in points while the pointer is over the page, else nil) are tracked like state: a text or computed reading them follows the page. Its methods: `load(url)`, `html(html, base_url?)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `zoom(z)`, `run(js)`, `eval(js, function(value, err) … end)` (the script's value as Luau data, or nil and the error), and `close()`.
 
 ## Terminal options
 
-`ui.term` takes these; `ui.terminal` takes `term` and any property and event:
+`ui.term` takes these; `ui.terminal` takes `term`, `scrollbar` (an overlay scrollbar over its right edge, following its scrollback as Ghostty reports it and scrolling it when dragged or its track pressed, shown while it scrolls as the window's overlay scrollbars are) and any property and event:
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
@@ -54,6 +57,7 @@ A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_
 | `cwd` | `string` | home | where it starts; `"~"` is home |
 | `env` | `{ [string]: string }` | none | added to the environment |
 | `font_size` | `number` | Ghostty's | points |
+| `config` | `string` | none | Ghostty's configuration lines over the app's (`"background = #090909\npalette = 1=#f87171\nfont-family = Geist Mono"`): its colours, its font, its key bindings (`keybind = super+k=unbind` leaves ⌘K to the app). `term:configure(config)` replaces it later, the running terminal configured again (a theme change restyling it); the same again does nothing. Fonts the app brings (`Application::font`) can be named (macOS registers them for the process) |
 | `on_title` | `(title: string) -> ()` | none | the program set its title (OSC 0/2) |
 | `on_pwd` | `(pwd: string) -> ()` | none | the shell reported its directory (OSC 7) |
 | `on_process` | `(name: string) -> ()` | none | the foreground program changed |
@@ -63,7 +67,7 @@ A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_
 | `on_command` | `(exit_code: number?, duration_ms: number) -> ()` | none | a command finished (shell integration) |
 | `on_notify` | `(title: string, body: string) -> ()` | none | the program asked for a notification |
 
-A `Term`'s `id`, `title`, `pwd`, `process`, `pid`, `focused`, `bell` (it rang since it last had focus), `progress` (OSC 9;4: 0 to 1, negative while indeterminate, nil when none), `exited` (the exit code, once it ended), `columns`, `rows` and `pointer` are tracked like state. Its methods: `focus()`, `blur()`, `input(text)` (as typed: `"ls\r"` runs ls), `paste(text)`, `binding(action)` (a Ghostty binding action: `"copy_to_clipboard"`, `"clear_screen"`, `"increase_font_size:1"`), `needs_confirm()` (whether closing would end something other than an idle shell), `snapshot(max_width?)` (a picture of what it shows now, at most `max_width` pixels wide, 480 if not given: the `src` of a `ui.image` showing it, as `"host:…"`, replaced by each call and forgotten as it closes; nil before it shows or where the platform takes none, macOS taking it from Ghostty's last frame) and `close()`.
+A `Term`'s `id`, `title`, `pwd`, `process`, `pid`, `focused`, `bell` (it rang since it last had focus), `progress` (OSC 9;4: 0 to 1, negative while indeterminate, nil when none), `exited` (the exit code, once it ended), `columns`, `rows` and `pointer` are tracked like state. Its methods: `focus()`, `blur()`, `input(text)` (as typed: `"ls\r"` runs ls), `paste(text)`, `binding(action)` (a Ghostty binding action: `"copy_to_clipboard"`, `"clear_screen"`, `"increase_font_size:1"`), `configure(config)` (Ghostty's lines over the app's, as the `config` option), `needs_confirm()` (whether closing would end something other than an idle shell), `snapshot(max_width?)` (a picture of what it shows now, at most `max_width` pixels wide, 480 if not given: the `src` of a `ui.image` showing it, as `"host:…"`, replaced by each call and forgotten as it closes; nil before it shows or where the platform takes none, macOS taking it from Ghostty's last frame) and `close()`.
 
 ## Command options
 
@@ -75,6 +79,8 @@ A `Term`'s `id`, `title`, `pwd`, `process`, `pid`, `focused`, `bell` (it rang si
 | `key` | `string` | none | modifiers and a key joined by `+`: `"cmd+shift+d"`, `"cmd+alt+arrowleft"`, `"cmd+["`, `"ctrl+tab"`. `cmd` is Command on macOS and Control elsewhere; `super` names the Windows or Super key itself. `ui.shortcut_text(keys)` shows keys as the platform does (`"cmd+shift+z"`: ⇧⌘Z on macOS, Ctrl+Shift+Z elsewhere), for a tooltip or a list of keys |
 | `run` | `() -> ()` | required | called when it is chosen |
 | `separator` | `boolean` | `false` | a separator line in `menu` instead of a command (`id` and `run` are not needed) |
+| `standard` | `"undo"`, `"redo"`, `"cut"`, `"copy"`, `"paste"`, `"select_all"` | none | one of the platform's own edit items instead of a command (`id` and `run` are not needed), its shortcut its own: AppKit's on macOS, sent to whatever has focus (a page's selection copies), while zgx's own view gets the keys first for its editors. Each once |
+| `about` | `{ name: string, version: string? }` | none | the application's About item instead of a command (in `menu = "app"`): on macOS AppKit's about panel with the name and version (and the bundle's icon and copyright); a rendered menu bar shows it dimmed |
 
 Commands are the app's menu bar, and their keys are its menu items' shortcuts: `zgx run` (and `zgx_run::run_hosting`, for a Rust host serving its script a fetcher or actions) installs them. A Rust host that makes its own window gets the same with `zgx_run::serve_commands(&host, cx)` in its `Application::run`, keeping the effect it returns; headless, a test runs a command with `ScriptHost::run_command(id)`.
 
@@ -153,6 +159,14 @@ ui.window.zoomable: State<boolean>
 ```
 
 The app's window zooms as a browser's page does: Cmd+= or Cmd++ zooms in, Cmd+- out and Cmd+0 back to 100% (Ctrl elsewhere), through Chrome's levels from 25% to 500%, and its content reflows in the smaller or larger viewport, text and paths drawn crisply. `ui.window.zoom` is the zoom (1 at 100%): it follows the keys and the View menu's items, and setting it zooms the window (`ui.window.zoom:set(1.25)`). `ui.window.zoomable:set(false)` turns the keys off; a `ui.command` with one of the keys keeps it either way. `zgx run` keeps both; a Rust host passes its window with `ScriptHost::window_zoom`.
+
+### Activation
+
+```luau
+ui.window.active: State<boolean>
+```
+
+Whether the app's window is the active one: false while another app's window, or another of its own, is in front, true again as it comes back (macOS's key window, Windows' foreground one). It is true until the host says otherwise, and in a headless host. Read it to hold still at the back (`anime.engine.pause()` while it is false, as an app's "pause animations in the background" does), not to poll.
 
 ## Example
 
@@ -235,7 +249,7 @@ return ui.row {
 - Sessions outlive reloads and the nodes that show them: a reload keeps every shell running, and moving the `terminal` node (another split, another tab) moves the terminal with its process. End one with `term:close()`, usually from `on_close`.
 - `ui.term` rejects an unknown option. The `on_*` options are a session's events, not a node's: give them to `ui.term`, not `ui.terminal`.
 - A page from `ui.web(id)` is kept until `web:close()`; `ui.web(opts)` and a `webview` without `web` make a page for the run (a reload makes a new one).
-- Over a page or a terminal that takes input, zgx's nodes hear no pointer moves (they had their leave): follow `web.pointer` or `term.pointer` instead. The terminal reads its own keyboard, IME and mouse; app shortcuts reach the app through its commands, whose keys work wherever focus is.
+- Over a page or a terminal that takes input, zgx's nodes hear no pointer moves (they had their leave): follow `web.pointer` or `term.pointer` instead. The terminal reads its own keyboard, IME and mouse; app shortcuts reach the app through its commands, whose keys work wherever focus is, and on macOS a ⌘ key Ghostty binds to nothing (and one a page leaves alone) reaches the app's `on_key` as typed in zgx's own view.
 - Terminals hand the right clicks their program does not use to the node, so a `context_menu` on the `terminal` node opens over it.
 - Each successful load declares its commands afresh, replacing the last; a failed reload keeps them. Declaring an id twice in one run is an error.
 - `on_message` and `eval` get the page's JSON as Luau data, typed `any`: check its shape before using it.

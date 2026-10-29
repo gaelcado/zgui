@@ -6,7 +6,9 @@ use std::{
     time::Duration,
 };
 use zgx::input::{Key, Modifiers};
-use zgx_desktop::{AppMenu, AppMenuEntry, Application, MenuAccelerator, WindowOptions};
+use zgx_desktop::{
+    AppMenu, AppMenuEntry, Application, MenuAccelerator, StandardItem, WindowOptions,
+};
 use zgx_script::{Command, ScriptHost};
 
 #[cfg(feature = "fetch")]
@@ -20,18 +22,53 @@ pub fn install_fetcher(host: &ScriptHost) {
     fetch::install(host);
 }
 
+/// What a script's `ui.command { menu = "app" }` names: the application's
+/// own menu.
+pub const APPLICATION_MENU: &str = "app";
+
 /// Menus in the order the script first names them, items in its order.
+/// The menu `"app"` is the application's own (`AppMenu::application`): on
+/// macOS its items lead the menu named after the app.
 pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
     let mut menus: Vec<AppMenu> = Vec::new();
     for command in commands {
-        let index = match menus.iter().position(|m| m.label == command.menu) {
+        let application = command.menu == APPLICATION_MENU;
+        let index = match menus.iter().position(|m| {
+            if application {
+                m.application
+            } else {
+                !m.application && m.label == command.menu
+            }
+        }) {
             Some(index) => index,
             None => {
-                menus.push(AppMenu::new(command.menu.clone(), []));
+                menus.push(if application {
+                    AppMenu::application("", [])
+                } else {
+                    AppMenu::new(command.menu.clone(), [])
+                });
                 menus.len() - 1
             }
         };
-        let entry = if command.separator {
+        let standard = command.standard.as_deref().and_then(|name| {
+            Some(AppMenuEntry::Standard(match name {
+                "undo" => StandardItem::Undo,
+                "redo" => StandardItem::Redo,
+                "cut" => StandardItem::Cut,
+                "copy" => StandardItem::Copy,
+                "paste" => StandardItem::Paste,
+                "select_all" => StandardItem::SelectAll,
+                _ => return None,
+            }))
+        });
+        let entry = if let Some(standard) = standard {
+            standard
+        } else if let Some((name, version)) = &command.about {
+            AppMenuEntry::About {
+                name: name.clone(),
+                version: version.clone(),
+            }
+        } else if command.separator {
             AppMenuEntry::Separator
         } else {
             let item = AppMenuEntry::item(command.title.clone(), command.id.as_str());
@@ -101,6 +138,12 @@ pub fn accelerator(text: &str) -> Option<MenuAccelerator> {
 /// { "title": "Mail", "width": 1100, "height": 720, "min_width": 640,
 ///   "min_height": 400, "titlebar": "inset", "glass": true, "app_id": "mail" }
 /// ```
+///
+/// `"glass": "plain"` is the blur alone, for an app that tints it itself.
+///
+/// ```json
+/// { "glass": "plain" }
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
     pub title: String,
@@ -110,7 +153,10 @@ pub struct AppConfig {
     /// `"standard"`, `"inset"` (content under a transparent title bar) or
     /// `"hidden"`.
     pub titlebar: zgx_desktop::Titlebar,
-    pub glass: bool,
+    /// The blurred desktop behind the window: `true` for the default glass,
+    /// `"plain"` for the blur alone (no desktop tint or saturation), for an
+    /// app laying its own tint over it.
+    pub glass: Option<zgx_desktop::Glass>,
     /// Where `ui.persist` keeps its data (the app's data directory).
     pub app_id: String,
     /// A reverse-DNS application ID (`"dev.zgx.code"`): the system then
@@ -141,7 +187,7 @@ impl AppConfig {
             height: 640.,
             min_size: None,
             titlebar: zgx_desktop::Titlebar::Standard,
-            glass: false,
+            glass: None,
             app_id: name,
             application_id: None,
         };
@@ -218,10 +264,12 @@ impl AppConfig {
             }
         };
         config.glass = match object.get("glass") {
-            None => false,
+            None => None,
+            Some(v) if v.as_str() == Some("plain") => Some(zgx_desktop::Glass::default().plain()),
             Some(v) => v
                 .as_bool()
-                .ok_or_else(|| fail("`glass` is not a boolean".into()))?,
+                .ok_or_else(|| fail("`glass` is a boolean or \"plain\"".into()))?
+                .then(zgx_desktop::Glass::default),
         };
         if let Some(id) = string("app_id")? {
             config.app_id = id;
@@ -323,7 +371,7 @@ pub fn run_hosting(
         height: config.height,
         min_size: config.min_size,
         titlebar: config.titlebar,
-        glass: config.glass.then(zgx_desktop::Glass::default),
+        glass: config.glass,
         ..Default::default()
     };
     let launched: Vec<PathBuf> = args
@@ -559,6 +607,12 @@ mod tests {
             ("Mail", 1100., Some((600., 400.)))
         );
         assert_eq!(config.titlebar, zgx_desktop::Titlebar::Inset);
+        assert_eq!(config.glass, None);
+        std::fs::write(dir.join("zgx.json"), r#"{ "glass": "plain" }"#).unwrap();
+        let config = AppConfig::for_script(&script).unwrap();
+        assert_eq!(config.glass, Some(zgx_desktop::Glass::default().plain()));
+        std::fs::write(dir.join("zgx.json"), r#"{ "glass": "clear" }"#).unwrap();
+        assert!(AppConfig::for_script(&script).is_err());
         std::fs::write(dir.join("zgx.json"), r#"{ "widht": 3 }"#).unwrap();
         let error = AppConfig::for_script(&script).unwrap_err();
         assert!(error.contains("unknown key `widht`"), "{error}");
@@ -592,6 +646,66 @@ mod tests {
         let error = AppConfig::read(&script).unwrap_err();
         assert!(error.contains("is not a folder"), "{error}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn commands_in_the_app_menu_make_the_application_menu() {
+        let command = |id: &str, menu: &str| Command {
+            id: id.into(),
+            title: id.into(),
+            menu: menu.into(),
+            key: None,
+            separator: false,
+            standard: None,
+            about: None,
+        };
+        let menus = menus(&[
+            command("updates", APPLICATION_MENU),
+            command("sidebar", "View"),
+            command("settings", APPLICATION_MENU),
+            // A menu titled "App" is not the application's.
+            command("other", "App"),
+        ]);
+        let shape: Vec<_> = menus
+            .iter()
+            .map(|m| (m.application, m.label.as_str(), m.entries.len()))
+            .collect();
+        assert_eq!(
+            shape,
+            [(true, "", 2), (false, "View", 1), (false, "App", 1)]
+        );
+    }
+
+    #[test]
+    fn standard_and_about_commands_are_the_platform_s_own_items() {
+        let item = |menu: &str, standard: Option<&str>, about: Option<(&str, &str)>| Command {
+            id: String::new(),
+            title: String::new(),
+            menu: menu.into(),
+            key: None,
+            separator: false,
+            standard: standard.map(Into::into),
+            about: about.map(|(n, v)| (n.into(), v.into())),
+        };
+        let menus = menus(&[
+            item(APPLICATION_MENU, None, Some(("Zeron", "0.2.129"))),
+            item("Edit", Some("undo"), None),
+            item("Edit", Some("select_all"), None),
+        ]);
+        assert_eq!(
+            menus[0].entries,
+            [AppMenuEntry::About {
+                name: "Zeron".into(),
+                version: "0.2.129".into()
+            }]
+        );
+        assert_eq!(
+            menus[1].entries,
+            [
+                AppMenuEntry::Standard(StandardItem::Undo),
+                AppMenuEntry::Standard(StandardItem::SelectAll)
+            ]
+        );
     }
 
     #[test]

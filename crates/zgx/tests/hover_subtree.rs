@@ -6,6 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use zgx::{
     compose::prelude::*,
     input::{EventPhase, InputEvent},
+    scene::NodeId,
     widgets::Ui,
 };
 
@@ -171,4 +172,98 @@ fn removing_the_hovered_child_keeps_its_parent_hovered() {
     assert!(take(&log).is_empty(), "{:?}", log.borrow());
     move_to(&mut ui, 250., 10.);
     assert_eq!(take(&log), ["parent-"]);
+}
+
+/// A 200×50 hover group: a 50×50 handle at its left, and a close button at
+/// its right, hidden until the group is hovered. A third child is styled on
+/// the group's hover and on its own, over it.
+fn group(ui: &mut Ui) -> (NodeId, NodeId) {
+    let view = ui.mount(
+        row()
+            .size(200., 50.)
+            .hover_group()
+            .child(div().size(50., 50.).on_click(|| {}))
+            .child(
+                div()
+                    .size(50., 50.)
+                    .opacity(0.)
+                    .group_hover(|s| s.opacity(1.)),
+            )
+            .child(
+                div()
+                    .size(50., 50.)
+                    .opacity(0.2)
+                    .group_hover(|s| s.opacity(0.6))
+                    .hover(|s| s.opacity(1.)),
+            ),
+    );
+    ui.prepare_frame();
+    let children = ui.scene.borrow().children(view.node()).to_vec();
+    (children[1], children[2])
+}
+
+fn opacity(ui: &Ui, node: NodeId) -> f32 {
+    ui.scene.borrow().effects(node).opacity
+}
+
+#[test]
+fn group_hover_styles_follow_the_group_not_the_node() {
+    let mut ui = Ui::new(300., 100.);
+    let (close, both) = group(&mut ui);
+    assert_eq!((opacity(&ui, close), opacity(&ui, both)), (0., 0.2));
+    // Over the handle: the group is hovered, so its close button shows.
+    move_to(&mut ui, 10., 10.);
+    ui.prepare_frame();
+    assert_eq!((opacity(&ui, close), opacity(&ui, both)), (1., 0.6));
+    // Over the third child: its own hover lies over the group's.
+    move_to(&mut ui, 120., 10.);
+    ui.prepare_frame();
+    assert_eq!((opacity(&ui, close), opacity(&ui, both)), (1., 1.));
+    // Out of the group: both rest again.
+    move_to(&mut ui, 250., 10.);
+    ui.prepare_frame();
+    assert_eq!((opacity(&ui, close), opacity(&ui, both)), (0., 0.2));
+}
+
+#[test]
+fn group_hover_outside_a_group_never_applies() {
+    let mut ui = Ui::new(300., 100.);
+    let view = ui.mount(
+        row().size(200., 50.).hover(|s| s.bg(rgb(0x202020))).child(
+            div()
+                .size(50., 50.)
+                .opacity(0.)
+                .group_hover(|s| s.opacity(1.)),
+        ),
+    );
+    ui.prepare_frame();
+    let child = ui.scene.borrow().children(view.node())[0];
+    move_to(&mut ui, 10., 10.);
+    ui.prepare_frame();
+    assert_eq!(opacity(&ui, child), 0.);
+}
+
+#[test]
+fn a_group_hover_shows_what_the_base_hides() {
+    let mut ui = Ui::new(300., 100.);
+    let view = ui.mount(
+        row()
+            .size(200., 50.)
+            .hover_group()
+            .child(div().size(50., 50.).on_click(|| {}))
+            .child(div().size(30., 30.).hidden().group_hover(|s| s.shown())),
+    );
+    ui.prepare_frame();
+    let close = ui.scene.borrow().children(view.node())[1];
+    assert_eq!(ui.scene.borrow().bounds(close).width, 0., "hidden at rest");
+    move_to(&mut ui, 10., 10.);
+    ui.prepare_frame();
+    assert_eq!(
+        ui.scene.borrow().bounds(close).width,
+        30.,
+        "laid out in the hovered group"
+    );
+    move_to(&mut ui, 250., 10.);
+    ui.prepare_frame();
+    assert_eq!(ui.scene.borrow().bounds(close).width, 0.);
 }

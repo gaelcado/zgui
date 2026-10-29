@@ -1,5 +1,6 @@
-//! The desktop's `zgx::platform::Platform`: the native clipboard and the
-//! window's file dialogs, provided to what a window renders.
+//! The desktop's `zgx::platform::Platform`: the native clipboard, the
+//! window's file dialogs and the trackpad's haptics, provided to what a
+//! window renders.
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 use zgx::platform::{FilePicker, Pending, Platform};
 
@@ -61,6 +62,23 @@ impl Platform for Desktop {
     fn open_url(&self, url: &str) -> bool {
         // The launcher runs detached: nothing waits on the browser.
         crate::url::valid_url(url) && open::that_detached(url).is_ok()
+    }
+    #[cfg(target_os = "macos")]
+    fn haptic(&self, haptic: zgx::platform::Haptic) -> bool {
+        haptics::perform(haptic)
+    }
+    #[cfg(target_os = "macos")]
+    fn play_sound(&self, path: &std::path::Path) -> bool {
+        sounds::play(path)
+    }
+    #[cfg(target_os = "macos")]
+    fn notify(&self, notification: &zgx::platform::Notification) -> bool {
+        banners::post(notification)
+    }
+    #[cfg(target_os = "macos")]
+    fn app_active(&self) -> bool {
+        objc2::MainThreadMarker::new()
+            .is_none_or(|mtm| objc2_app_kit::NSApplication::sharedApplication(mtm).isActive())
     }
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     fn misspellings(&self, text: &str) -> Vec<std::ops::Range<usize>> {
@@ -148,6 +166,211 @@ fn byte_offset(text: &str, units: usize) -> usize {
 
 #[cfg(target_os = "linux")]
 use crate::linux_spelling as spelling;
+
+/// macOS's haptic feedback (`NSHapticFeedbackManager`), performed now
+/// rather than at the next draw. AppKit does nothing where the trackpad
+/// cannot (a mouse, an older trackpad).
+#[cfg(target_os = "macos")]
+mod haptics {
+    use objc2_app_kit::{
+        NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
+        NSHapticFeedbackPerformer,
+    };
+    use zgx::platform::Haptic;
+
+    pub(super) fn perform(haptic: Haptic) -> bool {
+        // AppKit's performer is the main thread's, where input is handled.
+        if objc2::MainThreadMarker::new().is_none() {
+            return false;
+        }
+        let pattern = match haptic {
+            Haptic::Level => NSHapticFeedbackPattern::LevelChange,
+            Haptic::Alignment => NSHapticFeedbackPattern::Alignment,
+            Haptic::Generic => NSHapticFeedbackPattern::Generic,
+        };
+        NSHapticFeedbackManager::defaultPerformer()
+            .performFeedbackPattern_performanceTime(pattern, NSHapticFeedbackPerformanceTime::Now);
+        true
+    }
+}
+
+/// macOS's sounds (`NSSound`): each file read once and kept, played on the
+/// main thread, where AppKit mixes it without blocking; played again, it
+/// starts over.
+#[cfg(target_os = "macos")]
+mod sounds {
+    use objc2::{AnyThread, rc::Retained};
+    use objc2_app_kit::NSSound;
+    use objc2_foundation::NSString;
+    use std::{
+        cell::RefCell,
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
+
+    thread_local! {
+        static LOADED: RefCell<HashMap<PathBuf, Retained<NSSound>>> = RefCell::default();
+    }
+
+    pub(super) fn play(path: &Path) -> bool {
+        if objc2::MainThreadMarker::new().is_none() {
+            return false;
+        }
+        let Some(name) = path.to_str() else {
+            return false;
+        };
+        let sound = LOADED.with(|loaded| {
+            let mut loaded = loaded.borrow_mut();
+            if let Some(sound) = loaded.get(path) {
+                return Some(sound.clone());
+            }
+            let sound = NSSound::initWithContentsOfFile_byReference(
+                NSSound::alloc(),
+                &NSString::from_str(name),
+                true,
+            )?;
+            loaded.insert(path.to_path_buf(), sound.clone());
+            Some(sound)
+        });
+        sound.is_some_and(|sound| {
+            sound.stop();
+            sound.play()
+        })
+    }
+}
+
+/// macOS's banners: the notification centre's (`NSUserNotification`, which
+/// needs no permission prompt and carries the app's name and icon) where
+/// the process has a bundle of its own; without one (`cargo run`), through
+/// `osascript`, attributed to Script Editor. A delegate has the centre
+/// show them while the app is frontmost too: whether to post is the app's
+/// choice. A banner with an id hands it back when clicked
+/// (`zgx::platform::notification_clicked`); one shown through `osascript`
+/// cannot.
+#[cfg(target_os = "macos")]
+mod banners {
+    #![allow(deprecated)]
+    use objc2::{
+        MainThreadMarker, MainThreadOnly, define_class, msg_send,
+        rc::Retained,
+        runtime::{NSObject, ProtocolObject},
+    };
+    use objc2_foundation::{
+        NSBundle, NSObjectProtocol, NSString, NSUserNotification, NSUserNotificationCenter,
+        NSUserNotificationCenterDelegate,
+    };
+    use zgx::platform::Notification;
+
+    define_class!(
+        // SAFETY: an NSObject subclass with no ivars, main-thread only (the
+        // centre asks its delegate there); its methods have the delegate's
+        // signatures.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        struct Presenter;
+        unsafe impl NSObjectProtocol for Presenter {}
+        unsafe impl NSUserNotificationCenterDelegate for Presenter {
+            #[unsafe(method(userNotificationCenter:shouldPresentNotification:))]
+            fn should_present(&self, _: &NSUserNotificationCenter, _: &NSUserNotification) -> bool {
+                true
+            }
+            #[unsafe(method(userNotificationCenter:didActivateNotification:))]
+            fn did_activate(&self, _: &NSUserNotificationCenter, banner: &NSUserNotification) {
+                if let Some(id) = banner.identifier() {
+                    zgx::platform::notification_clicked(&id.to_string());
+                }
+            }
+        }
+    );
+    impl Presenter {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(());
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    thread_local! {
+        // The centre keeps its delegate weakly.
+        static PRESENTER: std::cell::OnceCell<Retained<Presenter>> = const { std::cell::OnceCell::new() };
+    }
+
+    fn centre(mtm: MainThreadMarker) -> Option<Retained<NSUserNotificationCenter>> {
+        NSBundle::mainBundle().bundleIdentifier()?;
+        // Nil without a bundle: asked as an optional.
+        let centre: Option<Retained<NSUserNotificationCenter>> = unsafe {
+            msg_send![
+                objc2::class!(NSUserNotificationCenter),
+                defaultUserNotificationCenter
+            ]
+        };
+        let centre = centre?;
+        PRESENTER.with(|presenter| {
+            let presenter = presenter.get_or_init(|| Presenter::new(mtm));
+            unsafe { centre.setDelegate(Some(ProtocolObject::from_ref(&**presenter))) };
+        });
+        Some(centre)
+    }
+
+    pub(super) fn post(notification: &Notification) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        if let Some(centre) = centre(mtm) {
+            let banner = NSUserNotification::new();
+            banner.setTitle(Some(&NSString::from_str(&notification.title)));
+            banner.setInformativeText(Some(&NSString::from_str(&notification.body)));
+            if !notification.id.is_empty() {
+                banner.setIdentifier(Some(&NSString::from_str(&notification.id)));
+            }
+            centre.deliverNotification(&banner);
+            return true;
+        }
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            escape(&notification.body),
+            escape(&notification.title),
+        );
+        // Off the main thread: osascript takes a moment to start.
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        });
+        true
+    }
+
+    /// `text` inside an AppleScript string: its quotes and backslashes
+    /// escaped, its line breaks spaces.
+    pub(super) fn escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '"' | '\\' => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                '\n' | '\r' => out.push(' '),
+                c if c.is_control() => {}
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn a_banner_s_text_cannot_end_the_script_s_string() {
+            assert_eq!(
+                super::escape("Run \"x\" \\ done\nnow"),
+                "Run \\\"x\\\" \\\\ done now"
+            );
+        }
+    }
+}
 
 /// macOS's spelling checker (`NSSpellChecker`), for editors that check
 /// (`View::spellcheck`). One document tag for the app: what Ignore Spelling

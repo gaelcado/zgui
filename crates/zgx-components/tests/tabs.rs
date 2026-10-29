@@ -247,6 +247,325 @@ fn an_overflowing_strip_lists_its_tabs_in_a_menu() {
 }
 
 #[test]
+fn a_background_tabs_close_leaves_the_choice_where_it_was() {
+    let (mut ui, view, items, selected) = mounted(500., TabsOptions::default());
+    let close = with_role(&ui, &view, Role::Button)
+        .into_iter()
+        .find(|b| ui.semantics.borrow().get(*b).unwrap().label == "Close Beta")
+        .expect("a close button");
+    click(&mut ui, close);
+    assert_eq!(order(&items), ["a", "c"]);
+    assert_eq!(selected.get(), "a", "Alpha stays chosen");
+}
+
+/// Tabs drawn by the app: `width` wide each at most, sharing a strip
+/// `strip` wide; a press on its "x" closes it.
+fn drawn(
+    strip: f32,
+    width: f32,
+    moved: Rc<RefCell<Vec<(String, usize)>>>,
+) -> (
+    Ui,
+    ViewHandle,
+    zgx::reactive::Signal<Vec<Tab>>,
+    zgx::reactive::Signal<String>,
+) {
+    let mut ui = Ui::new(strip, 200.);
+    let items = ui.signal(
+        (0..6)
+            .map(|i| Tab::new(format!("t{i}"), format!("Space {i}")).closable())
+            .collect::<Vec<_>>(),
+    );
+    let selected = ui.signal("t0".to_owned());
+    let dress: DressTab = Rc::new(
+        move |tab: &Tab, bare: View, close: Rc<dyn Fn()>, _: &mut Context| {
+            bare.id(tab.id.clone())
+                .h(28.)
+                .p(0.)
+                .max_w(width)
+                .min_w(40.)
+                .flex_shrink(1.)
+                .child(text(tab.label.clone()).truncate().min_w(0.).flex_shrink(1.))
+                .child(
+                    button()
+                        .id(format!("{}_x", tab.id))
+                        .focusable(false)
+                        .w(16.)
+                        .h(16.)
+                        .on_click(move || close()),
+                )
+        },
+    );
+    let options = TabsOptions {
+        reorderable: true,
+        tab: Some(dress),
+        on_move: Some(Rc::new(move |id: &str, to: usize| {
+            moved.borrow_mut().push((id.to_owned(), to));
+        })),
+        list: Some(Styles::new().gap(3.)),
+        ..Default::default()
+    };
+    let view = ui.mount(column().w(strip).child(tab_strip(
+        "Spaces",
+        items.clone(),
+        selected.clone(),
+        options,
+    )));
+    ui.prepare_frame();
+    ui.prepare_frame();
+    (ui, view, items, selected)
+}
+
+#[test]
+fn tabs_the_app_draws_are_tabs_and_share_the_strip() {
+    let moved = Rc::new(RefCell::new(Vec::new()));
+    let (mut ui, view, items, selected) = drawn(400., 120., moved.clone());
+    let tabs = with_role(&ui, &view, Role::Tab);
+    assert_eq!(labels(&ui, &tabs)[..2], ["Space 0", "Space 1"]);
+    assert_eq!(
+        tabs[1],
+        view.find("t1").unwrap(),
+        "the drawn tab is the tab"
+    );
+    assert!(
+        with_role(&ui, &view, Role::TabPanel).is_empty(),
+        "a strip alone"
+    );
+    // Six of up to 120 in 400: they shrink together, 3 apart, no menu.
+    let (a, b) = {
+        let scene = ui.scene.borrow();
+        (scene.bounds(tabs[0]), scene.bounds(tabs[1]))
+    };
+    assert!(a.width < 120. && a.width >= 40., "shrunk: {a:?}");
+    assert!(
+        (b.x - (a.x + a.width) - 3.).abs() < 0.5,
+        "the list's gap: {a:?} {b:?}"
+    );
+    assert!(
+        !with_role(&ui, &view, Role::Button).iter().any(|n| ui
+            .semantics
+            .borrow()
+            .get(*n)
+            .unwrap()
+            .label
+            == "All tabs")
+    );
+    // Chosen as pressed; the keys as ever.
+    click(&mut ui, tabs[2]);
+    assert_eq!(selected.get(), "t2");
+    assert_eq!(ui.input.focused(), Some(tabs[2]));
+    key(&mut ui, Key::ArrowRight);
+    assert_eq!(selected.get(), "t3");
+    let move_keys = Modifiers {
+        meta: true,
+        shift: true,
+        ..Default::default()
+    };
+    key_with(&mut ui, Key::ArrowLeft, move_keys);
+    assert_eq!(order(&items)[..4], ["t0", "t1", "t3", "t2"]);
+    assert_eq!(*moved.borrow(), [("t3".to_owned(), 2)], "told");
+    // The drawn tab's own close, on a background tab: the choice stays.
+    let x = view.find("t5_x").unwrap();
+    click(&mut ui, x);
+    assert!(!order(&items).contains(&"t5".to_owned()), "closed");
+    assert_eq!(selected.get(), "t3");
+}
+
+/// Fixed-width tabs that shrink only as the strip leaves them room (a
+/// browser's chips beside a + button): the menu that their overflow brings
+/// leaves them just the strip, which they fill; it stays, rather than
+/// going and coming back every layout pass.
+#[test]
+fn an_overflow_menu_that_makes_the_tabs_fit_stays() {
+    let dress: DressTab = Rc::new(|tab: &Tab, bare: View, _: Rc<dyn Fn()>, _: &mut Context| {
+        bare.id(tab.id.clone())
+            .w(112.)
+            .h(24.)
+            .p(0.)
+            .child(text(tab.label.clone()).truncate().min_w(0.).flex_shrink(1.))
+    });
+    for strip in (240..=420).step_by(2) {
+        let mut ui = Ui::new(strip as f32, 100.);
+        let items = ui.signal(
+            (0..5)
+                .map(|i| Tab::new(format!("t{i}"), format!("Tab number {i}")))
+                .collect::<Vec<_>>(),
+        );
+        let selected = ui.signal("t4".to_owned());
+        let options = TabsOptions {
+            tab: Some(dress.clone()),
+            list: Some(Styles::new().gap(4.)),
+            ..Default::default()
+        };
+        let _view = ui.mount(
+            row()
+                .w(strip as f32)
+                .gap(4.)
+                .min_w(0.)
+                .child(
+                    row().flex_shrink(1.).min_w(112.).child(
+                        tab_strip("Tabs", items, selected, options)
+                            .flex_shrink(1.)
+                            .min_w(112.),
+                    ),
+                )
+                .child(div().w(24.).h(24.).flex_shrink(0.)),
+        );
+        for _ in 0..3 {
+            assert!(ui.try_prepare_frame().is_ok(), "settles at {strip}");
+        }
+    }
+}
+
+#[test]
+fn drawn_tabs_past_their_minimum_scroll_with_the_menu() {
+    let (mut ui, view, items, selected) = drawn(200., 120., Rc::default());
+    let all_tabs = |ui: &Ui| {
+        with_role(ui, &view, Role::Button)
+            .iter()
+            .any(|n| ui.semantics.borrow().get(*n).unwrap().label == "All tabs")
+    };
+    // Six at 40 at least, 3 apart: 255 in 200.
+    assert!(all_tabs(&ui), "too many to fit: the menu");
+    let tabs = with_role(&ui, &view, Role::Tab);
+    let first = ui.scene.borrow().bounds(tabs[0]);
+    assert!(
+        (first.width - 40.).abs() < 0.5,
+        "at their minimum: {first:?}"
+    );
+    // The chosen one scrolls into view.
+    ui.input.focus(&ui.scene, Some(tabs[0]));
+    key(&mut ui, Key::End);
+    ui.prepare_frame();
+    let last = *with_role(&ui, &view, Role::Tab).last().unwrap();
+    let b = ui.scene.borrow().bounds(last);
+    assert!(b.x + b.width <= 200., "in view: {b:?}");
+    // Chosen by the app, it comes into view too.
+    selected.set("t0".into());
+    ui.prepare_frame();
+    ui.prepare_frame();
+    let first = with_role(&ui, &view, Role::Tab)[0];
+    let b = ui.scene.borrow().bounds(first);
+    assert!(b.x >= 0., "in view: {b:?}");
+    // Fewer, and they fit again.
+    items.set(items.get()[..3].to_vec());
+    ui.prepare_frame();
+    ui.prepare_frame();
+    assert!(!all_tabs(&ui));
+}
+
+#[test]
+fn a_dragged_tab_moves_and_its_buttons_keep_their_presses() {
+    let moved = Rc::new(RefCell::new(Vec::new()));
+    let (mut ui, view, items, selected) = drawn(800., 100., moved.clone());
+    let button = PointerButton::Primary;
+    let drag = |ui: &mut Ui, from: (f32, f32), to: f32| {
+        ui.dispatch(InputEvent::PointerDown {
+            x: from.0,
+            y: from.1,
+            button,
+        });
+        for step in 1..=8 {
+            let x = from.0 + (to - from.0) * step as f32 / 8.;
+            ui.dispatch(InputEvent::PointerMove { x, y: from.1 });
+            ui.prepare_frame();
+        }
+        ui.dispatch(InputEvent::PointerUp {
+            x: to,
+            y: from.1,
+            button,
+        });
+        ui.prepare_frame();
+    };
+    let bounds = |ui: &Ui, id: &str| ui.scene.borrow().bounds(view.find(id).unwrap());
+    // From its ×: the × keeps the press (no drag, and no click off it).
+    let (x, c) = (bounds(&ui, "t0_x"), bounds(&ui, "t2"));
+    drag(&mut ui, (x.x + 8., x.y + 8.), c.x + c.width - 4.);
+    assert_eq!(
+        order(&items)[..3],
+        ["t0", "t1", "t2"],
+        "neither moved nor closed"
+    );
+    // From its title: past Gamma's middle, it moves there; the release is
+    // no click, and the tab it was chosen.
+    let (t, c) = (bounds(&ui, "t0"), bounds(&ui, "t2"));
+    drag(
+        &mut ui,
+        (t.x + 10., t.y + t.height / 2.),
+        c.x + c.width - 4.,
+    );
+    assert_eq!(order(&items)[..3], ["t1", "t2", "t0"]);
+    assert_eq!(moved.borrow().last(), Some(&("t0".to_owned(), 2)));
+    assert_eq!(selected.get(), "t0");
+}
+
+#[test]
+fn a_dragged_tab_lifts_a_preview_under_the_pointer_and_names_itself_dragged() {
+    let mut ui = Ui::new(500., 200.);
+    let items = ui.signal(
+        ["a", "b", "c"]
+            .map(|id| Tab::new(id, id.to_uppercase()))
+            .to_vec(),
+    );
+    let selected = ui.signal("a".to_owned());
+    let dragging = ui.signal(String::new());
+    let options = TabsOptions {
+        reorderable: true,
+        preview: Some(Rc::new(|tab: &Tab| {
+            div()
+                .id("preview")
+                .w(60.)
+                .h(20.)
+                .child(text(tab.label.clone()))
+        })),
+        dragging: Some(dragging.clone()),
+        ..Default::default()
+    };
+    let view = ui.mount(column().w(500.).child(tab_strip(
+        "Spaces",
+        items.clone(),
+        selected.clone(),
+        options,
+    )));
+    ui.prepare_frame();
+    let tabs = with_role(&ui, &view, Role::Tab);
+    let (a, c) = {
+        let scene = ui.scene.borrow();
+        (scene.bounds(tabs[0]), scene.bounds(tabs[2]))
+    };
+    let (x, y) = (a.x + 10., a.y + a.height / 2.);
+    let button = PointerButton::Primary;
+    ui.dispatch(InputEvent::PointerDown { x, y, button });
+    ui.dispatch(InputEvent::PointerMove { x: x + 30., y });
+    ui.prepare_frame();
+    assert_eq!(dragging.get(), "a", "the strip names it dragged");
+    let preview = ui
+        .input
+        .drag_state()
+        .and_then(|d| d.preview)
+        .expect("a preview");
+    let shown = ui.scene.borrow().bounds(preview);
+    assert!(
+        (shown.x - (a.x + 30.)).abs() < 0.5,
+        "its corner kept where the tab was grabbed: {shown:?} from {a:?}"
+    );
+    let past = c.x + c.width - 4.;
+    ui.dispatch(InputEvent::PointerMove { x: past, y });
+    ui.prepare_frame();
+    assert_eq!(
+        order(&items),
+        ["b", "c", "a"],
+        "it took its place under the pointer"
+    );
+    ui.dispatch(InputEvent::PointerUp { x: past, y, button });
+    ui.prepare_frame();
+    assert_eq!(dragging.get(), "", "let go");
+    assert!(ui.input.drag_state().is_none());
+    assert!(!ui.scene.borrow().contains(preview), "the preview gone");
+    assert_eq!(selected.get(), "a");
+}
+
+#[test]
 fn a_select_chooses_from_its_menu_and_by_typing_while_closed() {
     let mut ui = Ui::new(400., 300.);
     let value = ui.signal("b".to_owned());

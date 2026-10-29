@@ -1,0 +1,2 @@
+# zgx: Zeron's code as it is (a path dependency, `cargo fmt --all` reaches it).
+disable_all_formatting = true

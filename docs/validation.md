@@ -288,7 +288,8 @@ editor changes, with two model-level regressions supplementing native evidence.
 
 [Held-key focus transfer](platform-validation/held-keys/README.md) verifies that
 synthetic X11 key presses/releases cannot type or activate controls, while actual
-subsequent input works. [Live Wayland scaling](platform-validation/dpi-transition/README.md)
+subsequent input works, and that a held modifier reaches the view (`Ui::held_keys`,
+`ui.keys`) and clears as it comes up. [Live Wayland scaling](platform-validation/dpi-transition/README.md)
 checks 1×→2×→1× with native protocol events, fixed physical surface size, correct
 logical viewports and caret coordinates, actual pointer edits, and exactly doubled
 editor pixels at 2×. The application cannot fall back to X11 in that test.
@@ -1012,7 +1013,11 @@ the page focused it hears all three, and ⌘U and ⌘⇧L, which it leaves alone
 still reach the app while ⌘K stays the page's; with the terminal focused ⌘U
 and ⌘⇧L reach the app and ⌘K stays Ghostty's. AppKit's own menu keys act
 with each focused: ⌘H hides the app, ⌘M minimizes the window and ⌘Q quits.
-Passed on macOS 26 (M5), 2026-10-28.
+Passed on macOS 26 (M5), 2026-10-28. It now presses ⌘J too, a key nothing
+binds, which the app's own key handler (a script's `on_key`) should hear
+with each part focused: a terminal hands the app a ⌘ key Ghostty binds to
+nothing. Not run since (the probe opens a window and takes the keyboard's
+place).
 ## macOS glass and appearance set while a window shows
 
 `glass_counter --appearance-fixture` replaces the window's glass with

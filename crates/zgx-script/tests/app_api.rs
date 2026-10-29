@@ -46,6 +46,52 @@ fn commands_are_published_after_a_load_and_run_by_id() {
     assert_eq!(h.text("count"), "2");
 }
 
+/// The platform's own items in a menu: the About item with the app's name
+/// and version, and the edit items, sent to whatever has focus; each
+/// declared once.
+#[test]
+fn standard_commands_name_the_platform_s_items() {
+    let h = Harness::inline(
+        r##"ui.command { menu = "app", about = { name = "Notes", version = "1.2" } }
+        ui.command { menu = "Edit", standard = "undo" }
+        ui.command { menu = "Edit", standard = "select_all" }
+        return ui.div {}"##,
+    );
+    let shown: Vec<_> = h
+        .host
+        .commands()
+        .get()
+        .into_iter()
+        .map(|c| (c.menu, c.standard, c.about, c.separator))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                "app".into(),
+                None,
+                Some(("Notes".into(), "1.2".into())),
+                false
+            ),
+            ("Edit".into(), Some("undo".into()), None, false),
+            ("Edit".into(), Some("select_all".into()), None, false),
+        ]
+    );
+    for (script, says) in [
+        (r#"ui.command { standard = "print" }"#, "not `print`"),
+        (
+            r#"ui.command { standard = "copy" } ui.command { standard = "copy" }"#,
+            "declared twice",
+        ),
+        (r#"ui.command { about = {} }"#, "needs the app's `name`"),
+    ] {
+        let runtime = zgx::reactive::Runtime::new();
+        let host = ScriptHost::inline(&runtime, "app", format!("{script} return ui.div {{}}"));
+        let error = host.reload().unwrap_err();
+        assert!(error.contains(says), "{error}");
+    }
+}
+
 #[test]
 fn a_failed_load_keeps_the_published_commands() {
     let runtime = zgx::reactive::Runtime::new();
@@ -181,6 +227,97 @@ impl zgx::terminal::TerminalBackend for NoBackend {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
+
+/// What a terminal was asked to do, in order.
+struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<zgx::terminal::TerminalCommand>>>);
+impl zgx::terminal::TerminalBackend for Recorder {
+    fn run(&self, command: zgx::terminal::TerminalCommand) {
+        self.0.borrow_mut().push(command);
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A session's `config` (Ghostty's lines over the app's) is the
+/// terminal's as it starts, and `term:configure` replaces it, the running
+/// terminal configured again; the same again does nothing.
+#[test]
+fn a_terminal_takes_its_configuration_and_a_new_one() {
+    use zgx::terminal::TerminalCommand;
+    let mut h = Harness::inline(
+        r##"local term = ui.term("p1", { config = "background = #090909" })
+        return ui.column {
+            ui.terminal { term = term, w = 200, h = 100 },
+            ui.button { id = "light", w = 20, h = 20, on_click = function()
+                term:configure("background = #ffffff")
+            end },
+        }"##,
+    );
+    let term = terminal(&mut h);
+    assert_eq!(term.config(), "background = #090909");
+    let ran = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    term.attach(std::rc::Rc::new(Recorder(ran.clone())));
+    h.click("light");
+    h.click("light");
+    assert_eq!(term.config(), "background = #ffffff");
+    assert_eq!(
+        *ran.borrow(),
+        [TerminalCommand::Configure("background = #ffffff".into())]
+    );
+}
+
+/// `scrollbar = true` lays an overlay scrollbar over a terminal's right
+/// edge, following the scrollback it reports: a press on its track pages
+/// the terminal there.
+#[test]
+fn a_terminal_s_scrollbar_follows_and_scrolls_its_scrollback() {
+    use zgx::terminal::{Scrollback, TerminalCommand};
+    let mut h = Harness::inline(
+        r##"local term = ui.term("p1")
+        return ui.terminal { term = term, scrollbar = true, w = 200, h = 100 }"##,
+    );
+    let term = terminal(&mut h);
+    let ran = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    term.attach(std::rc::Rc::new(Recorder(ran.clone())));
+    // At the end of 1000 rows, 50 showing: the thumb at the track's foot.
+    term.update_state(|s| {
+        s.scrollback = Some(Scrollback {
+            total: 1000,
+            offset: 950,
+            visible: 50,
+        })
+    });
+    h.settle();
+    let (x, y) = (196., 4.);
+    let button = PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    h.ui.dispatch(InputEvent::PointerUp { x, y, button });
+    h.settle();
+    // (The press focuses the terminal, as one on its grid would.)
+    let scrolls = || -> Vec<TerminalCommand> {
+        ran.borrow()
+            .iter()
+            .filter(|c| !matches!(c, TerminalCommand::Focus(_)))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        scrolls(),
+        [TerminalCommand::Binding("scroll_to_row:900".into())]
+    );
+    // The terminal saying where it is now moves nothing of its own.
+    term.update_state(|s| {
+        s.scrollback = Some(Scrollback {
+            total: 1000,
+            offset: 900,
+            visible: 50,
+        })
+    });
+    h.settle();
+    assert_eq!(scrolls().len(), 1);
 }
 
 #[test]
@@ -376,6 +513,56 @@ fn any_container_without_an_id_takes_drops_and_drags() {
     }
 }
 
+/// Files dragged in from another app reach a script's destinations as a
+/// payload of their paths, `{ files = { … } }`: filtered by `drop_when`,
+/// over it as they move, left, and dropped.
+#[test]
+fn files_from_other_apps_drop_on_script_destinations() {
+    let mut h = Harness::inline(
+        r##"local log = ui.state("log", "")
+        local function note(s) log:set(log:peek() .. s .. ";") end
+        return ui.column {
+            ui.div { id = "plain", w = 100, h = 50 },
+            ui.div { id = "zone", w = 100, h = 50,
+                drop_when = function(p) return p.files ~= nil end,
+                on_drag_over = function(p, e) note("over " .. #p.files .. " " .. math.floor(e.local_y)) end,
+                on_drag_leave = function(p) note("leave") end,
+                on_drop = function(p) note("drop " .. table.concat(p.files, ",")) end,
+            },
+            ui.text { "{log}", id = "log" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    let zone = {
+        let node = h.find("zone").unwrap();
+        h.ui.scene.borrow().bounds(node)
+    };
+    let (x, y) = (zone.x + 10., zone.y + 20.);
+    h.ui.dispatch(InputEvent::FileHover {
+        x,
+        y: 10.,
+        path: "/tmp/a.png".into(),
+    });
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::FileHover {
+        x,
+        y,
+        path: "/tmp/b.rs".into(),
+    });
+    h.ui.dispatch(InputEvent::PointerMove { x, y: 10. });
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::FilesDrop {
+        x,
+        y,
+        paths: vec!["/tmp/a.png".into(), "/tmp/b.rs".into()].into(),
+    });
+    h.settle();
+    assert_eq!(
+        h.text("log"),
+        "over 1 20;over 2 20;leave;over 2 20;over 2 20;drop /tmp/a.png,/tmp/b.rs;leave;"
+    );
+}
+
 #[test]
 fn context_menus_show_what_scripts_return_at_the_pointer() {
     let mut h = Harness::inline(
@@ -532,6 +719,38 @@ fn keyed_web_pages_outlive_reloads_until_closed() {
     h.host.reload().unwrap();
     h.settle();
     assert!(first != page(&mut h), "closing ends it");
+}
+
+/// A web view's `navigation` decides each navigation before it starts, as
+/// the platform asks: web addresses in the top frame, a frame's own
+/// documents too; a policy that fails lets nothing through.
+#[test]
+fn a_web_view_s_navigation_policy_decides_what_loads() {
+    let mut h = Harness::inline(
+        r##"return ui.webview {
+            w = 200,
+            h = 100,
+            navigation = function(r)
+                if r.url == "boom:" then error("no") end
+                local scheme = string.match(r.url, "^(%a+):")
+                return scheme == "https" or (not r.main_frame and scheme == "about" and r.kind == "other")
+            end,
+        }"##,
+    );
+    let web = page(&mut h);
+    let asked = |url: &str, main_frame: bool| zgx::web_view::NavigationRequest {
+        url: url.into(),
+        main_frame,
+        kind: zgx::web_view::NavigationKind::Other,
+        source_url: String::new(),
+    };
+    assert!(web.allows(&asked("https://example.com/", true)));
+    assert!(!web.allows(&asked("file:///etc/passwd", true)));
+    assert!(!web.allows(&asked("about:blank", true)));
+    assert!(web.allows(&asked("about:blank", false)));
+    assert!(!web.allows(&asked("boom:", true)));
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("no"), "{error}");
 }
 
 #[test]
@@ -926,4 +1145,30 @@ fn an_images_shader_params_reach_its_node_and_animate_its_reveal() {
         "the front moved: {params:?}"
     );
     assert_eq!(params[0][1], 0.25, "the band kept");
+}
+
+/// `ui.native` says whether the window shows pages and terminals as the
+/// platform's own, so an app can stand in for them where it does not.
+#[test]
+fn the_script_knows_whether_pages_and_terminals_are_native_here() {
+    const APP: &str = r#"return ui.text { function()
+        local n = ui.native:get()
+        return `{n.web} {n.terminals}`
+    end, id = "native" }"#;
+    // Headless: neither.
+    let mut h = Harness::inline(APP);
+    assert_eq!(h.text("native"), "false false");
+    // A window of pages without a terminal backend, then one with both.
+    for (terminals, says) in [(false, "true false"), (true, "true true")] {
+        let natives = zgx::native_view::NativeViews::new();
+        natives.set_supported(true);
+        natives.set_terminals(terminals);
+        let mut h = Harness::wrapped(
+            |runtime| ScriptHost::inline(runtime, "app", APP),
+            move |view| zgx::compose::provide(natives, view),
+        );
+        h.settle();
+        h.ui.prepare_frame();
+        assert_eq!(h.text("native"), says);
+    }
 }

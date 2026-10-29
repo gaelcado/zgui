@@ -1543,8 +1543,16 @@ impl Ui {
                 out.push_str(separator(&scene, before, part.node, before_size.min(size)));
             }
             let range = part.range.start.min(text.len())..part.range.end.min(text.len());
+            let copied = match scene.kind(part.node) {
+                NodeKind::RichText { text } if !text.copied().is_empty() => {
+                    Some(text.copy_text(range.clone()))
+                }
+                _ => None,
+            };
             out.extend(
-                text[range]
+                copied
+                    .as_deref()
+                    .unwrap_or(&text[range])
                     .chars()
                     .filter(|c| *c != '\u{2060}' && *c != '\u{fffc}'),
             );
@@ -1900,10 +1908,15 @@ impl Ui {
                     );
                 }
                 NodeKind::RichText { text } => {
+                    // Where what is copied so far ends: a range copied as
+                    // other text gives it once, in its first run.
+                    let mut done = part.range.start;
                     for run in text.runs() {
-                        let start = run.range.start.max(part.range.start);
+                        let start = run.range.start.max(done);
                         let end = run.range.end.min(part.range.end);
                         if start < end {
+                            let (copied, to) = text.copy_text_to(start..end);
+                            done = to;
                             let href = links.and_then(|links| {
                                 links
                                     .iter()
@@ -1912,7 +1925,7 @@ impl Ui {
                             });
                             html_run(
                                 &mut out,
-                                &text.text()[start..end],
+                                &copied,
                                 &run.font,
                                 href,
                                 // A link's colour is the link's.
@@ -1941,8 +1954,15 @@ impl Ui {
         out
     }
     /// The window was activated or sent to the back: selections show the
-    /// active or inactive colour.
+    /// active or inactive colour, and `window_active` follows.
     pub fn set_window_active(&self, active: bool) {
+        if self
+            .storage
+            .window_active
+            .with_untracked(|now| *now != active)
+        {
+            self.storage.window_active.set(active);
+        }
         let changed = {
             let mut state = self.selection_state().borrow_mut();
             let changed = state.inactive == active;

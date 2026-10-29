@@ -124,6 +124,28 @@ impl DraggedText {
         &self.text
     }
 }
+/// Files dragged in from another app (Finder, a file manager), as the
+/// window's destinations hear them: a drag from outside (`DragEvent::
+/// visiting`) over them as it moves and dropped where it is let go. A view
+/// takes them with `View::on_drop::<DraggedFiles>`. Over the window it names
+/// the files the platform has told of so far (macOS one at a time as they
+/// enter); dropped, all of them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraggedFiles {
+    paths: std::sync::Arc<[std::path::PathBuf]>,
+}
+impl DraggedFiles {
+    /// Files dragged in, in the order the platform gave them.
+    pub fn new(paths: impl Into<std::sync::Arc<[std::path::PathBuf]>>) -> Self {
+        Self {
+            paths: paths.into(),
+        }
+    }
+    /// The files.
+    pub fn paths(&self) -> &[std::path::PathBuf] {
+        &self.paths
+    }
+}
 /// What a drag carries to other apps, when a host hands it to the platform
 /// as it leaves the window (`View::drag_export`).
 #[derive(Clone, Debug, PartialEq)]

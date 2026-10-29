@@ -13,12 +13,13 @@ use crate::{Vm, element::Element};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    future::poll_fn,
+    future::{Future, poll_fn},
+    pin::pin,
     rc::{Rc, Weak},
     task::{Poll, Waker},
     time::Instant,
 };
-use zgx::{frame::FrameClock, reactive::Runtime};
+use zgx::{frame::FrameClock, reactive::Runtime, scene::ShowsMemo};
 
 #[derive(Clone)]
 pub(crate) enum Modifier {
@@ -762,7 +763,9 @@ impl Clip {
     /// opacity doesn't count (a blink fades its element out and back).
     /// Advancing it would draw nothing, so it waits; a finite animation
     /// always runs on, to finish and call back.
-    fn unseen_loop(&self) -> bool {
+    /// `seen`: what the scenes' ancestors pass down this frame, by scene
+    /// (`Scene::shows`): a loader's cells and every loader share it.
+    fn unseen_loop(&self, seen: &mut Vec<(usize, ShowsMemo)>) -> bool {
         if !self.timing.borrow().loops.is_infinite() {
             return false;
         }
@@ -771,9 +774,18 @@ impl Clip {
             && tracks.iter().all(|t| match &t.target {
                 Target::Element(e) => e
                     .read(|scene, id| {
-                        scene
-                            .parent(id)
-                            .is_some_and(|parent| scene.visible_bounds(parent).is_none())
+                        let Some(parent) = scene.parent(id) else {
+                            return false;
+                        };
+                        let at = scene as *const zgx::scene::Scene as usize;
+                        let memo = match seen.iter().position(|(s, _)| *s == at) {
+                            Some(i) => &mut seen[i].1,
+                            None => {
+                                seen.push((at, ShowsMemo::default()));
+                                &mut seen.last_mut().expect("pushed").1
+                            }
+                        };
+                        !scene.shows(parent, memo)
                     })
                     .unwrap_or(false),
                 _ => false,
@@ -912,6 +924,8 @@ pub(crate) struct Engine {
     /// (in a closed dialog, a faded-out or clipped-away subtree): the engine
     /// then only looks again a few times a second (`UNSEEN_RATE`).
     unseen: Cell<bool>,
+    /// Reused each tick: what `Clip::unseen_loop` worked out of each scene.
+    seen: RefCell<Vec<(usize, ShowsMemo)>>,
     wake: Notify,
     dirty: RefCell<Vec<Rc<Element>>>,
     queue: RefCell<Vec<(Rc<Clip>, Event)>>,
@@ -951,6 +965,7 @@ impl Engine {
             clips: RefCell::default(),
             scratch: RefCell::default(),
             unseen: Cell::new(false),
+            seen: RefCell::default(),
             wake: Notify::default(),
             dirty: RefCell::default(),
             queue: RefCell::default(),
@@ -993,6 +1008,8 @@ impl Engine {
             clips.push(clip.clone());
         }
         drop(clips);
+        // Something new may be seen: look at the display's rate again.
+        self.unseen.set(false);
         self.wake.notify();
     }
     pub fn wake(&self) {
@@ -1127,7 +1144,28 @@ impl Engine {
                     (a, b) => a.or(b),
                 };
                 let frame = match rate {
-                    Some(hz) => frames.next().max_rate(hz).await,
+                    // A capped wait (unseen loops, `frameRate`) gives way to
+                    // what starts playing meanwhile: a clip started under it
+                    // would otherwise wait for the slow frame and land in
+                    // one step. It begins from the next frame instead.
+                    Some(hz) => {
+                        let mut capped = pin!(frames.next().max_rate(hz));
+                        let mut started = pin!(self.wake.wait());
+                        let raced = poll_fn(|cx| {
+                            if let Poll::Ready(frame) = capped.as_mut().poll(cx) {
+                                return Poll::Ready(Some(frame));
+                            }
+                            started.as_mut().poll(cx).map(|()| None)
+                        })
+                        .await;
+                        match raced {
+                            Some(frame) => frame,
+                            None => {
+                                last = None;
+                                continue;
+                            }
+                        }
+                    }
                     None => frames.next().await,
                 };
                 let dt = last.map_or(0., |l| (frame.time - l).as_secs_f64() * 1000.);
@@ -1169,7 +1207,12 @@ impl Engine {
             self.attach_pending();
         }
         // Loops no one can see wait (their time stands still) until they show.
-        playing.retain(|clip| !clip.unseen_loop());
+        let mut seen = std::mem::take(&mut *self.seen.borrow_mut());
+        for (_, memo) in &mut seen {
+            memo.clear();
+        }
+        playing.retain(|clip| !clip.unseen_loop(&mut seen));
+        *self.seen.borrow_mut() = seen;
         let tickers = self.tickers.borrow().clone();
         self.unseen.set(playing.is_empty() && tickers.is_empty());
         self.runtime.clone().batch(|| {

@@ -51,6 +51,10 @@ impl FontData {
     pub fn byte_len(&self) -> usize {
         self.bytes.len()
     }
+    /// Its TrueType or OpenType data.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
     /// Put it in `fonts` in place of the faces of every family it holds:
     /// text in those families shapes with it from now on. The shaped runs
     /// `fonts` keeps go too; callers must also drop retained text shapes and
@@ -75,6 +79,7 @@ impl FontData {
     /// Install before shaping text; callers replacing a live database must also
     /// invalidate retained text shapes and their layout caches.
     pub fn install(&self, fonts: &mut FontSystem) {
+        crate::assets::add_svg_font(&self.bytes);
         fonts
             .db_mut()
             .load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(

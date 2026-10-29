@@ -49,6 +49,29 @@ impl Buffer {
             }
         }
     }
+    /// The line byte `at` is on, from 0 (the byte after a break is the
+    /// next line's).
+    fn line_of(&self, at: usize) -> usize {
+        match self {
+            Buffer::Flat(text) => text.as_bytes()[..at]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count(),
+            Buffer::Long(text) => text.line_of(at),
+        }
+    }
+    /// Where line `line` (from 0) starts; past the last line, where the
+    /// last starts.
+    fn line_start(&self, line: usize) -> usize {
+        match self {
+            Buffer::Flat(text) => text
+                .match_indices('\n')
+                .take(line)
+                .last()
+                .map_or(0, |(at, _)| at + 1),
+            Buffer::Long(text) => text.line_start(line.min(text.line_count() - 1)),
+        }
+    }
     /// Where the line `at` is on starts, and where it ends (before its
     /// break).
     fn line_around(&self, at: usize) -> Range<usize> {
@@ -231,6 +254,8 @@ pub struct TextEditor {
     /// For an input method that reaches into the text: one pointer until
     /// one does.
     ime: Option<Box<ImeState>>,
+    /// Byte offsets that follow the text through its edits (`set_anchors`).
+    anchors: Vec<usize>,
 }
 impl Default for TextEditor {
     fn default() -> Self {
@@ -268,6 +293,7 @@ impl TextEditor {
             history_bytes: 4 * 1024 * 1024,
             run: None,
             ime: None,
+            anchors: Vec::new(),
         }
     }
     /// The committed text, without any preedit: borrowed while short, a
@@ -302,6 +328,51 @@ impl TextEditor {
     /// of a short text).
     pub fn around(&self, at: usize) -> (usize, Cow<'_, str>) {
         self.text.around(at.min(self.text.len()))
+    }
+    /// The line byte `at` is on, from 0.
+    pub fn line_of(&self, at: usize) -> usize {
+        self.text.line_of(at.min(self.text.len()))
+    }
+    /// Where line `line` (from 0) starts; past the last line, where the
+    /// last starts.
+    pub fn line_start(&self, line: usize) -> usize {
+        self.text.line_start(line)
+    }
+    /// Keep byte offsets that follow the text through every edit (typing,
+    /// pastes, undo, redo, a new value): a review comment's line, held by
+    /// where it starts. An offset after an edit moves by what it added or
+    /// took; one where text is inserted goes after it (a line break typed
+    /// at a line's start takes the line down, and its offset with it); one
+    /// in text deleted goes to where that was. An empty text's stay at its
+    /// start as its first text comes.
+    pub fn set_anchors(&mut self, anchors: Vec<usize>) {
+        self.anchors = anchors;
+        let len = self.text.len();
+        for at in &mut self.anchors {
+            *at = (*at).min(len);
+        }
+    }
+    /// The offsets `set_anchors` keeps, where edits since moved them.
+    pub fn anchors(&self) -> &[usize] {
+        &self.anchors
+    }
+    /// The anchors after bytes `range` became `inserted` bytes.
+    fn follow(&mut self, range: Range<usize>, inserted: usize) {
+        // An empty text's anchors stay at its start as text first comes
+        // (a file arriving after the marks on its first line).
+        if range == (0..0) && self.text.len() == inserted {
+            return;
+        }
+        for at in &mut self.anchors {
+            if *at < range.start || (*at == range.start && !range.is_empty()) {
+                continue;
+            }
+            *at = if *at < range.end {
+                range.start
+            } else {
+                *at - range.len() + inserted
+            };
+        }
     }
     /// The bytes of the line byte `at` is on, its break excluded.
     pub fn line_around(&self, at: usize) -> Range<usize> {
@@ -418,6 +489,7 @@ impl TextEditor {
         self.redo.clear();
         self.redo_bytes = 0;
         self.text.replace_range(range.clone(), value);
+        self.follow(range.clone(), value.len());
         self.revision = self.revision.wrapping_add(1);
         // Insertion can join an adjacent combining mark/ZWJ sequence. Keep the caret valid.
         let desired = range.start + value.len();
@@ -551,6 +623,7 @@ impl TextEditor {
             }
             _ => self.text.replace_range(prefix..old_end, &inserted),
         }
+        self.follow(prefix..old_end, inserted.len());
         self.revision = self.revision.wrapping_add(1);
         self.selection = Selection {
             anchor: self.text.len(),
@@ -1016,6 +1089,10 @@ impl TextEditor {
         };
         self.text
             .replace_range(edit.start..edit.start + edit.inserted.len(), &edit.deleted);
+        self.follow(
+            edit.start..edit.start + edit.inserted.len(),
+            edit.deleted.len(),
+        );
         self.revision = self.revision.wrapping_add(1);
         self.selection = edit.before;
         self.cancel_preedit();
@@ -1040,6 +1117,10 @@ impl TextEditor {
         };
         self.text
             .replace_range(edit.start..edit.start + edit.deleted.len(), &edit.inserted);
+        self.follow(
+            edit.start..edit.start + edit.deleted.len(),
+            edit.inserted.len(),
+        );
         self.revision = self.revision.wrapping_add(1);
         self.selection = edit.after;
         self.cancel_preedit();
@@ -1670,6 +1751,70 @@ mod tests {
         assert_eq!(e.selection().focus, e.text().len());
         e.move_left(false, false);
         assert_eq!(e.selection().focus, 0);
+    }
+    /// The lines anchors are on, from 1.
+    fn anchored(e: &TextEditor) -> Vec<usize> {
+        e.anchors().iter().map(|at| e.line_of(*at) + 1).collect()
+    }
+    #[test]
+    fn anchors_follow_their_lines_through_edits_undo_and_new_values() {
+        let mut e = TextEditor::new("one\ntwo\nthree\nfour");
+        assert_eq!((e.line_start(2), e.line_start(9)), (8, 14));
+        e.set_anchors(vec![e.line_start(1), e.line_start(3)]);
+        assert_eq!(anchored(&e), [2, 4]);
+        // Typed above: they move with their lines.
+        e.set_selection(0, 0);
+        e.insert("\n");
+        assert_eq!(anchored(&e), [3, 5]);
+        // Typed in a line: its start stays; a line break typed at a marked
+        // line's start takes it down.
+        let two = e.anchors()[0];
+        e.set_selection(two + 1, two + 1);
+        e.insert("x");
+        assert_eq!(e.anchors()[0], two);
+        e.set_selection(two, two);
+        e.insert("\n");
+        assert_eq!(anchored(&e), [4, 6]);
+        // Undone and redone, as they were.
+        assert!(e.undo());
+        assert_eq!(anchored(&e), [3, 5]);
+        assert!(e.redo());
+        assert_eq!(anchored(&e), [4, 6]);
+        // Text deleted around one leaves it where the deletion was.
+        let (two, four) = (e.anchors()[0], e.anchors()[1]);
+        e.set_selection(two - 1, two + 3);
+        e.insert("");
+        assert_eq!(e.anchors()[0], two - 1);
+        assert_eq!(e.anchors()[1], four - 4);
+        // A new value: its changed span moves those after it.
+        let text = e.text().into_owned();
+        e.set_text(format!("zero\n{text}"));
+        assert_eq!(anchored(&e), [4, 6]);
+        // Pasted text over a line's start keeps the line's anchor there.
+        let four = e.anchors()[1];
+        e.set_selection(four, four + 2);
+        e.insert_pasted("FO\nUR");
+        assert_eq!(e.anchors()[1], four);
+        // An empty text's first text leaves them on its first line.
+        let mut e = TextEditor::new("");
+        e.set_anchors(vec![0]);
+        e.set_text("a\nb");
+        assert_eq!(e.anchors(), [0]);
+    }
+    #[test]
+    fn anchors_follow_a_long_text_as_a_short_one() {
+        let text: String = (0..20_000).map(|i| format!("line {i}\n")).collect();
+        let mut e = TextEditor::new(text);
+        assert!(e.long_text().is_some());
+        e.set_anchors(vec![e.line_start(10_000)]);
+        assert_eq!(anchored(&e), [10_001]);
+        e.set_selection(0, 0);
+        e.insert("\n\n");
+        assert_eq!(anchored(&e), [10_003]);
+        assert!(e.undo());
+        assert_eq!(anchored(&e), [10_001]);
+        // Past the end: the last line's start.
+        assert_eq!(e.line_of(e.line_start(99_999)), 20_000);
     }
 }
 

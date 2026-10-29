@@ -13,6 +13,7 @@ exclude = [
     "vendor/mlua",
     "vendor/taffy",
     "vendor/winit",
+    "vendor/zatex",
 ]
 resolver = "2"
 

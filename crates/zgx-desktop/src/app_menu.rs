@@ -86,6 +86,9 @@ pub struct AppMenu {
     pub label: String,
     /// Its items, in order.
     pub entries: Vec<AppMenuEntry>,
+    /// The application's own menu ([`AppMenu::application`]), not one
+    /// after it.
+    pub application: bool,
 }
 impl AppMenu {
     /// A menu titled `label` holding `entries`.
@@ -93,6 +96,22 @@ impl AppMenu {
         Self {
             label: label.into(),
             entries: entries.into_iter().collect(),
+            application: false,
+        }
+    }
+    /// The application's own menu: on macOS its `entries` lead the menu
+    /// AppKit names after the app (About, Check for Updates…, Settings),
+    /// above Services, Hide and Quit, rather than making a menu of their
+    /// own beside it. A rendered menu bar shows it first, titled `label`,
+    /// or the process's name when `label` is empty. Several merge, in
+    /// order.
+    pub fn application(
+        label: impl Into<String>,
+        entries: impl IntoIterator<Item = AppMenuEntry>,
+    ) -> Self {
+        Self {
+            application: true,
+            ..Self::new(label, entries)
         }
     }
 }
@@ -189,6 +208,15 @@ pub enum AppMenuEntry {
     Separator,
     /// An edit command the platform implements (see [`StandardItem`]).
     Standard(StandardItem),
+    /// "About `name`": on macOS AppKit's about panel, showing `name` and
+    /// `version` with the bundle's icon and copyright. A rendered menu bar
+    /// shows it dimmed: there is no panel to open there.
+    About {
+        /// The app's name.
+        name: String,
+        /// Its version, as the panel shows it.
+        version: String,
+    },
 }
 impl AppMenuEntry {
     /// An enabled item titled `label` that dispatches `action`, unchecked and
@@ -250,7 +278,7 @@ pub(crate) fn validate(menus: &[AppMenu]) -> Result<(), AppMenuError> {
         shortcuts: &mut HashSet<String>,
     ) -> Result<(), AppMenuError> {
         for menu in menus {
-            if menu.label.is_empty() || menu.label.contains('\0') {
+            if (menu.label.is_empty() && !menu.application) || menu.label.contains('\0') {
                 return Err(AppMenuError(
                     "menu labels must be nonempty and contain no NUL".into(),
                 ));
@@ -294,6 +322,17 @@ pub(crate) fn validate(menus: &[AppMenu]) -> Result<(), AppMenuError> {
                             )));
                         }
                     }
+                    AppMenuEntry::About { name, version } => {
+                        if name.is_empty() || name.contains('\0') || version.contains('\0') {
+                            return Err(AppMenuError(
+                                "the About item needs a name, and no NUL in it or its version"
+                                    .into(),
+                            ));
+                        }
+                        if !ids.insert("standard:about".into()) {
+                            return Err(AppMenuError("the About item appears twice".into()));
+                        }
+                    }
                     AppMenuEntry::Separator => {}
                 }
             }
@@ -316,7 +355,7 @@ pub(crate) fn enabled_action(menus: &[AppMenu], action: &MenuAction) -> bool {
             // AppKit's own on macOS (sent to the first responder); elsewhere
             // an item of zgx's menu bar like any other.
             AppMenuEntry::Standard(item) => !cfg!(target_os = "macos") && item.action() == *action,
-            AppMenuEntry::Separator => false,
+            AppMenuEntry::About { .. } | AppMenuEntry::Separator => false,
         })
 }
 /// Accessible retained menus with keyboard traversal, Escape dismissal, focus
@@ -328,6 +367,7 @@ pub fn app_menu_bar(
 ) -> Result<View, AppMenuError> {
     validate(&menus)?;
     let dispatch: Rc<dyn Fn(MenuAction)> = Rc::new(dispatch);
+    let menus = rendered_menus(menus);
     Ok(compose::component(move |cx| {
         let menus = menus
             .into_iter()
@@ -350,6 +390,34 @@ pub fn app_menu_bar(
             .collect::<Vec<_>>();
         compose::row().gap(4.).children(menus)
     }))
+}
+/// The menus a rendered bar shows, in order: the application's own first
+/// (merged into one, titled by its label or the process's name), then the
+/// rest.
+fn rendered_menus(menus: Vec<AppMenu>) -> Vec<AppMenu> {
+    let (application, rest): (Vec<_>, Vec<_>) = menus.into_iter().partition(|m| m.application);
+    let mut out = Vec::with_capacity(rest.len() + 1);
+    if !application.is_empty() {
+        let label = application
+            .iter()
+            .map(|m| m.label.clone())
+            .find(|label| !label.is_empty())
+            .unwrap_or_else(process_name);
+        out.push(AppMenu::new(
+            label,
+            application.into_iter().flat_map(|m| m.entries),
+        ));
+    }
+    out.extend(rest);
+    out
+}
+/// The running program's name, as macOS titles the application menu.
+fn process_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Application".into())
 }
 fn entries(
     cx: &mut Context,
@@ -404,6 +472,10 @@ fn entries(
                     .p(6.)
                     .on_click(move || dispatch(item.action()))
             }
+            AppMenuEntry::About { name, .. } => compose::menu_item(format!("About {name}"))
+                .h(30.)
+                .p(6.)
+                .disabled(true),
         })
         .collect()
 }
@@ -600,7 +672,13 @@ fn binds_zoom_keys(menus: &[AppMenu]) -> bool {
 #[cfg(target_os = "macos")]
 fn native_submenu(model: &AppMenu) -> Result<muda::Submenu, AppMenuError> {
     let menu = muda::Submenu::new(&model.label, true);
-    for entry in &model.entries {
+    append_native(&menu, &model.entries)?;
+    Ok(menu)
+}
+/// `entries` appended to an AppKit submenu.
+#[cfg(target_os = "macos")]
+fn append_native(menu: &muda::Submenu, entries: &[AppMenuEntry]) -> Result<(), AppMenuError> {
+    for entry in entries {
         let result = match entry {
             AppMenuEntry::Item {
                 label,
@@ -645,10 +723,23 @@ fn native_submenu(model: &AppMenu) -> Result<muda::Submenu, AppMenuError> {
                 StandardItem::Paste => muda::PredefinedMenuItem::paste(None),
                 StandardItem::SelectAll => muda::PredefinedMenuItem::select_all(None),
             }),
+            AppMenuEntry::About { name, version } => {
+                menu.append(&muda::PredefinedMenuItem::about(
+                    Some(&format!("About {name}")),
+                    Some(muda::AboutMetadata {
+                        name: Some(name.clone()),
+                        version: Some(version.clone()),
+                        // AppKit would show "Version 1.2 (1.2)" with the
+                        // bundle's own build number.
+                        short_version: Some(String::new()),
+                        ..Default::default()
+                    }),
+                ))
+            }
         };
         result.map_err(|e| AppMenuError(e.to_string()))?;
     }
-    Ok(menu)
+    Ok(())
 }
 
 /// Shows `entries` as a native pop-up menu at `(x, y)`, in points from the
@@ -699,6 +790,18 @@ impl NativeMenu {
         // its title with the process name. Keep user menus in subsequent slots,
         // including after dynamic model replacement.
         let application = muda::Submenu::new("Application", true);
+        // The app's own items lead it, over a separator.
+        let own: Vec<AppMenuEntry> = menus
+            .iter()
+            .filter(|m| m.application)
+            .flat_map(|m| m.entries.iter().cloned())
+            .collect();
+        if !own.is_empty() {
+            append_native(&application, &own)?;
+            application
+                .append(&muda::PredefinedMenuItem::separator())
+                .map_err(|e| AppMenuError(e.to_string()))?;
+        }
         application
             .append_items(&[
                 // AppKit fills the menu it was told is the Services menu
@@ -718,7 +821,7 @@ impl NativeMenu {
         let mut window = None;
         let find = !binds_find_keys(menus);
         let zoom = !binds_zoom_keys(menus);
-        for model in menus {
+        for model in menus.iter().filter(|m| !m.application) {
             let submenu = native_submenu(model)?;
             // Find in page in the Edit menu, as AppKit apps have it.
             if model.label == "Edit" && find {
@@ -920,6 +1023,35 @@ pub fn debug_menu_bar_titles(menus: &[AppMenu]) -> Result<Vec<String>, AppMenuEr
     Ok((0..bar.numberOfItems())
         .filter_map(|i| bar.itemAtIndex(i))
         .map(|item| item.title().to_string())
+        .collect())
+}
+/// Test hook: install `menus` as the application's menu bar, and the titles
+/// of the application menu's items, in order (a separator is empty). Main
+/// thread only.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_application_menu_titles(menus: &[AppMenu]) -> Result<Vec<String>, AppMenuError> {
+    let menu = NativeMenu::new(menus)?;
+    menu.install();
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Ok(Vec::new());
+    };
+    let Some(application) = objc2_app_kit::NSApplication::sharedApplication(mtm)
+        .mainMenu()
+        .and_then(|bar| bar.itemAtIndex(0))
+        .and_then(|item| item.submenu())
+    else {
+        return Ok(Vec::new());
+    };
+    Ok((0..application.numberOfItems())
+        .filter_map(|i| application.itemAtIndex(i))
+        .map(|item| {
+            if item.isSeparatorItem() {
+                String::new()
+            } else {
+                item.title().to_string()
+            }
+        })
         .collect())
 }
 /// Test hook: install `menus` as the application's menu bar, and whether
@@ -1191,6 +1323,22 @@ mod tests {
         assert_eq!(validate(&fine), Ok(()));
     }
     #[test]
+    fn the_about_item_is_named_once_and_chooses_nothing_of_the_app_s() {
+        let about = || AppMenuEntry::About {
+            name: "Zeron".into(),
+            version: "0.2.129".into(),
+        };
+        let menus = [AppMenu::application("", [about()])];
+        assert_eq!(validate(&menus), Ok(()));
+        assert!(!enabled_action(&menus, &MenuAction::from("standard:about")));
+        assert!(validate(&[AppMenu::application("", [about(), about()])]).is_err());
+        let unnamed = AppMenuEntry::About {
+            name: String::new(),
+            version: "1".into(),
+        };
+        assert!(validate(&[AppMenu::application("", [unnamed])]).is_err());
+    }
+    #[test]
     fn rendered_menu_keyboard_dispatches_shared_identifier_and_skips_disabled() {
         use zgx::{
             input::{InputEvent, Key, Modifiers},
@@ -1223,6 +1371,34 @@ mod tests {
             ui.prepare_frame();
         }
         assert_eq!(*actions.borrow(), vec![MenuAction::from("save")]);
+    }
+    #[test]
+    fn a_rendered_bar_shows_the_application_menu_first_and_once() {
+        let menus = vec![
+            AppMenu::new("View", [AppMenuEntry::item("Sidebar", "sidebar")]),
+            AppMenu::application("", [AppMenuEntry::item("Check for Updates…", "updates")]),
+            AppMenu::application("Zeron", [AppMenuEntry::item("Settings", "settings")]),
+        ];
+        assert_eq!(validate(&menus), Ok(()), "its label may be empty");
+        let shown = rendered_menus(menus);
+        let titles: Vec<_> = shown.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(titles, ["Zeron", "View"]);
+        assert_eq!(
+            shown[0].entries,
+            [
+                AppMenuEntry::item("Check for Updates…", "updates"),
+                AppMenuEntry::item("Settings", "settings"),
+            ]
+        );
+        let unnamed = rendered_menus(vec![AppMenu::application(
+            "",
+            [AppMenuEntry::item("Settings", "settings")],
+        )]);
+        assert!(!unnamed[0].label.is_empty(), "named for the process");
+        assert!(
+            validate(&[AppMenu::new("", [])]).is_err(),
+            "another menu needs its label"
+        );
     }
     #[test]
     fn duplicate_nested_actions_are_rejected_before_mount_or_native_creation() {

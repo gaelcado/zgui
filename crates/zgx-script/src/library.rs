@@ -15,28 +15,44 @@ use std::rc::Rc;
 use zgx::{
     compose::{Context, View, prelude::*},
     reactive::Signal,
+    scene::Color,
+    theme::Themed,
 };
-use zgx_components::*;
+use zgx_components::{voice, *};
 
 /// A component of the library, as a node of the interface.
 #[derive(Clone)]
 pub(crate) enum Library {
-    /// `ui.tabs { items = state, value = state, panel = fn(id), … }`.
+    /// `ui.tabs { items = state, value = state, panel = fn(id)?, tab =
+    /// fn(item, close)?, … }`: without a panel, the strip alone.
     Tabs {
         label: String,
         items: Signal<Value>,
         value: Signal<Value>,
         reorderable: bool,
+        /// Every tab closes (bare ids among the items included).
+        closable: bool,
         on_close: Option<Function>,
-        panel: Function,
+        on_move: Option<Function>,
+        panel: Option<Function>,
+        /// Each tab's node, which dresses it.
+        tab: Option<Function>,
+        /// What follows the pointer as a tab is dragged, from its item.
+        preview: Option<Function>,
+        /// Written the id of the tab being dragged (`""` once let go).
+        dragging: Option<Signal<Value>>,
     },
-    /// `ui.select { value = state, options = { … }, placeholder }`.
+    /// `ui.select { value = state, options = { … }, placeholder }`: its
+    /// node styles its button, its children are the button's face.
     Select {
         label: String,
         value: Signal<Value>,
-        /// Each option's value, what it shows, and whether it is disabled.
-        options: Vec<(Value, String, bool)>,
+        options: Vec<Choice>,
         placeholder: String,
+        /// `menu = { … }`: the menu's panel, and its `enter` and `exit`.
+        menu: Option<(Rc<Node>, Option<Rc<crate::node::OverlayMotion>>)>,
+        /// Where the menu opens: over the button unless placed.
+        placement: Option<zgx::compose::Placement>,
     },
     /// `ui.combobox { text = state, items = state, value?, loading?, … }`.
     Combobox {
@@ -62,6 +78,12 @@ pub(crate) enum Library {
         value: Signal<Value>,
         on_open: Option<Function>,
         on_activate: Option<Function>,
+        /// Each row's node, which dresses it, from its item and level.
+        row: Option<Function>,
+        row_height: Option<f32>,
+        open_on_click: bool,
+        /// The chosen items' ids, when it chooses several.
+        selection: Option<Signal<Value>>,
     },
     /// `ui.data_grid { columns, rows = state, sort?, value?, … }`.
     DataGrid {
@@ -104,8 +126,9 @@ pub(crate) enum Library {
     Segmented {
         label: String,
         value: Signal<Value>,
-        /// Each option's value and what it shows.
-        options: Vec<(Value, String)>,
+        /// Each option's value, what it shows (or names it), and the node
+        /// of an option that draws its segment.
+        options: Vec<(Value, String, Option<Rc<Node>>)>,
     },
     /// `ui.stepper { value = state, min, max, step, decimals }`.
     Stepper {
@@ -117,12 +140,42 @@ pub(crate) enum Library {
     Disclosure {
         open: Signal<Value>,
         summary: Summary,
+        /// `bare = true`: the summary node dresses the bare summary
+        /// button, and the children stay mounted, folding as the app has
+        /// them.
+        bare: bool,
     },
     /// `ui.accordion { open = state, ui.section { … }… }`: sections, one
     /// open at a time (`open` its id, or nil).
     Accordion { open: Signal<Value> },
     /// `ui.section { id, title, content… }`: an accordion's section.
     Section { id: Value, title: String },
+    /// `ui.voice_glyph { kind?, mode, speaking?, … }`: a call's dot-matrix
+    /// glyph, stepped in the engine.
+    VoiceGlyph(Box<Glyph>),
+}
+
+/// `ui.voice_glyph`'s description.
+#[derive(Clone)]
+pub(crate) struct Glyph {
+    /// A beam filling its box, else a field `dots` across and down.
+    beam: bool,
+    dots: (usize, usize),
+    dot: f32,
+    outline: voice::Outline,
+    falloff: Option<f32>,
+    rest: Option<f32>,
+    soft_rim: bool,
+    dissolve: bool,
+    touch: bool,
+    mode: Option<Signal<Value>>,
+    speaking: Option<Signal<Value>>,
+    still: Option<Signal<Value>>,
+    /// What it says to assistive technology (its mode, as the app words it).
+    label: Option<Signal<Value>>,
+    /// Codex's and the user's three inks each (colours or theme tokens).
+    agent: Option<[Themed<Color>; 3]>,
+    user: Option<[Themed<Color>; 3]>,
 }
 impl Library {
     /// Its name in `ui` (the element's tag).
@@ -143,14 +196,23 @@ impl Library {
             Library::Disclosure { .. } => "disclosure",
             Library::Accordion { .. } => "accordion",
             Library::Section { .. } => "section",
+            Library::VoiceGlyph(_) => "voice_glyph",
         }
     }
-    /// Whether it holds children (content, sections).
+    /// Whether it holds children (content, sections, a select's face).
     pub(crate) fn takes_children(&self) -> bool {
         matches!(
             self,
-            Library::Disclosure { .. } | Library::Accordion { .. } | Library::Section { .. }
+            Library::Disclosure { .. }
+                | Library::Accordion { .. }
+                | Library::Section { .. }
+                | Library::Select { .. }
         )
+    }
+    /// Whether its node styles a part of it, which it dresses itself: a
+    /// select's button.
+    pub(crate) fn dresses_itself(&self) -> bool {
+        matches!(self, Library::Select { .. })
     }
     /// Whether it needs a component context (state bridges, effects): all
     /// but a separator and a section.
@@ -173,11 +235,11 @@ pub(crate) fn section(kind: &Kind) -> Option<(&Value, &String)> {
 /// Add the library's functions to `ui`.
 pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     // `ui.<widget> { label?, value = state, … }`.
-    let widget = |build: fn(String, Signal<Value>, &Table) -> mlua::Result<Kind>| {
+    let widget = |build: fn(&Lua, String, Signal<Value>, &Table) -> mlua::Result<Kind>| {
         lua.create_function(move |lua, table: Table| {
             crate::form::apply_field(lua, &table, false)?;
             let value = expect_state(&table.get("value")?, "`value`")?;
-            let kind = build(label(&table)?, value, &table)?;
+            let kind = build(lua, label(&table)?, value, &table)?;
             node_ud(lua, fill(lua, Node::new(owner(lua)?, kind), Some(&table))?)
         })
     };
@@ -197,50 +259,78 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             // Not the `items` alignment style: the tabs.
             table.raw_remove("items")?;
             let value = expect_state(&table.get("value")?, "ui.tabs's `value`")?;
-            let panel: Function = table
-                .get("panel")
-                .map_err(|_| mlua::Error::runtime("ui.tabs needs `panel`, fn(id) -> node"))?;
             let kind = Kind::Library(Box::new(Library::Tabs {
                 label: label(&table)?,
                 items,
                 value,
                 reorderable: table.get::<Option<bool>>("reorderable")?.unwrap_or(false),
+                closable: table.get::<Option<bool>>("closable")?.unwrap_or(false),
                 on_close: table.get("on_close")?,
-                panel,
+                on_move: table.get("on_move")?,
+                panel: table.get("panel")?,
+                tab: table.get("tab")?,
+                preview: table.get("preview")?,
+                dragging: match table.get::<mlua::Value>("dragging")? {
+                    mlua::Value::Nil => None,
+                    state => Some(expect_state(&state, "ui.tabs's `dragging`")?),
+                },
             }));
             node_ud(lua, fill(lua, Node::new(owner(lua)?, kind), Some(&table))?)
         })?,
     )?;
     ui.set(
         "select",
-        widget(|label, value, t| {
+        widget(|lua, label, value, t| {
             let list: Table = t
                 .get("options")
                 .map_err(|_| mlua::Error::runtime("ui.select needs `options`"))?;
             let mut options = Vec::new();
             for option in list.sequence_values::<mlua::Value>() {
                 options.push(match option? {
+                    // With children or styles, it draws its menu item.
                     mlua::Value::Table(o) => {
-                        let shown: String = o.get("label")?;
+                        let shown: String = o.get("label").map_err(|_| {
+                            mlua::Error::runtime("a ui.select option needs a `label`")
+                        })?;
                         let value = match o.get::<mlua::Value>("value")? {
                             mlua::Value::Nil => Value::Str(shown.as_str().into()),
                             v => crate::value::convert(v, None)?,
                         };
-                        let disabled = o.get::<Option<bool>>("disabled")?.unwrap_or(false);
-                        (value, shown, disabled)
+                        Choice {
+                            value,
+                            shown,
+                            disabled: o.get::<Option<bool>>("disabled")?.unwrap_or(false),
+                            id: o.get("id")?,
+                            drawn: drawn(lua, &o, &["label", "value", "disabled"])?,
+                        }
                     }
                     other => {
                         let value = crate::value::convert(other, None)?;
                         let shown = value.to_string();
-                        (value, shown, false)
+                        Choice {
+                            value,
+                            shown,
+                            disabled: false,
+                            id: None,
+                            drawn: None,
+                        }
                     }
                 });
             }
+            let menu = match t.get::<Option<Table>>("menu")? {
+                Some(menu) => Some((
+                    Rc::new(fill(lua, Node::new(owner(lua)?, Kind::Div), Some(&menu))?),
+                    crate::node::overlay_motion(&menu)?,
+                )),
+                None => None,
+            };
             Ok(Kind::Library(Box::new(Library::Select {
                 label,
                 value,
                 options,
                 placeholder: t.get::<Option<String>>("placeholder")?.unwrap_or_default(),
+                menu,
+                placement: crate::node::placement_of(t.get("placement")?)?,
             })))
         })?,
     )?;
@@ -254,6 +344,13 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 value: expect_state(&table.get("value")?, "ui.tree's `value`")?,
                 on_open: table.get("on_open")?,
                 on_activate: table.get("on_activate")?,
+                row: table.get("row")?,
+                row_height: table.get("row_height")?,
+                open_on_click: table.get::<Option<bool>>("open_on_click")?.unwrap_or(false),
+                selection: match table.get::<mlua::Value>("selection")? {
+                    mlua::Value::Nil => None,
+                    v => Some(expect_state(&v, "ui.tree's `selection`")?),
+                },
             }));
             // Not the `items` alignment style: the tree's.
             table.raw_remove("items")?;
@@ -390,25 +487,28 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     )?;
     ui.set(
         "segmented",
-        widget(|label, value, t| {
+        widget(|lua, label, value, t| {
             let list: Table = t
                 .get("options")
                 .map_err(|_| mlua::Error::runtime("ui.segmented needs `options`"))?;
             let mut options = Vec::new();
             for option in list.sequence_values::<mlua::Value>() {
                 options.push(match option? {
-                    // `{ value = "w", label = "Week" }`, or the label alone.
+                    // `{ value = "w", label = "Week" }`, or the label alone;
+                    // with children or styles, it draws its segment.
                     mlua::Value::Table(o) => {
-                        let shown: String = o.get("label")?;
+                        let shown: String = o.get("label").map_err(|_| {
+                            mlua::Error::runtime("a ui.segmented option needs a `label`")
+                        })?;
                         let value = match o.get::<mlua::Value>("value")? {
                             mlua::Value::Nil => Value::Str(shown.as_str().into()),
                             v => crate::value::convert(v, None)?,
                         };
-                        (value, shown)
+                        (value, shown, drawn(lua, &o, &["label", "value"])?)
                     }
                     other => {
                         let value = crate::value::convert(other, None)?;
-                        (value.clone(), value.to_string())
+                        (value.clone(), value.to_string(), None)
                     }
                 });
             }
@@ -426,7 +526,7 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     )?;
     ui.set(
         "stepper",
-        widget(|label, value, t| {
+        widget(|_, label, value, t| {
             let defaults = StepperOptions::default();
             let options = StepperOptions {
                 min: t.get::<Option<f64>>("min")?.unwrap_or(defaults.min),
@@ -465,7 +565,11 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                     lua,
                     Node::new(
                         owner(lua)?,
-                        Kind::Library(Box::new(Library::Disclosure { open, summary })),
+                        Kind::Library(Box::new(Library::Disclosure {
+                            open,
+                            summary,
+                            bare: table.get::<Option<bool>>("bare")?.unwrap_or(false),
+                        })),
                     ),
                     Some(&table),
                 )?,
@@ -493,6 +597,7 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             node_ud(lua, node)
         })?,
     )?;
+    ui.set("voice_glyph", lua.create_function(voice_glyph_node)?)?;
     ui.set(
         "section",
         lua.create_function(|lua, table: Table| {
@@ -551,16 +656,24 @@ pub(crate) fn view(
             value,
             on_open,
             on_activate,
+            row,
+            row_height,
+            open_on_click,
+            selection,
         } => {
             let cx = need(&mut cx);
-            let open_signal = bridge(
-                cx,
-                open,
-                |v| v.list().iter().map(Value::to_string).collect::<Vec<_>>(),
-                |ids: Vec<String>| {
-                    Value::List(ids.into_iter().map(|s| Value::Str(s.into())).collect())
-                },
-            );
+            let ids = |state: &Signal<Value>, cx: &mut Context| {
+                bridge(
+                    cx,
+                    state,
+                    |v| v.list().iter().map(Value::to_string).collect::<Vec<_>>(),
+                    |ids: Vec<String>| {
+                        Value::List(ids.into_iter().map(|s| Value::Str(s.into())).collect())
+                    },
+                )
+            };
+            let open_signal = ids(open, cx);
+            let selection = selection.as_ref().map(|s| ids(s, cx));
             let selected = bridge(
                 cx,
                 value,
@@ -590,10 +703,27 @@ pub(crate) fn view(
                             .unwrap_or_else(|| id.clone());
                         let parent = item.field("children").is_some_and(|c| !c.list().is_empty())
                             || item.field("lazy").is_some_and(Value::truthy);
+                        // The rest of the script's item (a file's status):
+                        // its row is drawn again as it changes.
+                        let revision = match item {
+                            Value::Map(fields) => {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                for (key, value) in fields.iter() {
+                                    if &**key != "children" {
+                                        key.hash(&mut hasher);
+                                        format!("{value:?}").hash(&mut hasher);
+                                    }
+                                }
+                                hasher.finish()
+                            }
+                            _ => 0,
+                        };
                         TreeItem {
                             id,
                             label: shown,
                             parent,
+                            revision,
                         }
                     })
                     .collect()
@@ -636,14 +766,41 @@ pub(crate) fn view(
                     asked.retain(|id| now.contains(id));
                 }));
             }
+            // Each row dressed by the node `row` makes of its item (the
+            // script's own table) and its level.
+            let dress = row.clone().map(|f| {
+                let (vm, low, items) = (vm.clone(), low.clone(), items.clone());
+                let dress: DressRow = Rc::new(
+                    move |item: &TreeItem, level: usize, bare: View, cx: &mut Context| {
+                        let found = items
+                            .with_untracked(|v| find(v.list(), &item.id).cloned())
+                            .unwrap_or_else(|| Value::Str(item.id.as_str().into()));
+                        dressed(bare, &f, (found, level), &vm, &low, cx)
+                    },
+                );
+                dress
+            });
+            let options = TreeOptions {
+                row: dress,
+                row_height: *row_height,
+                open_on_click: *open_on_click,
+                selection,
+            };
             let (on_activate, vm) = (on_activate.clone(), vm.clone());
-            tree(label.clone(), children, open_signal, selected, move |id| {
-                if let Some(f) = &on_activate
-                    && let Err(error) = vm.call::<()>(f, id)
-                {
-                    vm.report(error);
-                }
-            })
+            tree_with(
+                label.clone(),
+                children,
+                open_signal,
+                selected,
+                move |id| {
+                    if let Some(f) = &on_activate
+                        && let Err(error) = vm.call::<()>(f, id)
+                    {
+                        vm.report(error);
+                    }
+                },
+                options,
+            )
         }
         Library::DataGrid {
             label,
@@ -1152,47 +1309,46 @@ pub(crate) fn view(
             items,
             value,
             reorderable,
+            closable,
             on_close,
+            on_move,
             panel,
+            tab,
+            preview,
+            dragging,
         } => {
-            // The script's items, as tabs; written back as its own tables,
-            // reordered or removed.
+            // The script's items, as tabs (a bare string is its own id);
+            // written back as its own values, reordered or removed.
             let source = items.clone();
-            let tabs_of = |v: &Value| -> Vec<Tab> {
+            let every = *closable;
+            let tabs_of = move |v: &Value| -> Vec<Tab> {
                 v.list()
                     .iter()
                     .map(|item| Tab {
-                        id: item.field("id").map(Value::to_string).unwrap_or_default(),
+                        id: tab_id(item),
                         label: item
                             .field("label")
                             .map(Value::to_string)
                             .unwrap_or_default(),
-                        closable: item.field("closable").is_some_and(Value::truthy),
+                        closable: every || item.field("closable").is_some_and(Value::truthy),
                     })
                     .collect()
             };
-            let tabs_signal = bridge_with(need(&mut cx), items, tabs_of, move |tabs: Vec<Tab>| {
+            let cx = need(&mut cx);
+            let tabs_signal = bridge_with(cx, items, tabs_of, move |tabs: Vec<Tab>| {
                 let old = source.with_untracked(Clone::clone);
                 let kept: Vec<Value> = tabs
                     .iter()
                     .filter_map(|tab| {
                         old.list()
                             .iter()
-                            .find(|item| {
-                                item.field("id").map(Value::to_string).as_deref()
-                                    == Some(tab.id.as_str())
-                            })
+                            .find(|item| tab_id(item) == tab.id)
                             .cloned()
                     })
                     .collect();
                 Value::List(kept.into())
             });
-            let selected = bridge(
-                need(&mut cx),
-                value,
-                |v| v.to_string(),
-                |s| Value::Str(s.into()),
-            );
+            let selected = bridge(cx, value, |v| v.to_string(), |s| Value::Str(s.into()));
             let on_close = on_close.clone().map(|f| {
                 let vm = vm.clone();
                 let ask: CloseTab = Rc::new(move |id: &str| {
@@ -1203,39 +1359,106 @@ pub(crate) fn view(
                 });
                 ask
             });
+            let on_move = on_move.clone().map(|f| {
+                let vm = vm.clone();
+                let told: MoveTab = Rc::new(move |id: &str, to: usize| {
+                    if let Err(error) = vm.call::<()>(&f, (id, to + 1)) {
+                        vm.report(error);
+                    }
+                });
+                told
+            });
+            // Each tab dressed by the node `tab` makes of its item, given
+            // what closes it.
+            let dress = tab.clone().map(|f| {
+                let (vm, low, items) = (vm.clone(), low.clone(), items.clone());
+                let dress: DressTab = Rc::new(
+                    move |tab: &Tab, bare: View, close: Rc<dyn Fn()>, cx: &mut Context| {
+                        let item = items
+                            .with_untracked(|v| {
+                                v.list().iter().find(|i| tab_id(i) == tab.id).cloned()
+                            })
+                            .unwrap_or_else(|| Value::Str(tab.id.as_str().into()));
+                        let closes = vm.lua.create_function(move |_, ()| {
+                            close();
+                            Ok(())
+                        });
+                        match closes {
+                            Ok(closes) => dressed(bare, &f, (item, closes), &vm, &low, cx),
+                            Err(error) => {
+                                vm.report(error);
+                                bare
+                            }
+                        }
+                    },
+                );
+                dress
+            });
+            // The tabs lie as far apart as the node's `gap` says.
+            let list = node
+                .props
+                .iter()
+                .find_map(|(prop, source)| match (prop, source) {
+                    (crate::node::Prop::Gap, crate::node::Source::Lit(lit)) => match lit {
+                        crate::node::Lit::Num(n) => Some(Styles::new().gap(*n)),
+                        crate::node::Lit::Len(zgx::layout::Length::Px(n)) => {
+                            Some(Styles::new().gap(*n))
+                        }
+                        crate::node::Lit::Token(t) => {
+                            Some(Styles::new().token(zgx::theme::Field::Gap, *t))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
+            // What a dragged tab lifts, built from its item.
+            let preview = preview.clone().map(|f| {
+                let (vm, low, items) = (vm.clone(), low.clone(), items.clone());
+                let preview: PreviewTab = Rc::new(move |tab: &Tab| {
+                    let item = items
+                        .with_untracked(|v| v.list().iter().find(|i| tab_id(i) == tab.id).cloned())
+                        .unwrap_or_else(|| Value::Str(tab.id.as_str().into()));
+                    let result = vm.call::<mlua::Value>(&f, item);
+                    crate::lower::built(&vm, result, &low, &f)
+                });
+                preview
+            });
+            let dragging = dragging
+                .clone()
+                .map(|state| bridge(cx, &state, |v| v.to_string(), |s| Value::Str(s.into())));
             let options = TabsOptions {
                 reorderable: *reorderable,
                 on_close,
+                on_move,
+                tab: dress,
+                list,
+                preview,
+                dragging,
             };
-            let (panel, vm, low) = (panel.clone(), vm.clone(), low.clone());
-            tabs(
-                label.clone(),
-                tabs_signal,
-                selected,
-                options,
-                move |id, _| match vm.call::<mlua::Value>(&panel, id) {
-                    Ok(mlua::Value::UserData(ud)) if ud.is::<crate::node::NodeUd>() => {
-                        match ud.borrow::<crate::node::NodeUd>() {
-                            Ok(node) => lower(&node.0, &low),
-                            Err(_) => div(),
-                        }
-                    }
-                    Ok(_) => div(),
-                    Err(error) => {
-                        vm.report(error);
-                        div()
-                    }
-                },
-            )
+            match panel.clone() {
+                None => tab_strip(label.clone(), tabs_signal, selected, options),
+                Some(panel) => {
+                    let (vm, low) = (vm.clone(), low.clone());
+                    tabs(
+                        label.clone(),
+                        tabs_signal,
+                        selected,
+                        options,
+                        move |id, cx| crate::lower::build_scoped(&vm, cx, &low, &panel, id),
+                    )
+                }
+            }
         }
         Library::Select {
             label,
             value,
             options,
             placeholder,
+            menu,
+            placement,
         } => {
             // Options by their value's text; written back as the value itself.
-            let values: Rc<[Value]> = options.iter().map(|(v, _, _)| v.clone()).collect();
+            let values: Rc<[Value]> = options.iter().map(|o| o.value.clone()).collect();
             let texts: Vec<String> = values.iter().map(Value::to_string).collect();
             let chosen = bridge_with(
                 need(&mut cx),
@@ -1252,12 +1475,44 @@ pub(crate) fn view(
             let list = options
                 .iter()
                 .zip(texts)
-                .map(|((_, shown, disabled), text)| {
-                    let option = SelectOption::new(text, shown.clone());
-                    if *disabled { option.disabled() } else { option }
+                .map(|(o, text)| {
+                    let mut option = SelectOption::new(text, o.shown.clone());
+                    option.disabled = o.disabled;
+                    option.id = o.id.clone();
+                    option
                 })
                 .collect();
-            select(label.clone(), chosen, list, placeholder.clone())
+            // The node styles the button, its children its face; a `menu`
+            // table the menu's panel; an option drawing itself its item.
+            let parts = SelectParts {
+                button: Some({
+                    let (node, vm, low) = (node.clone(), vm.clone(), low.clone());
+                    Box::new(move |button, cx| {
+                        crate::lower::dress(button, &node, None, &vm, &low, cx)
+                    })
+                }),
+                bare_button: !node.children.is_empty(),
+                menu: menu.clone().map(|(panel, motion)| {
+                    let (vm, low) = (vm.clone(), low.clone());
+                    let dress: Dress = Box::new(move |view, cx| {
+                        crate::lower::dress(view, &panel, motion.as_ref(), &vm, &low, cx)
+                    });
+                    dress
+                }),
+                item: options.iter().any(|o| o.drawn.is_some()).then(|| {
+                    let drawn: Vec<Option<Rc<Node>>> =
+                        options.iter().map(|o| o.drawn.clone()).collect();
+                    let (vm, low) = (vm.clone(), low.clone());
+                    let dress: DressItem =
+                        Box::new(move |i, item, cx| match drawn.get(i).cloned().flatten() {
+                            Some(node) => crate::lower::dress(item, &node, None, &vm, &low, cx),
+                            None => item,
+                        });
+                    dress
+                }),
+                placement: *placement,
+            };
+            select_with(label.clone(), chosen, list, placeholder.clone(), parts)
         }
         Library::Segmented {
             label,
@@ -1265,19 +1520,32 @@ pub(crate) fn view(
             options,
         } => {
             // The chosen option's value, as its index both ways.
-            let values: Rc<[Value]> = options.iter().map(|(v, _)| v.clone()).collect();
+            let values: Rc<[Value]> = options.iter().map(|(v, _, _)| v.clone()).collect();
             let index = {
                 let values = values.clone();
                 move |v: &Value| values.iter().position(|o| o == v).unwrap_or(0)
             };
-            let chosen = bridge_with(need(&mut cx), value, index, move |i: usize| {
+            let cx = need(&mut cx);
+            let chosen = bridge_with(cx, value, index, move |i: usize| {
                 values.get(i).cloned().unwrap_or_default()
             });
-            segmented(
-                label.clone(),
-                chosen,
-                options.iter().map(|(_, shown)| shown.clone()),
-            )
+            if options.iter().all(|(_, _, drawn)| drawn.is_none()) {
+                return segmented(
+                    label.clone(),
+                    chosen,
+                    options.iter().map(|(_, shown, _)| shown.clone()),
+                );
+            }
+            // Options drawing their segments: each its node's look and
+            // face, named by its label.
+            segmented_with(label.clone(), chosen, options.len(), |i, button| {
+                let (_, shown, drawn) = &options[i];
+                let button = button.accessible_label(shown.clone());
+                match drawn {
+                    Some(node) => crate::lower::dress(button, node, None, vm, low, cx),
+                    None => button.child(zgx::compose::text(shown.clone())),
+                }
+            })
         }
         Library::Stepper {
             label,
@@ -1293,7 +1561,26 @@ pub(crate) fn view(
             ),
             *options,
         ),
-        Library::Disclosure { open, summary } => {
+        Library::Disclosure {
+            open,
+            summary,
+            bare: true,
+        } => {
+            // The app's own summary and fold: its node dresses the button,
+            // its children stay, folding as they follow `open`.
+            let cx = need(&mut cx);
+            let open = bridge(cx, open, Value::truthy, Value::Bool);
+            let content = column().children(node.children.iter().map(|c| lower(c, low)));
+            disclosure_with(
+                open,
+                |bare| match summary {
+                    Summary::Node(summary) => crate::lower::dress(bare, summary, None, vm, low, cx),
+                    Summary::Text(text) => bare.child(zgx::compose::text(text.clone())),
+                },
+                content,
+            )
+        }
+        Library::Disclosure { open, summary, .. } => {
             let open = bridge(need(&mut cx), open, Value::truthy, Value::Bool);
             let summary = match summary {
                 Summary::Text(text) => zgx::compose::text(text.clone()),
@@ -1334,7 +1621,227 @@ pub(crate) fn view(
         }
         // Lowered by its accordion.
         Library::Section { .. } => div(),
+        Library::VoiceGlyph(glyph) => voice_glyph_view(glyph, need(&mut cx)),
     }
+}
+
+/// `ui.voice_glyph { … }`: a field (the call's disc, `dots` across) or a
+/// beam (`kind = "beam"`, filling its box), on dots `dot` wide.
+fn voice_glyph_node(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
+    // A state, or a function kept current in Rust (run as what it reads
+    // changes, never a frame).
+    let followed = |name: &str| -> mlua::Result<Option<Signal<Value>>> {
+        let value: mlua::Value = table.get(name)?;
+        if let Some(state) = crate::node::state_of(&value) {
+            return Ok(Some(state));
+        }
+        Ok(match value {
+            mlua::Value::Nil => None,
+            mlua::Value::Function(f) => {
+                Some(crate::node::computed(lua, &*crate::node::env(lua)?, f))
+            }
+            other => {
+                let value = crate::value::convert(other, None)?;
+                Some(crate::node::env(lua)?.runtime.signal(value))
+            }
+        })
+    };
+    let beam = match table.get::<Option<String>>("kind")?.as_deref() {
+        None | Some("field") => false,
+        Some("beam") => true,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "ui.voice_glyph's `kind` is \"field\" or \"beam\", not {other:?}"
+            )));
+        }
+    };
+    let dots = match table.get::<mlua::Value>("dots")? {
+        mlua::Value::Nil => (44, 44),
+        mlua::Value::Table(pair) => (pair.get::<f64>(1)? as usize, pair.get::<f64>(2)? as usize),
+        n => {
+            let n = lua.unpack::<f64>(n)? as usize;
+            (n, n)
+        }
+    };
+    let radius = table.get::<Option<f32>>("radius")?.unwrap_or(0.);
+    let outline = match table.get::<Option<String>>("outline")?.as_deref() {
+        None | Some("square") => voice::Outline::Square,
+        Some("disc") => voice::Outline::Disc,
+        Some("stadium") => voice::Outline::Stadium,
+        Some("rounded") => voice::Outline::Rounded(radius),
+        Some("under") => voice::Outline::Under(radius),
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "ui.voice_glyph's `outline` is square, disc, stadium, rounded or under, not {other:?}"
+            )));
+        }
+    };
+    let inks = |name: &str| -> mlua::Result<Option<[Themed<Color>; 3]>> {
+        let Some(list) = table.get::<Option<Table>>(name)? else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        for ink in list.sequence_values::<mlua::Value>() {
+            let value = crate::value::convert(ink?, None)?;
+            out.push(crate::node::themed_color(&value).ok_or_else(|| {
+                mlua::Error::runtime(format!(
+                    "ui.voice_glyph's `{name}` are colours or theme tokens"
+                ))
+            })?);
+        }
+        out.try_into()
+            .map(Some)
+            .map_err(|_| mlua::Error::runtime(format!("ui.voice_glyph's `{name}` are three inks")))
+    };
+    let glyph = Glyph {
+        beam,
+        dots,
+        dot: table
+            .get::<Option<f32>>("dot")?
+            .unwrap_or(if beam { 2.4 } else { 3. }),
+        outline,
+        falloff: table.get("falloff")?,
+        rest: table.get("rest")?,
+        soft_rim: table.get::<Option<bool>>("soft_rim")?.unwrap_or(false),
+        dissolve: table.get::<Option<bool>>("dissolve")?.unwrap_or(false),
+        touch: table.get::<Option<bool>>("touch")?.unwrap_or(false),
+        mode: followed("mode")?,
+        speaking: followed("speaking")?,
+        still: followed("still")?,
+        label: followed("label")?,
+        agent: inks("agent_inks")?,
+        user: inks("user_inks")?,
+    };
+    // The glyph's own, not the element's (`outline` is a style's).
+    for key in [
+        "kind",
+        "dots",
+        "dot",
+        "outline",
+        "radius",
+        "falloff",
+        "rest",
+        "soft_rim",
+        "dissolve",
+        "touch",
+        "mode",
+        "speaking",
+        "still",
+        "label",
+        "agent_inks",
+        "user_inks",
+    ] {
+        table.raw_remove(key)?;
+    }
+    node_ud(
+        lua,
+        fill(
+            lua,
+            Node::new(
+                owner(lua)?,
+                Kind::Library(Box::new(Library::VoiceGlyph(Box::new(glyph)))),
+            ),
+            Some(&table),
+        )?,
+    )
+}
+
+fn voice_glyph_view(glyph: &Glyph, cx: &mut Context) -> View {
+    let grid = voice::Grid::dense(glyph.dot);
+    let options = if glyph.beam {
+        let mut beam = voice::Beam::default();
+        if let Some(rest) = glyph.rest {
+            beam = beam.resting(rest);
+        }
+        voice::VoiceGlyph::beam(beam, grid)
+    } else {
+        let mut field = voice::Field::new(voice::Rings::Round);
+        if glyph.soft_rim {
+            field = field.soft_rimmed();
+        }
+        if glyph.dissolve {
+            field = field.dissolving();
+        }
+        if let Some(falloff) = glyph.falloff {
+            field = field.falling(falloff);
+        }
+        if let Some(rest) = glyph.rest {
+            field = field.resting(rest);
+        }
+        voice::VoiceGlyph::field(field, glyph.dots.0, glyph.dots.1, grid)
+    };
+    let mode = glyph.mode.clone();
+    let speaking = glyph.speaking.clone();
+    let still = glyph.still.clone();
+    let (agent, user, theme) = (glyph.agent, glyph.user, cx.theme());
+    let rgb = move |ink: Themed<Color>| -> voice::glyph::Rgb {
+        let Color(r, g, b, _) = match ink {
+            Themed::Token(token) => theme.get(token).color().unwrap_or(Color(0, 0, 0, 0)),
+            Themed::Value(color) => color,
+        };
+        [r, g, b].map(|c| c as f32 / 255.)
+    };
+    let accent = Themed::Token(zgx::theme::token("accent"));
+    let options = options
+        .outline(glyph.outline)
+        .mode(move || {
+            mode.as_ref().map_or(voice::Mode::Listening, |mode| {
+                match mode.with(|v| v.to_string()).as_str() {
+                    "connecting" => voice::Mode::Connecting,
+                    "thinking" => voice::Mode::Thinking,
+                    "asking" => voice::Mode::Asking,
+                    "processing" => voice::Mode::Processing,
+                    "muted" => voice::Mode::Muted,
+                    _ => voice::Mode::Listening,
+                }
+            })
+        })
+        .speaker(move || {
+            speaking.as_ref().map_or(voice::Speaker::Nobody, |who| {
+                match who.with(|v| v.to_string()).as_str() {
+                    "user" => voice::Speaker::User,
+                    "agent" => voice::Speaker::Agent,
+                    _ => voice::Speaker::Nobody,
+                }
+            })
+        })
+        .still(move || {
+            still
+                .as_ref()
+                .is_some_and(|still| still.with(Value::truthy))
+        })
+        .inks(move || voice::Inks {
+            agent: agent.map_or(voice::glyph::SUNRISE, |inks| inks.map(&rgb)),
+            ..voice::Inks::new(user.unwrap_or([accent; 3]).map(&rgb))
+        });
+    let options = match glyph.label.clone() {
+        Some(label) => options.label(move || label.with(Value::to_string)),
+        None => options,
+    };
+    voice::voice_glyph(if glyph.touch {
+        options.touchable()
+    } else {
+        options
+    })
+}
+
+/// An option table that draws its part of the control (a segment, a menu
+/// item), as a node: one with children, or properties besides its `own`
+/// fields. `None` for one that only says what it is.
+fn drawn(lua: &Lua, option: &Table, own: &[&str]) -> mlua::Result<Option<Rc<Node>>> {
+    let mut draws = false;
+    for pair in option.pairs::<mlua::Value, mlua::Value>() {
+        let (key, _) = pair?;
+        if !matches!(&key, mlua::Value::String(k) if own.contains(&&*k.to_string_lossy())) {
+            draws = true;
+            break;
+        }
+    }
+    if !draws {
+        return Ok(None);
+    }
+    let node = fill(lua, Node::new(owner(lua)?, Kind::Button), Some(option))?;
+    Ok(Some(Rc::new(node)))
 }
 
 /// `{ id, title?, detail?, shortcut? }`: a command a palette lists.
@@ -1388,6 +1895,76 @@ fn toast(lua: &Lua, table: Table) -> mlua::Result<u64> {
         });
     }
     Ok(Toaster::of(&runtime).show(toast))
+}
+
+/// A tab item's id: its `id`, or the item itself (a bare string).
+fn tab_id(item: &Value) -> String {
+    match item {
+        Value::Str(s) => s.to_string(),
+        _ => item.field("id").map(Value::to_string).unwrap_or_default(),
+    }
+}
+
+/// `bare`, a component's own part, dressed by the node `f` returns for
+/// `args`: built as a row is (`ui.use_state` keeps to it), its styles,
+/// children and handlers laid over the part.
+fn dressed(
+    bare: View,
+    f: &Function,
+    args: impl mlua::IntoLuaMulti,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    cx: &mut Context,
+) -> View {
+    let scope = Rc::new(crate::node::Scope::default());
+    let previous = vm
+        .lua
+        .app_data_ref::<crate::node::Env>()
+        .map(|env| env.scope.replace(Some(scope.clone())));
+    let result = vm.call::<mlua::Value>(f, args);
+    if let (Some(previous), Some(env)) = (previous, vm.lua.app_data_ref::<crate::node::Env>()) {
+        *env.scope.borrow_mut() = previous;
+    }
+    for resource in scope.retained.borrow_mut().drain(..) {
+        cx.retain(resource);
+    }
+    let node = match result {
+        Ok(value) => match expect_node(value, "a dressed part") {
+            Ok(node) => node,
+            Err(error) => {
+                vm.report(error);
+                return bare;
+            }
+        },
+        Err(error) => {
+            vm.report(error);
+            return bare;
+        }
+    };
+    let view = crate::lower::dress(bare, &node, None, vm, low, cx);
+    let mounted: Vec<Function> = scope.mounted.borrow_mut().drain(..).collect();
+    if mounted.is_empty() {
+        return view;
+    }
+    let vm = vm.clone();
+    view.on_mount(move |_| {
+        for f in mounted {
+            if let Err(e) = vm.call::<()>(&f, ()) {
+                vm.report(e);
+            }
+        }
+    })
+}
+
+/// A select's option: its value, what it shows, whether it is disabled,
+/// its item's id, and the node of one that draws its item.
+#[derive(Clone)]
+pub(crate) struct Choice {
+    value: Value,
+    shown: String,
+    disabled: bool,
+    id: Option<String>,
+    drawn: Option<Rc<Node>>,
 }
 
 /// What a disclosure's summary shows: text, or a node of the app's.

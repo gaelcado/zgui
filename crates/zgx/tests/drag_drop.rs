@@ -351,6 +351,121 @@ fn grouped_external_paths_route_once_to_nearest_handler() {
         ]]
     );
 }
+/// Files dragged in from another app are a drag from outside: over the
+/// destination under them as they come in and as the pointer moves with
+/// them (macOS moves the pointer, not the files), out as they leave it or
+/// the window, dropped where they are let go; a listener of the grouped
+/// paths takes them first.
+#[test]
+fn files_from_other_apps_visit_destinations_and_drop_where_let_go() {
+    use zgx::input::{DragPhase, DraggedFiles};
+    let mut ui = Ui::new(300., 100.);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let pane = |name: &'static str| {
+        let heard = log.clone();
+        let dropped = log.clone();
+        div()
+            .w(100.)
+            .h(100.)
+            .on_event(move |cx| {
+                if cx.phase == zgx::input::EventPhase::Capture {
+                    return;
+                }
+                if let InputEvent::Drag(event) = &cx.event
+                    && let Some(files) = event.payload.downcast_ref::<DraggedFiles>()
+                {
+                    let phase = match event.phase {
+                        DragPhase::Over => "over",
+                        DragPhase::Leave => "leave",
+                        _ => return,
+                    };
+                    assert!(event.visiting, "from outside");
+                    heard
+                        .borrow_mut()
+                        .push(format!("{name} {phase} {}", files.paths().len()));
+                }
+            })
+            .on_drop(move |files: &DraggedFiles, _| {
+                let names: Vec<_> = files
+                    .paths()
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                dropped
+                    .borrow_mut()
+                    .push(format!("{name} drop {}", names.join(",")));
+            })
+    };
+    let taken = Rc::new(RefCell::new(0));
+    let took = taken.clone();
+    ui.mount(
+        row().child(pane("left")).child(pane("right")).child(
+            div()
+                .w(100.)
+                .h(100.)
+                .on_files_drop(move |_, _| *took.borrow_mut() += 1),
+        ),
+    );
+    ui.prepare_frame();
+    let hover = |ui: &Ui, x: f32, path: &str| {
+        pointer(
+            ui,
+            InputEvent::FileHover {
+                x,
+                y: 50.,
+                path: path.into(),
+            },
+        )
+    };
+    hover(&ui, 20., "/tmp/a");
+    hover(&ui, 20., "/tmp/b");
+    // The pointer carries them onto the other pane: no file event comes.
+    moved(&ui, 150., 50.);
+    let result = ui.input.dispatch(
+        &ui.scene,
+        InputEvent::FilesDrop {
+            x: 150.,
+            y: 50.,
+            paths: vec!["/tmp/a".into(), "/tmp/b".into()].into(),
+        },
+    );
+    assert!(result.default_prevented, "taken");
+    assert_eq!(
+        *log.borrow(),
+        [
+            "left over 1",
+            "left over 2",
+            "right over 2",
+            "left leave 2",
+            "right over 2",
+            "right drop /tmp/a,/tmp/b",
+            "right leave 2",
+        ]
+    );
+    // Gone again, the pointer's moves are only moves.
+    log.borrow_mut().clear();
+    moved(&ui, 20., 50.);
+    assert!(log.borrow().is_empty());
+    // Dragged in and out again: left as they leave.
+    hover(&ui, 20., "/tmp/c");
+    pointer(&ui, InputEvent::FileHoverCancelled);
+    moved(&ui, 30., 50.);
+    assert_eq!(*log.borrow(), ["left over 1", "left leave 1"]);
+    // Over a listener of the grouped paths: it takes them, no destination.
+    log.borrow_mut().clear();
+    hover(&ui, 20., "/tmp/d");
+    moved(&ui, 250., 50.);
+    pointer(
+        &ui,
+        InputEvent::FilesDrop {
+            x: 250.,
+            y: 50.,
+            paths: vec!["/tmp/d".into()].into(),
+        },
+    );
+    assert_eq!(*taken.borrow(), 1);
+    assert_eq!(*log.borrow(), ["left over 1", "left leave 1"]);
+}
 #[test]
 fn nearest_nested_source_wins_capture() {
     let mut ui = Ui::new(400., 200.);

@@ -116,10 +116,19 @@ impl Terms {
             handlers.command = get("on_command")?;
             handlers.notify = get("on_notify")?;
         }
+        // Ghostty's lines over the app's: given with every set of options,
+        // and kept by the session (`term:configure` changes it later).
+        let config = match opts {
+            Some(opts) => opts.get::<Option<String>>("config")?,
+            None => None,
+        };
         let mut entries = self.entries.borrow_mut();
         if let Some(entry) = entries.get(id)
             && !entry.term.is_closed()
         {
+            if let Some(config) = config {
+                entry.term.configure(config);
+            }
             // A lookup (no options) keeps the handlers; options replace them,
             // and say how it starts if nothing has shown it yet (a lookup
             // made it first, as a list reading every pane's state does).
@@ -134,6 +143,9 @@ impl Terms {
             None => TerminalOptions::default(),
         };
         let term = Terminal::new(&env.runtime, options);
+        if let Some(config) = config {
+            term.configure(config);
+        }
         let handlers = Rc::new(RefCell::new(handlers));
         let fields = Rc::new(Fields::default());
         let subscription = {
@@ -353,6 +365,11 @@ impl UserData for TermUd {
             t.term.binding(action);
             Ok(())
         });
+        // Ghostty's configuration lines over the app's (colours, font).
+        methods.add_method("configure", |_, t, config: String| {
+            t.term.configure(config);
+            Ok(())
+        });
         // Whether closing would end something other than an idle shell.
         methods.add_method("needs_confirm", |_, t, ()| Ok(t.term.needs_confirm_close()));
         methods.add_method("close", |_, t, ()| {
@@ -373,8 +390,10 @@ pub(crate) fn install(lua: &Lua, ui: &Table, terms: Rc<Terms>) -> mlua::Result<(
             crate::node::env(lua)?.may(crate::Capability::Terminals, "ui.term")?;
             if let Some(opts) = &opts {
                 for (key, _) in opts.clone().pairs::<String, LuaValue>().flatten() {
-                    let known = matches!(key.as_str(), "command" | "cwd" | "env" | "font_size")
-                        || HANDLERS.contains(&key.as_str());
+                    let known = matches!(
+                        key.as_str(),
+                        "command" | "cwd" | "env" | "font_size" | "config"
+                    ) || HANDLERS.contains(&key.as_str());
                     if !known {
                         return Err(mlua::Error::runtime(format!(
                             "ui.term: unknown option `{key}`"

@@ -304,3 +304,197 @@ fn a_link_follows_enter_as_it_goes_down_and_not_space() {
     key(&mut ui, Key::Enter, false);
     assert_eq!(*clicks.borrow(), 1);
 }
+
+/// Whether text `label` shows (laid out, on screen, not faded out).
+fn showing(ui: &Ui, label: &str) -> bool {
+    let scene = ui.scene.borrow();
+    scene.paint_items().any(|item| {
+        matches!(scene.kind(item.id), zgx::scene::NodeKind::Text { text, .. } if &**text == label)
+            && item.effects.opacity > 0.
+            && scene.visible_bounds(item.id).is_some_and(|b| b.width > 0.)
+    })
+}
+
+#[test]
+fn a_links_own_menu_and_tooltip_take_the_place_of_the_defaults() {
+    let host = Rc::new(Host::default());
+    let asked = Rc::new(RefCell::new(0));
+    let count = asked.clone();
+    let mut ui = Ui::new(300., 200.);
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(host.clone()),
+        column().p(60.).child(View::from(
+            rich_text().text_size(16.).child(
+                text_span("the docs")
+                    .href("https://example.org/docs")
+                    .tooltip("https://example.org/docs")
+                    .context_menu(
+                        move |_| {
+                            *count.borrow_mut() += 1;
+                            vec![menu_item("Open in the app").id("own")]
+                        },
+                        None,
+                    ),
+            ),
+        )),
+    ));
+    ui.prepare_frame();
+    let links = links(&ui);
+    assert!(!showing(&ui, "https://example.org/docs"));
+    let r = ui.scene.borrow().bounds(links[0]);
+    ui.dispatch(InputEvent::PointerMove {
+        x: r.x + r.width / 2.,
+        y: r.y + r.height / 2.,
+    });
+    ui.prepare_frame();
+    assert!(
+        showing(&ui, "https://example.org/docs"),
+        "where it goes, over it"
+    );
+    click(
+        &mut ui,
+        links[0],
+        PointerButton::Secondary,
+        Modifiers::default(),
+    );
+    assert_eq!(*asked.borrow(), 1);
+    assert!(view.find("own").is_some(), "its own menu");
+    assert!(view.find("link-copy").is_none(), "not Copy Link");
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Escape,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    ui.prepare_frame();
+    // The tooltip's view over it doesn't take its click.
+    click(
+        &mut ui,
+        links[0],
+        PointerButton::Primary,
+        Modifiers::default(),
+    );
+    assert_eq!(*host.opened.borrow(), ["https://example.org/docs"]);
+}
+
+#[test]
+fn a_trailing_icon_keeps_its_room_after_the_text() {
+    let svg = zgx::svg::SvgData::new(
+        &br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M0 0h12v12H0z"/></svg>"#[..],
+    )
+    .unwrap();
+    let mut ui = Ui::new(300., 100.);
+    let view = ui.mount(
+        View::from(
+            rich_text()
+                .text_size(16.)
+                .child(
+                    text_span("main.rs")
+                        .on_click(|| {})
+                        .icon(zgx::compose::SpanIcon {
+                            svg: std::sync::Arc::new(svg),
+                            size: 12.,
+                            height: None,
+                            descent: None,
+                            gap: 4.,
+                            tint: None,
+                            after: true,
+                        }),
+                ),
+        )
+        .id("para"),
+    );
+    ui.prepare_frame();
+    let owner = view.find("para").unwrap();
+    let link = links(&ui)[0];
+    let scene = ui.scene.borrow();
+    let paragraph = scene.children(owner)[0];
+    let zgx::scene::NodeKind::RichText { text } = scene.kind(paragraph) else {
+        panic!("a paragraph")
+    };
+    assert_eq!(text.text(), "main.rs\u{2060}", "the room after the name");
+    assert_eq!(
+        text.runs()[1].padding[0],
+        8.,
+        "half the gap and the icon each side"
+    );
+    let mut svgs = Vec::new();
+    let mut stack = vec![owner];
+    while let Some(id) = stack.pop() {
+        if matches!(scene.kind(id), zgx::scene::NodeKind::Svg(_)) {
+            svgs.push(id);
+        }
+        stack.extend(scene.children(id).iter().copied());
+    }
+    let icon = svgs.first().copied().expect("the icon is drawn");
+    let name = scene.bounds(link);
+    assert!(
+        scene.bounds(icon).x >= name.x + name.width,
+        "drawn after the name"
+    );
+}
+
+#[test]
+fn a_formula_icon_sits_on_the_baseline_grows_its_line_and_copies_as_source() {
+    let svg = zgx::svg::SvgData::new(
+        &br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 40"><path d="M0 0h30v40H0z"/></svg>"#[..],
+    )
+    .unwrap();
+    let formula = zgx::compose::SpanIcon {
+        svg: std::sync::Arc::new(svg),
+        size: 30.,
+        height: Some(40.),
+        descent: Some(12.),
+        gap: 0.,
+        tint: None,
+        after: false,
+    };
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        column().selectable(true).child(
+            View::from(
+                rich_text()
+                    .text_size(16.)
+                    .child(text_span("so "))
+                    .child(text_span("").icon(formula).copy_as("$\\frac{a}{b}$"))
+                    .child(text_span(" holds")),
+            )
+            .id("para"),
+        ),
+    );
+    ui.prepare_frame();
+    let owner = view.find("para").unwrap();
+    let paragraph = ui.scene.borrow().children(owner)[0];
+    {
+        let scene = ui.scene.borrow();
+        let zgx::scene::NodeKind::RichText { text } = scene.kind(paragraph) else {
+            panic!("a paragraph")
+        };
+        assert_eq!(
+            text.text(),
+            "so \u{2060} holds",
+            "an icon alone keeps its room"
+        );
+        let mut svgs = Vec::new();
+        let mut stack = vec![owner];
+        while let Some(id) = stack.pop() {
+            if matches!(scene.kind(id), zgx::scene::NodeKind::Svg(_)) {
+                svgs.push(id);
+            }
+            stack.extend(scene.children(id).iter().copied());
+        }
+        let icon = scene.bounds(svgs[0]);
+        assert_eq!((icon.width, icon.height), (30., 40.));
+        // Its line holds it whole, 12 of it under the baseline.
+        let line = scene.bounds(paragraph);
+        assert!(line.height >= 40., "{line:?}");
+        assert!(
+            icon.y >= line.y - 0.5 && icon.y + icon.height <= line.y + line.height + 0.5,
+            "{icon:?} in {line:?}"
+        );
+    }
+    // Copied, and read out, as its source.
+    assert!(ui.select_all_text(owner));
+    assert_eq!(ui.selected_text(), "so $\\frac{a}{b}$ holds");
+    let label = ui.semantics.borrow().get(paragraph).unwrap().label.clone();
+    assert_eq!(&*label, "so $\\frac{a}{b}$ holds");
+}

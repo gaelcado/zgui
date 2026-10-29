@@ -25,14 +25,26 @@ pub struct Command {
     pub id: String,
     /// What the menu item says.
     pub title: String,
-    /// The menu it goes in ("File", "Edit", "View", "Window", or any other).
+    /// The menu it goes in ("File", "Edit", "View", "Window", or any
+    /// other); "app" is the application's own, which macOS names for the
+    /// app.
     pub menu: String,
     /// Its shortcut: modifiers and a key joined by `+`, as `cmd+shift+d`,
     /// `cmd+alt+arrowleft`, `cmd+1`, `ctrl+tab`.
     pub key: Option<String>,
     /// A separator line, not a command.
     pub separator: bool,
+    /// One of the platform's own edit items in its place (`"undo"`,
+    /// `"redo"`, `"cut"`, `"copy"`, `"paste"`, `"select_all"`): sent to
+    /// whatever has focus, a page's selection or a field's. It has no id.
+    pub standard: Option<String>,
+    /// The application's About item in its place: the app's name and
+    /// version, as the system's about panel shows them. It has no id.
+    pub about: Option<(String, String)>,
 }
+
+/// The platform's edit items `ui.command { standard = … }` names.
+pub const STANDARD: [&str; 6] = ["undo", "redo", "cut", "copy", "paste", "select_all"];
 
 type Runner = (Function, Weak<Vm>);
 /// A declared command, its runner and the plugin that declared it.
@@ -108,6 +120,18 @@ fn shortcut(key: &str) -> String {
     parts.join("+")
 }
 
+/// `about = { name, version }`: the About item's name and version.
+fn about(table: &Table) -> mlua::Result<Option<(String, String)>> {
+    let Some(about) = table.get::<Option<Table>>("about")? else {
+        return Ok(None);
+    };
+    let name = about
+        .get::<Option<String>>("name")?
+        .ok_or_else(|| mlua::Error::runtime("ui.command's `about` needs the app's `name`"))?;
+    let version = about.get::<Option<String>>("version")?.unwrap_or_default();
+    Ok(Some((name, version)))
+}
+
 /// Installs `ui.command`, and `ui.shortcut_text`: keys (`cmd+z`) as this
 /// platform shows them (⌘Z, or Ctrl+Z), for a tooltip or a list of keys.
 pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Result<()> {
@@ -121,14 +145,38 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
             let menu = table
                 .get::<Option<String>>("menu")?
                 .unwrap_or_else(|| "File".into());
-            if table.get::<Option<bool>>("separator")?.unwrap_or(false) {
-                commands.pending.borrow_mut().push((
+            let standard = table.get::<Option<String>>("standard")?;
+            let about = about(&table)?;
+            let separator = table.get::<Option<bool>>("separator")?.unwrap_or(false);
+            if separator || standard.is_some() || about.is_some() {
+                if let Some(name) = &standard
+                    && !STANDARD.contains(&name.as_str())
+                {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.command's `standard` is one of {}, not `{name}`",
+                        STANDARD.join(", ")
+                    )));
+                }
+                let mut pending = commands.pending.borrow_mut();
+                let twice = pending.iter().any(|(c, _, _)| {
+                    (standard.is_some() && c.standard == standard)
+                        || (about.is_some() && c.about.is_some())
+                });
+                if twice {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.command's {} item is declared twice",
+                        standard.as_deref().unwrap_or("about")
+                    )));
+                }
+                pending.push((
                     Command {
                         id: String::new(),
                         title: String::new(),
                         menu,
                         key: None,
-                        separator: true,
+                        separator: standard.is_none() && about.is_none(),
+                        standard,
+                        about,
                     },
                     None,
                     None,
@@ -168,6 +216,8 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     menu,
                     key,
                     separator: false,
+                    standard: None,
+                    about: None,
                 },
                 Some((run, vm)),
                 plugin,

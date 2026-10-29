@@ -1,0 +1,218 @@
+{
+	"name": "night-owl-light",
+	"type": "light",
+	"extends": "zgx-light",
+	"tokens": {
+		"background": "#fbfbfb",
+		"surface": {
+			"sunken": "#f6f6f6",
+			"base": "#f0f0f0",
+			"raised": "#d3e8f8",
+			"overlay": "#feffff"
+		},
+		"text": {
+			"primary": "#403f53",
+			"secondary": "#66657a",
+			"tertiary": "#7a8297",
+			"disabled": "#403f5361"
+		},
+		"border": "#0000001f",
+		"border.subtle": "#00000012",
+		"border.strong": "#00000038",
+		"accent": "#4876d6",
+		"accent.hover": "#688edd",
+		"accent.text": "#000000",
+		"danger": "#de3d3b",
+		"warning": "#a67d00",
+		"success": "#08916a",
+		"info": "#4876d6",
+		"selection": "#4876d63d",
+		"selection.item": "#1a1a1a0f",
+		"focus.ring": "{border.strong}",
+		"hover": "#0000000f",
+		"pressed": "#4876d61a",
+		"scrollbar": {
+			"thumb": "#403f534c",
+			"thumb.active": "#403f538c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#f0f0f0cc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#ffffff",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#ffffff",
+			"dialog": "#fdfeff",
+			"input.border": "#4352601a",
+			"solid": "#232328",
+			"on_solid": "#ffffff",
+			"danger.muted": "#b23e42",
+			"danger.strong": "#d83b3a",
+			"danger.text": "#ffffff",
+			"danger.hover": "#c73635",
+			"danger.pressed": "#b53231",
+			"info.strong": "#4673d1",
+			"info.text": "#ffffff",
+			"info.hover": "#406ac0",
+			"info.pressed": "#3b61b0",
+			"warning.strong": "#a67d00",
+			"warning.text": "#000000",
+			"warning.hover": "#ad8714",
+			"warning.pressed": "#b49229",
+			"success.strong": "#08916a",
+			"success.text": "#000000",
+			"success.hover": "#1c9a76",
+			"success.pressed": "#30a382",
+			"warning.muted": "#8c6e15",
+			"success.muted": "#167c64",
+			"accent": {
+				"wash": "#4876d61f",
+				"selection": "#4876d63d"
+			},
+			"ink": {
+				"1": "#0000000a",
+				"2": "#0000000f",
+				"3": "#00000014",
+				"4": "#0000001c",
+				"5": "#00000029",
+				"6": "#00000038"
+			},
+			"diff": {
+				"add": "#08916a",
+				"delete": "#de3d3b",
+				"hunk": "#4876d612"
+			},
+			"cursor": "#403f538c",
+			"scrim": "#00000099",
+			"code.wash": "#4876d61f",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#0000001c",
+				"hover": "#0000000d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#3d3d41",
+			"solid.pressed": "#4e4e52",
+			"terminal": {
+				"fg": "#403f53",
+				"selection": "#cfcfcf",
+				"ansi": {
+					"0": "#403f53",
+					"1": "#de3d3b",
+					"2": "#08916a",
+					"3": "#e0af02",
+					"4": "#288ed7",
+					"5": "#d6438a",
+					"6": "#2aa298",
+					"7": "#93a1a1",
+					"8": "#403f53",
+					"9": "#de3d3b",
+					"10": "#08916a",
+					"11": "#daaa01",
+					"12": "#288ed7",
+					"13": "#d6438a",
+					"14": "#2aa298",
+					"15": "#403f53"
+				}
+			}
+		}
+	},
+	"_source": {
+		"family": "night-owl",
+		"name": "Night Owl Light",
+		"treatment": "Opaque",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

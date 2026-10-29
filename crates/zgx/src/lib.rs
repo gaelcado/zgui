@@ -14,6 +14,7 @@ pub mod text;
 pub mod text_edit;
 mod words;
 
+pub mod editor_projection;
 pub mod widgets;
 
 pub mod keyed;
@@ -36,6 +37,8 @@ pub mod switches;
 pub mod trace;
 
 pub mod caret_blink;
+pub(crate) mod editor_chip_tip;
+pub mod editor_gutter;
 pub(crate) mod editor_lines;
 pub(crate) mod editor_menu;
 pub(crate) mod editor_spell;
@@ -63,6 +66,7 @@ mod compose_scrollbar;
 mod compose_split;
 mod compose_style;
 mod compose_tooltip;
+mod compose_veil;
 mod compose_virtual_keyboard;
 pub mod style;
 pub mod theme;

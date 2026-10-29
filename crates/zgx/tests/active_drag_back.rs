@@ -90,3 +90,61 @@ fn a_press_dragged_off_a_button_and_back_looks_pressed_again_and_clicks() {
     assert_ne!(fill(&ui, node), active, "a press let go elsewhere is over");
     assert_eq!(clicks.get(), 1);
 }
+
+#[test]
+fn a_press_that_opens_a_menu_leaves_its_button_unpressed() {
+    // A select's menu opens on press (as a native pop-up button's does):
+    // the release lands in the menu, and the button must not stay pressed.
+    let mut ui = Ui::new(300., 200.);
+    let open = ui.signal(false);
+    let (base, active) = (rgb(0x112233), rgb(0xaabbcc));
+    let opener = open.clone();
+    let view = ui.mount(
+        column().size(300., 200.).child(
+            popover(
+                "Menu",
+                open.clone(),
+                button()
+                    .id("button")
+                    .size(100., 40.)
+                    .bg(base)
+                    .active(move |s| s.bg(active))
+                    .child(text("Choose").id("label"))
+                    .on_event(move |cx| {
+                        if matches!(cx.event, InputEvent::PointerDown { .. }) {
+                            opener.set(true);
+                        }
+                    }),
+            )
+            .child(button().id("item").size(80., 30.)),
+        ),
+    );
+    ui.prepare_frame();
+    let node = view.find("button").unwrap();
+    let label = ui.scene.borrow().bounds(view.find("label").unwrap());
+    let on_label = (label.x + 2., label.y + label.height / 2.);
+    at(
+        &mut ui,
+        |x, y| InputEvent::PointerDown {
+            x,
+            y,
+            button: PointerButton::Primary,
+        },
+        on_label,
+    );
+    assert!(open.get(), "the press opened the menu");
+    assert_ne!(fill(&ui, node), active, "the menu took the press");
+    let item = ui.scene.borrow().bounds(view.find("item").unwrap());
+    at(
+        &mut ui,
+        |x, y| InputEvent::PointerUp {
+            x,
+            y,
+            button: PointerButton::Primary,
+        },
+        (item.x + 5., item.y + 5.),
+    );
+    open.set(false);
+    ui.prepare_frame();
+    assert_eq!(fill(&ui, node), base, "closed, the button is at rest");
+}

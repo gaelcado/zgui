@@ -75,6 +75,8 @@ struct Inner {
     next: Cell<u64>,
     revision: Cell<u64>,
     supported: Cell<bool>,
+    terminals: Cell<bool>,
+    temporary_stores: Cell<bool>,
     split: RefCell<Rc<PlaneSplit>>,
 }
 /// A window's mounted native views: provided to components by the desktop
@@ -116,6 +118,27 @@ impl NativeViews {
     /// Whether this window composites native views itself (see `set_supported`).
     pub fn supported(&self) -> bool {
         self.0.supported.get()
+    }
+    /// Whether the host has a terminal backend (Ghostty, with the desktop
+    /// host's `ghostty` feature). Without it a terminal node renders the
+    /// labelled placeholder, even in a window that shows web pages.
+    pub fn set_terminals(&self, terminals: bool) {
+        self.0.terminals.set(terminals);
+    }
+    /// Whether terminals show as the platform's own: a backend for them
+    /// (see `set_terminals`) in a window that composites native views.
+    pub fn terminals(&self) -> bool {
+        self.0.supported.get() && self.0.terminals.get()
+    }
+    /// Whether a page's named store (`WebProfile::Named`) keeps nothing
+    /// past the run here: macOS before 14 has no persistent stores of an
+    /// app's own, so the platform makes each a temporary one.
+    pub fn set_temporary_stores(&self, temporary: bool) {
+        self.0.temporary_stores.set(temporary);
+    }
+    /// Whether named stores are temporary here (see `set_temporary_stores`).
+    pub fn temporary_stores(&self) -> bool {
+        self.0.supported.get() && self.0.temporary_stores.get()
     }
     /// Register `node` as showing `content`; it stays registered while the
     /// registration lives.

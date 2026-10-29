@@ -28,6 +28,7 @@ use crate::{
     compose::View,
     native_view::NativeContent,
     reactive::{Runtime, Signal},
+    style::Styled,
 };
 use std::{
     any::Any,
@@ -79,6 +80,21 @@ pub struct TerminalState {
     pub columns: u16,
     /// Grid height in cells.
     pub rows: u16,
+    /// Where the view is in the scrollback, as the platform reports it;
+    /// `None` until it does.
+    pub scrollback: Option<Scrollback>,
+}
+
+/// Where a terminal's view is in its scrollback, in rows
+/// ([`TerminalState::scrollback`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrollback {
+    /// The rows in all: the scrollback and the screen.
+    pub total: u64,
+    /// The first row shown.
+    pub offset: u64,
+    /// How many rows show.
+    pub visible: u64,
 }
 
 /// A program's own report of its state (the Program Status Protocol, OSC
@@ -206,6 +222,10 @@ pub enum TerminalCommand {
     /// Run a Ghostty binding action (`copy_to_clipboard`, `clear_screen`,
     /// `increase_font_size:1`, `scroll_to_bottom`, ...).
     Binding(String),
+    /// Configure it anew: Ghostty configuration lines over the app's own
+    /// (`background = #090909`, `palette = 1=#f87171`, `font-family = …`),
+    /// as [`Terminal::configure`] gives them.
+    Configure(String),
     /// End the session: the process is hung up and the view goes.
     Close,
 }
@@ -235,6 +255,8 @@ struct Inner {
     options: RefCell<TerminalOptions>,
     /// A platform terminal started it (its process runs with `options`).
     started: Cell<bool>,
+    /// Its configuration over the app's ([`Terminal::configure`]).
+    config: RefCell<String>,
     state: Signal<TerminalState>,
     /// The pointer over the terminal, in points from its top left.
     pointer: Signal<Option<(f32, f32)>>,
@@ -297,6 +319,7 @@ impl Terminal {
             id,
             options: RefCell::new(options),
             started: Cell::new(false),
+            config: RefCell::new(String::new()),
             state: runtime.signal(TerminalState::default()),
             pointer: runtime.signal(None),
             attached: runtime.signal(false),
@@ -400,6 +423,27 @@ impl Terminal {
     pub fn binding(&self, action: impl Into<String>) {
         self.run(TerminalCommand::Binding(action.into()));
     }
+    /// Configure the terminal over the app's own configuration: Ghostty's
+    /// lines (`background = #090909`, `palette = 1=#f87171`,
+    /// `font-family = Geist Mono`, `font-size = 13`), replacing what was
+    /// configured before, now and whenever a platform terminal shows it
+    /// (the app's theme changing restyles it). The same configuration again
+    /// does nothing.
+    pub fn configure(&self, config: impl Into<String>) {
+        let config = config.into();
+        if *self.0.config.borrow() == config {
+            return;
+        }
+        *self.0.config.borrow_mut() = config.clone();
+        if let Some(backend) = self.backend() {
+            backend.run(TerminalCommand::Configure(config));
+        }
+    }
+    /// What [`Terminal::configure`] gave last (empty: the app's own), as a
+    /// platform terminal starting it applies it.
+    pub fn config(&self) -> String {
+        self.0.config.borrow().clone()
+    }
     /// End the session now (no confirmation; see
     /// [`Terminal::needs_confirm_close`]).
     pub fn close(&self) {
@@ -495,4 +539,27 @@ impl Drop for Inner {
 /// grow), round it, clip it, move and fade it.
 pub fn terminal(term: &Terminal) -> View {
     crate::web_view::native_view(NativeContent::Terminal(term.clone()))
+}
+
+/// [`terminal`] with an overlay scrollbar over its right edge, following
+/// its scrollback as the platform reports it ([`TerminalState::scrollback`])
+/// and scrolling it when dragged or pressed (Ghostty's `scroll_to_row`),
+/// shown while it scrolls as the window's overlay scrollbars are.
+pub fn terminal_with_scrollbar(term: &Terminal) -> View {
+    let (rows, to) = (term.clone(), term.clone());
+    let bar = crate::compose::row_scrollbar(
+        move || {
+            rows.state()
+                .get()
+                .scrollback
+                .map(|s| (s.total, s.offset, s.visible))
+        },
+        move |row| to.binding(format!("scroll_to_row:{row}")),
+    )
+    .absolute()
+    .left(0.)
+    .top(0.)
+    .w_full()
+    .h_full();
+    crate::web_view::native_view_with(NativeContent::Terminal(term.clone()), bar)
 }

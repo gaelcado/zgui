@@ -5,7 +5,8 @@
 //!   replaced (the app's menus changed);
 //! - a shortcut pressed before the menu bar is made (it comes after the
 //!   first frame) still runs its item;
-//! - each of the app's menus shows once.
+//! - each of the app's menus shows once;
+//! - the app's own items, About first, lead the application menu.
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -60,5 +61,45 @@ fn main() {
             ["Application", "Edit", "View", "Window"]
         );
         println!("menu_services: each of the app's menus shows once");
+
+        // The app's own menu leads the application menu, over Services,
+        // Hide and Quit, rather than standing beside it.
+        let menus = [
+            AppMenu::application(
+                "Zeron",
+                [
+                    AppMenuEntry::About {
+                        name: "Zeron".into(),
+                        version: "0.2.129".into(),
+                    },
+                    AppMenuEntry::item("Check for Updates…", "updates"),
+                    AppMenuEntry::Separator,
+                    AppMenuEntry::item("Settings", "settings"),
+                ],
+            ),
+            AppMenu::new("View", [AppMenuEntry::item("Sidebar", "sidebar")]),
+        ];
+        assert_eq!(
+            debug_menu_bar_titles(&menus).unwrap(),
+            ["Application", "View", "Window"]
+        );
+        let items = zgx_desktop::app_menu::debug_application_menu_titles(&menus).unwrap();
+        assert_eq!(
+            items[..6],
+            [
+                "About Zeron",
+                "Check for Updates…",
+                "",
+                "Settings",
+                "",
+                "Services"
+            ]
+        );
+        assert_eq!(items.last().map(|s| s.starts_with("Quit")), Some(true));
+        assert!(
+            debug_menu_bar_services_filled(&menus).unwrap(),
+            "AppKit fills the Services submenu after the app's items"
+        );
+        println!("menu_services: the app's own menu leads the application menu");
     }
 }

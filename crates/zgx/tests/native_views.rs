@@ -6,6 +6,7 @@ use zgx::{
     compose::prelude::*,
     native_view::{NativeViews, Plane, PlaneSplit, PointerRoute},
     scene::Rect,
+    terminal::{Terminal, TerminalOptions, terminal},
     web_view::{WebView, WebViewBackend, WebViewCommand, WebViewEvent, WebViewOptions},
     widgets::Ui,
 };
@@ -475,6 +476,50 @@ fn unmounting_unregisters_and_unsupported_windows_show_a_placeholder() {
     assert!(natives.is_empty());
     // The controller (and its queued navigation) lives on.
     assert_eq!(web.url(), "https://example.com/");
+}
+
+#[test]
+fn a_terminal_without_a_backend_shows_the_placeholder_where_pages_show() {
+    let mut ui = Ui::new(400., 300.);
+    let natives = supported();
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    let view = ui.mount(provide(
+        natives.clone(),
+        column()
+            .child(terminal(&term).id("term").w(200.).h(100.))
+            .child(web_view(&web).id("page").w(200.).h(100.)),
+    ));
+    ui.prepare_frame();
+    let (term_node, page) = (view.find("term").unwrap(), view.find("page").unwrap());
+    // Both registered, so the host can place them; only the page is the
+    // platform's to paint.
+    assert_eq!(natives.nodes(), vec![term_node, page]);
+    assert!(!natives.terminals());
+    let scene = ui.scene.borrow();
+    assert!(
+        !scene.children(term_node).is_empty(),
+        "the terminal's labelled box"
+    );
+    assert!(scene.children(page).is_empty(), "the page paints itself");
+    drop(scene);
+
+    // With a terminal backend, the terminal paints itself too.
+    let mut ui = Ui::new(400., 300.);
+    let natives = supported();
+    natives.set_terminals(true);
+    assert!(natives.terminals());
+    let view = ui.mount(provide(
+        natives.clone(),
+        terminal(&term).id("term").w(200.).h(100.),
+    ));
+    ui.prepare_frame();
+    let node = view.find("term").unwrap();
+    assert!(ui.scene.borrow().children(node).is_empty());
+    // Terminals need native views at all.
+    let unsupported = NativeViews::new();
+    unsupported.set_terminals(true);
+    assert!(!unsupported.terminals());
 }
 
 struct Recorder(RefCell<Vec<String>>);

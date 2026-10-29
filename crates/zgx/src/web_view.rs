@@ -768,7 +768,12 @@ impl Drop for Inner {
 /// Show `web`'s page in a node laid out like any other: give it a size (or
 /// let it grow), round it, clip it, move and fade it.
 pub fn web_view(web: &WebView) -> View {
-    native(NativeContent::Web(web.clone()), Some(web.clone()), None)
+    native(
+        NativeContent::Web(web.clone()),
+        Some(web.clone()),
+        None,
+        None,
+    )
 }
 /// [`web_view`] navigating to `src` whenever its tracked reads change it.
 pub fn web_view_src(web: &WebView, src: impl FnMut() -> String + 'static) -> View {
@@ -776,6 +781,7 @@ pub fn web_view_src(web: &WebView, src: impl FnMut() -> String + 'static) -> Vie
         NativeContent::Web(web.clone()),
         Some(web.clone()),
         Some(Box::new(src)),
+        None,
     )
 }
 /// A node showing `content` (see [`crate::native_view`]). On macOS the
@@ -786,7 +792,12 @@ pub fn native_view(content: NativeContent) -> View {
         NativeContent::Web(web) => Some(web.clone()),
         _ => None,
     };
-    native(content, web, None)
+    native(content, web, None, None)
+}
+/// [`native_view`] with zgx content of its own over it (a terminal's
+/// scrollbar): `over` is its child, drawn in front of the platform's view.
+pub(crate) fn native_view_with(content: NativeContent, over: View) -> View {
+    native(content, None, None, Some(over))
 }
 /// What takes keyboard focus with a native node.
 enum Focusable {
@@ -820,10 +831,14 @@ fn native(
     content: NativeContent,
     web: Option<WebView>,
     src: Option<Box<dyn FnMut() -> String>>,
+    over: Option<View>,
 ) -> View {
     component(move |cx| {
         let natives = cx.try_service::<NativeViews>();
-        let supported = natives.as_ref().is_some_and(|natives| natives.supported());
+        let supported = natives.as_ref().is_some_and(|natives| match &content {
+            NativeContent::Terminal(_) => natives.terminals(),
+            _ => natives.supported(),
+        });
         if let (Some(web), Some(mut src)) = (web.clone(), src) {
             let effect = cx.runtime().effect(move || {
                 let url = src();
@@ -845,6 +860,9 @@ fn native(
         if !supported {
             let label = content.clone();
             root = root.child(placeholder(label));
+        }
+        if let Some(over) = over {
+            root = root.child(over);
         }
         let registered = content.clone();
         root.on_mount(move |handle| {

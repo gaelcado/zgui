@@ -3,16 +3,20 @@
 //! `ui.markdown`), so a script only lays out what it is given.
 //!
 //! A block is a table with `t`:
-//! - `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`, and
+//! - `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`, `open`
+//!   while a streaming fence is unclosed, and
 //!   what [`Options::code`] adds), `ul` / `ol` (`start`, `items`: a list of
 //!   block lists), `quote` (`b`), `hr`, `table` (`head`: cells, `rows`:
-//!   rows of cells; a cell is runs), `img` (`src`, `alt`).
+//!   rows of cells; a cell is runs), `img` (`src`, `alt`): an image alone
+//!   in its paragraph.
 //!
 //! A list item's own text (a tight list's, never a paragraph) is a `p`
 //! with `tight`, which has no space under it.
 //!
 //! A run is `{ x = text, b?, i?, c? (code), s? (strike), a? (link),
-//! f? (a repository file, with [`Options::paths`]) }`. A link whose address
+//! f? (a repository file, with [`Options::paths`]), img? }`: an image among
+//! text, or beside others, or in a table's cell, is a run of its own with
+//! `img` its source and `x` its alt text. A link whose address
 //! is still streaming has `a` = [`PENDING_LINK_URL`]: style it as a link,
 //! but it goes nowhere yet. Raw HTML is dropped.
 //!
@@ -39,6 +43,14 @@ pub struct Options {
     /// Repository paths in text (`src/main.rs:12`), in code spans that are a
     /// path whole, and relative links that read as one, are files (`f`).
     pub paths: bool,
+    /// Each top-level block says the source line it starts on (`line`, from
+    /// 1): what a comment on a document's block cites.
+    pub lines: bool,
+    /// TeX math: `$…$` is a run with `m` (its source in `x`), `$$…$$` in a
+    /// paragraph a block of its own (`math`, its source in `tex`); what
+    /// reads as dollars rather than TeX (`$5 and $10`, `${HOME}`) stays
+    /// text, as Zeron reads it.
+    pub math: bool,
     /// More fields for a code block, from its language and text (coloured
     /// lines, say): `(name, value)` pairs.
     pub code: Option<CodeFields>,
@@ -49,7 +61,7 @@ pub type CodeFields = Rc<dyn Fn(&str, &str) -> Vec<(&'static str, Value)>>;
 
 /// Markdown parsed into blocks.
 pub fn parse(text: &str, options: &Options) -> Vec<Value> {
-    parse_at(text, 0, options)
+    parse_at(text, 0, 0, options)
         .into_iter()
         .flat_map(|top| top.blocks)
         .collect()
@@ -118,7 +130,7 @@ impl Incremental {
     fn reset(&mut self, text: &str) {
         self.source = text.to_string();
         self.full_only = has_link_defs(text);
-        self.tops = parse_at(text, 0, &self.options);
+        self.tops = parse_at(text, 0, 0, &self.options);
         self.last_parse_bytes = text.len();
         self.remend();
     }
@@ -131,7 +143,7 @@ impl Incremental {
             self.full_only = true;
         }
         if self.full_only {
-            self.tops = parse_at(&self.source, 0, &self.options);
+            self.tops = parse_at(&self.source, 0, 0, &self.options);
             self.last_parse_bytes = self.source.len();
             self.remend();
             return;
@@ -146,7 +158,8 @@ impl Incremental {
             n => self.tops[n - 2].start,
         };
         let boundary = self.source[..boundary].rfind('\n').map_or(0, |i| i + 1);
-        let mut tail = parse_at(&self.source[boundary..], boundary, &self.options);
+        let before = self.lines_before(boundary);
+        let mut tail = parse_at(&self.source[boundary..], boundary, before, &self.options);
         self.last_parse_bytes = self.source.len() - boundary;
         let at = self.tops.partition_point(|t| t.start < boundary);
         // A block parsed again the same keeps its value.
@@ -159,6 +172,14 @@ impl Incremental {
         self.tops.extend(tail);
         self.remend();
     }
+    /// The source's lines before byte `at`, when blocks say their lines.
+    fn lines_before(&self, at: usize) -> usize {
+        if self.options.lines {
+            self.source[..at].matches('\n').count()
+        } else {
+            0
+        }
+    }
     /// Mend hanging inline markers in the last top-level block, the only
     /// place they can hang (a blank line settles a block).
     fn remend(&mut self) {
@@ -167,7 +188,20 @@ impl Incremental {
         // Code shows an open fence as it is; rules and tables have no
         // inline tail to mend.
         let kind = last.blocks.first().and_then(|b| b.field("t")).cloned();
-        if matches!(&kind, Some(Value::Str(t)) if matches!(&**t, "code" | "hr" | "table")) {
+        // A fence still open (its closer not yet streamed) says so: what
+        // draws its code (a diagram) waits for the whole of it.
+        if matches!(&kind, Some(Value::Str(t)) if &**t == "code") {
+            if fence_open(&self.source[last.start..]) {
+                self.display_tail = Some(
+                    last.blocks
+                        .iter()
+                        .map(|b| with_field(b, "open", Value::Bool(true)))
+                        .collect(),
+                );
+            }
+            return;
+        }
+        if matches!(&kind, Some(Value::Str(t)) if matches!(&**t, "hr" | "table")) {
             return;
         }
         let start = last.start;
@@ -175,7 +209,7 @@ impl Incremental {
             return;
         };
         self.last_parse_bytes += mended.len();
-        let tail = parse_at(&mended, start, &self.options);
+        let tail = parse_at(&mended, start, self.lines_before(start), &self.options);
         self.display_tail = Some(tail.into_iter().flat_map(|t| t.blocks).collect());
     }
     /// The blocks to show: those before the last top-level block are the
@@ -198,7 +232,7 @@ impl Incremental {
     }
 }
 
-/// `ui.markdown(text, { key?, breaks?, paths? })`: the blocks. With `key`
+/// `ui.markdown(text, { key?, breaks?, paths?, lines? })`: the blocks. With `key`
 /// (a message's id), text that grows under the same key parses
 /// incrementally, sharing its earlier blocks with the last answer; without,
 /// the same text answers with the same blocks.
@@ -216,6 +250,8 @@ pub(crate) fn script(
     let options = Options {
         breaks: flag("breaks")?,
         paths: flag("paths")?,
+        lines: flag("lines")?,
+        math: flag("math")?,
         code: None,
     };
     let key: Option<String> = match &opts {
@@ -226,7 +262,7 @@ pub(crate) fn script(
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return Ok(Value::List(parse(&text, &options).into()));
     };
-    let flags = (options.breaks, options.paths);
+    let flags = (options.breaks, options.paths, options.lines, options.math);
     Ok(match key {
         Some(key) => {
             let mut streams = parsed.streams.borrow_mut();
@@ -264,8 +300,8 @@ pub(crate) fn install(lua: &mlua::Lua) {
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
 
-/// `breaks` and `paths`, as a script asked for them.
-type Flags = (bool, bool);
+/// `breaks`, `paths`, `lines` and `math`, as a script asked for them.
+type Flags = (bool, bool, bool, bool);
 type Texts = std::collections::HashMap<(String, Flags), Value>;
 type Streams = std::collections::HashMap<String, (Flags, Incremental)>;
 
@@ -300,14 +336,19 @@ fn has_link_defs(text: &str) -> bool {
     })
 }
 
-/// `text` (which starts at `offset` in the whole) parsed into its top-level
-/// elements.
-fn parse_at(text: &str, offset: usize, options: &Options) -> Vec<Top> {
+/// `text` (which starts at `offset` in the whole, after `first_line` lines
+/// of it) parsed into its top-level elements.
+fn parse_at(text: &str, offset: usize, first_line: usize, options: &Options) -> Vec<Top> {
     let mut flags = pulldown_cmark::Options::empty();
     flags.insert(pulldown_cmark::Options::ENABLE_TABLES);
     flags.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
     flags.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
+    if options.math {
+        flags.insert(pulldown_cmark::Options::ENABLE_MATH);
+    }
     let mut builder = Builder {
+        source: text,
+        at: 0..0,
         frames: vec![Frame::Blocks(Vec::new())],
         runs: Vec::new(),
         styles: Vec::new(),
@@ -315,18 +356,24 @@ fn parse_at(text: &str, offset: usize, options: &Options) -> Vec<Top> {
         code: None,
         heading: None,
         image: None,
+        task: None,
         options,
         deeper: 0,
     };
     let mut tops = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
+    // With `lines`: the line `text` starts on (it starts at `offset` in the
+    // whole, whose lines before it are counted by the caller's text), and
+    // how far its own are counted.
+    let (mut line, mut counted) = (1 + first_line, 0usize);
     for (event, range) in Parser::new_ext(text, flags).into_offset_iter() {
         let opens = matches!(event, Event::Start(_));
         let closes = matches!(event, Event::End(_));
         if depth == 0 {
             start = range.start;
         }
+        builder.at = range.clone();
         builder.event(event);
         if opens {
             depth += 1;
@@ -335,10 +382,21 @@ fn parse_at(text: &str, offset: usize, options: &Options) -> Vec<Top> {
         }
         // A top-level element is done: what it made is its blocks.
         if depth == 0 {
-            let blocks = match builder.frames.first_mut() {
+            let mut blocks = match builder.frames.first_mut() {
                 Some(Frame::Blocks(blocks)) => std::mem::take(blocks),
                 _ => Vec::new(),
             };
+            if options.lines {
+                line += text[counted..start.max(counted)].matches('\n').count();
+                counted = start.max(counted);
+                for block in &mut blocks {
+                    if let Value::Map(fields) = block {
+                        let mut with = fields.to_vec();
+                        with.push((Rc::from("line"), Value::Num(line as f64)));
+                        *block = Value::record(with);
+                    }
+                }
+            }
             tops.push(Top {
                 start: offset + start,
                 blocks,
@@ -362,6 +420,89 @@ struct Run {
     code: bool,
     link: Option<String>,
     file: Option<String>,
+    /// An image's source: the run is the image, its text the alt.
+    image: Option<String>,
+    /// TeX: the run's text is a formula's source; `display` (`$$…$$`) in
+    /// a paragraph becomes a block of its own.
+    math: Option<MathStyle>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MathStyle {
+    Inline,
+    Display,
+}
+
+/// Whether `tex`, read between dollars (`next` the byte after the closing
+/// one), is rather dollars and code: amounts, shell and Make variables,
+/// regular expressions, emphasis (Zeron's markdown parser's `not_math`).
+fn not_math(tex: &str, next: Option<u8>) -> bool {
+    let shell_name = tex.len() > 1
+        && tex
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && tex.as_bytes()[0].is_ascii_uppercase();
+    // `${PREFIX}${NAME}`, `${arr[0]}`: a braced shell expansion; `$(CC)`: a
+    // Make variable.
+    let wrapped = |open: char, close: char, allowed: &dyn Fn(u8) -> bool| {
+        tex.len() >= 3
+            && tex.starts_with(open)
+            && tex.ends_with(close)
+            && tex[1..tex.len() - 1].bytes().all(allowed)
+    };
+    let braced = wrapped('{', '}', &|b| {
+        b.is_ascii_alphanumeric() || b"_[].".contains(&b)
+    });
+    let make = wrapped('(', ')', &|b| {
+        b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
+    });
+    // A sign raised or lowered onto what precedes it: `\mathbb{Z}^+`.
+    let script_sign = {
+        let mut before = tex.chars();
+        before.next_back();
+        before.as_str().ends_with(['^', '_', '{'])
+    };
+    // `($foo) or ($bar)`: a bracket closed before any opened.
+    let mut depth = 0i32;
+    let unbalanced = tex.bytes().any(|b| {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        depth < 0
+    });
+    // `$10k, or 5$`: an amount followed by words, with no TeX in it.
+    let amount = tex.starts_with(|c: char| c.is_ascii_digit())
+        && !tex.bytes().any(|b| b"\\^_{}=".contains(&b))
+        && tex
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|word| word.len() >= 2);
+    next.is_some_and(|b| b.is_ascii_digit())
+        || tex.ends_with(['/', ':', '@', ',', ';'])
+        || tex.contains(['`', '"'])
+        || (shell_name && next.is_some_and(|b| b.is_ascii_uppercase() || b == b'_'))
+        || braced
+        || make
+        || unbalanced
+        || amount
+        // Markdown, not TeX: emphasis runs (`**bold $x** y$`).
+        || tex.contains("**")
+        || tex.contains("__")
+        // Regular expressions' anchors: `/x$/i or /y$/g`, `'a$|b$'`.
+        || tex.starts_with(['/', '\''])
+        || (tex.starts_with('|')
+            && !tex.contains(' ')
+            && next.is_some_and(|b| b == b'\'' || b == b'"'))
+        // Separators after a sigil (RxJS `click$, hover$`, `5$, 10$`).
+        || tex.starts_with([',', ';', ':', ')'])
+        // A dangling operator: `x=$a y=$b`, `$i<$n`, `$obj->$prop`; not a
+        // sign in a script (`\mathbb{Z}^+`, `Na$^+$`).
+        || tex.ends_with(['=', '.'])
+        || (tex.ends_with(['-', '<', '>', '*', '/'])
+            && !script_sign
+            && next.is_some_and(|b| b.is_ascii_alphabetic()))
+        || (tex.ends_with('+') && !script_sign)
 }
 
 /// Where a link goes: a page, or (with `paths`) a file in the repository.
@@ -516,6 +657,47 @@ fn link_of(href: &str, paths: bool) -> Link {
     }
 }
 
+/// `block` with `key` set to `value`.
+fn with_field(block: &Value, key: &str, value: Value) -> Value {
+    let Value::Map(fields) = block else {
+        return block.clone();
+    };
+    let mut fields: Vec<(Rc<str>, Value)> = fields
+        .iter()
+        .filter(|(k, _)| &**k != key)
+        .cloned()
+        .collect();
+    fields.push((Rc::from(key), value));
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+    Value::Map(fields.into())
+}
+
+/// Whether `source`, from a fenced code block's opening line, has not yet
+/// reached its closing fence (as long as the opening one, or longer).
+fn fence_open(source: &str) -> bool {
+    let mut lines = source.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    let opening = first.trim_start_matches(' ');
+    if first.len() - opening.len() > 3 {
+        return false;
+    }
+    let Some(mark) = opening.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+        return false;
+    };
+    let length = opening.chars().take_while(|c| *c == mark).count();
+    if length < 3 {
+        return false;
+    }
+    !lines.any(|line| {
+        let closer = line.trim_start_matches(' ');
+        line.len() - closer.len() <= 3
+            && closer.chars().take_while(|c| *c == mark).count() >= length
+            && closer.trim_start_matches(mark).trim().is_empty()
+    })
+}
+
 fn map(fields: Vec<(&str, Value)>) -> Value {
     let mut fields: Vec<(Rc<str>, Value)> =
         fields.into_iter().map(|(k, v)| (Rc::from(k), v)).collect();
@@ -526,7 +708,7 @@ fn map(fields: Vec<(&str, Value)>) -> Value {
 fn runs_value(runs: &[Run]) -> Value {
     Value::List(
         runs.iter()
-            .filter(|r| !r.text.is_empty())
+            .filter(|r| !r.text.is_empty() || r.image.is_some())
             .map(|r| {
                 let mut f = vec![("x", Value::Str(r.text.as_str().into()))];
                 if r.style.bold {
@@ -546,6 +728,12 @@ fn runs_value(runs: &[Run]) -> Value {
                 }
                 if let Some(file) = &r.file {
                     f.push(("f", Value::Str(file.as_str().into())));
+                }
+                if let Some(image) = &r.image {
+                    f.push(("img", Value::Str(image.as_str().into())));
+                }
+                if r.math.is_some() {
+                    f.push(("m", Value::Bool(true)));
                 }
                 map(f)
             })
@@ -571,6 +759,9 @@ enum Frame {
 }
 
 struct Builder<'a> {
+    /// The text being read, and the range of the event being read.
+    source: &'a str,
+    at: std::ops::Range<usize>,
     frames: Vec<Frame>,
     /// Inline runs of the paragraph, heading or cell being read.
     runs: Vec<Run>,
@@ -579,6 +770,8 @@ struct Builder<'a> {
     code: Option<(String, String)>,
     heading: Option<u8>,
     image: Option<(String, String)>,
+    /// A task item's box (`- [x]`), for its first paragraph's `task`.
+    task: Option<bool>,
     options: &'a Options,
     /// Quotes, lists and items open beyond `NESTING`: read into the deepest
     /// container kept, as its blocks.
@@ -627,6 +820,8 @@ impl Builder<'_> {
                 && !last.code
                 && file.is_none()
                 && last.file.is_none()
+                && last.image.is_none()
+                && last.math.is_none()
                 && last.link == link
                 && {
                     let s = last.style;
@@ -643,7 +838,120 @@ impl Builder<'_> {
             code,
             link,
             file,
+            image: None,
+            math: None,
         });
+    }
+
+    /// A formula's source, as a run of its own; one that reads as dollars
+    /// (`not_math`) stays its text as written.
+    fn push_math(&mut self, tex: &str, style: MathStyle) {
+        if style == MathStyle::Inline {
+            let spelling = self.source.get(self.at.clone()).unwrap_or("");
+            let next = self.source.as_bytes().get(self.at.end).copied();
+            if spelling.starts_with('$') && not_math(tex, next) {
+                let spelling = spelling.to_string();
+                self.push_text(&spelling, false);
+                return;
+            }
+        }
+        if self.image.is_some() {
+            self.push_text(tex, false);
+            return;
+        }
+        let link = match self.links.last() {
+            Some(Link::Url(url)) => Some(url.clone()),
+            _ => None,
+        };
+        self.runs.push(Run {
+            text: tex.trim().to_string(),
+            style: self.style(),
+            link,
+            math: Some(style),
+            ..Run::default()
+        });
+    }
+
+    /// A paragraph's runs as blocks: display formulas (`$$…$$`) blocks of
+    /// their own (`math`), the text around them paragraphs, the space
+    /// beside a formula dropped.
+    fn paragraphs(&mut self, mut fields: Vec<(&'static str, Value)>) -> Vec<Value> {
+        let display = |r: &Run| r.math == Some(MathStyle::Display);
+        if !self.runs.iter().any(display) {
+            let runs = self.take_runs();
+            fields.insert(0, ("s", runs));
+            fields.insert(0, ("t", "p".into()));
+            return vec![map(fields)];
+        }
+        let plain = |r: &Run| !r.code && r.math.is_none() && r.image.is_none();
+        let mut out = Vec::new();
+        let mut text: Vec<Run> = Vec::new();
+        let flush =
+            |text: &mut Vec<Run>, out: &mut Vec<Value>, fields: &mut Vec<(&'static str, Value)>| {
+                while let Some(last) = text.last_mut().filter(|r| plain(r)) {
+                    last.text.truncate(last.text.trim_end().len());
+                    if !last.text.is_empty() {
+                        break;
+                    }
+                    text.pop();
+                }
+                while let Some(first) = text.first_mut().filter(|r| plain(r)) {
+                    first.text = first.text.trim_start().to_string();
+                    if !first.text.is_empty() {
+                        break;
+                    }
+                    text.remove(0);
+                }
+                if !text.is_empty() {
+                    let mut block = vec![("t", "p".into()), ("s", runs_value(text))];
+                    // A task's box goes with its first paragraph.
+                    block.append(fields);
+                    out.push(map(block));
+                    text.clear();
+                }
+            };
+        let mut rest = std::mem::take(&mut fields);
+        for run in std::mem::take(&mut self.runs) {
+            if display(&run) {
+                flush(&mut text, &mut out, &mut rest);
+                out.push(map(vec![
+                    ("t", "math".into()),
+                    ("tex", run.text.as_str().into()),
+                ]));
+            } else {
+                text.push(run);
+            }
+        }
+        flush(&mut text, &mut out, &mut rest);
+        out
+    }
+
+    /// An image, as a run of its own (in the link it sits in, if any).
+    fn push_image(&mut self, src: String, alt: String) {
+        let link = match self.links.last() {
+            Some(Link::Url(url)) => Some(url.clone()),
+            _ => None,
+        };
+        self.runs.push(Run {
+            text: alt,
+            style: self.style(),
+            link,
+            image: Some(src),
+            ..Run::default()
+        });
+    }
+
+    /// The paragraph's runs, if they are one image and nothing but space:
+    /// its source and alt text.
+    fn lone_image(&self) -> Option<(String, String)> {
+        let mut images = self.runs.iter().filter(|r| r.image.is_some());
+        let image = images.next()?;
+        let alone = images.next().is_none()
+            && self
+                .runs
+                .iter()
+                .all(|r| r.image.is_some() || r.text.trim().is_empty());
+        alone.then(|| (image.image.clone().unwrap_or_default(), image.text.clone()))
     }
 
     fn take_runs(&mut self) -> Value {
@@ -663,13 +971,13 @@ impl Builder<'_> {
         if self.runs.is_empty() || self.code.is_some() || self.heading.is_some() {
             return;
         }
-        let runs = self.take_runs();
+        let mut fields = vec![("tight", Value::Bool(true))];
+        if let Some(done) = self.task.take() {
+            fields.push(("task", Value::Bool(done)));
+        }
+        let made = self.paragraphs(fields);
         if let Some(Frame::Blocks(blocks)) = self.frames.last_mut() {
-            blocks.push(map(vec![
-                ("t", "p".into()),
-                ("s", runs),
-                ("tight", Value::Bool(true)),
-            ]));
+            blocks.extend(made);
         }
     }
 
@@ -772,8 +1080,25 @@ impl Builder<'_> {
             },
             Event::End(end) => match end {
                 TagEnd::Paragraph => {
-                    let runs = self.take_runs();
-                    self.block(map(vec![("t", "p".into()), ("s", runs)]));
+                    // An image alone in its paragraph is a block.
+                    if self.task.is_none()
+                        && let Some((src, alt)) = self.lone_image()
+                    {
+                        self.runs.clear();
+                        self.block(map(vec![
+                            ("t", "img".into()),
+                            ("src", src.as_str().into()),
+                            ("alt", alt.as_str().into()),
+                        ]));
+                        return;
+                    }
+                    let mut fields = Vec::new();
+                    if let Some(done) = self.task.take() {
+                        fields.push(("task", Value::Bool(done)));
+                    }
+                    for block in self.paragraphs(fields) {
+                        self.block(block);
+                    }
                 }
                 TagEnd::Heading(_) => {
                     let runs = self.take_runs();
@@ -868,17 +1193,7 @@ impl Builder<'_> {
                 }
                 TagEnd::Image => {
                     if let Some((src, alt)) = self.image.take() {
-                        // An image alone in its paragraph is a block; inline,
-                        // its alt text stands in.
-                        if self.runs.is_empty() {
-                            self.block(map(vec![
-                                ("t", "img".into()),
-                                ("src", src.as_str().into()),
-                                ("alt", alt.as_str().into()),
-                            ]));
-                        } else {
-                            self.push_text(&alt, false);
-                        }
+                        self.push_image(src, alt);
                     }
                 }
                 _ => {}
@@ -888,7 +1203,8 @@ impl Builder<'_> {
                 None => self.push_text(&text, false),
             },
             Event::Code(text) => self.push_text(&text, true),
-            Event::InlineMath(text) | Event::DisplayMath(text) => self.push_text(&text, true),
+            Event::InlineMath(text) => self.push_math(&text, MathStyle::Inline),
+            Event::DisplayMath(text) => self.push_math(&text, MathStyle::Display),
             Event::SoftBreak => {
                 let breaks = self.options.breaks;
                 self.push_text(if breaks { "\n" } else { " " }, false)
@@ -896,7 +1212,9 @@ impl Builder<'_> {
             Event::HardBreak => self.push_text("\n", false),
             Event::Rule => self.block(map(vec![("t", "hr".into())])),
             Event::Html(_) | Event::InlineHtml(_) => {}
-            Event::TaskListMarker(done) => self.push_text(if done { "☑ " } else { "☐ " }, false),
+            // The item's box is its first paragraph's `task`, drawn by the
+            // script; its text stays the item's own.
+            Event::TaskListMarker(done) => self.task = Some(done),
             Event::FootnoteReference(name) => self.push_text(&format!("[{name}]"), false),
         }
     }
@@ -922,6 +1240,80 @@ mod tests {
         Options {
             paths: true,
             ..Options::default()
+        }
+    }
+    fn math() -> Options {
+        Options {
+            math: true,
+            ..Options::default()
+        }
+    }
+    fn texts(runs: &Value) -> Vec<(String, bool)> {
+        let Some(Value::List(runs)) = Some(runs) else {
+            return Vec::new();
+        };
+        runs.iter()
+            .map(|r| {
+                let x = match r.field("x") {
+                    Some(Value::Str(x)) => x.to_string(),
+                    _ => String::new(),
+                };
+                (x, r.field("m").is_some())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn math_is_its_source_in_runs_and_blocks() {
+        let blocks = parse(r"Euler: $e^{i\pi} + 1 = 0$, so.", &math());
+        assert_eq!(
+            texts(blocks[0].field("s").unwrap()),
+            vec![
+                ("Euler: ".into(), false),
+                (r"e^{i\pi} + 1 = 0".into(), true),
+                (", so.".into(), false)
+            ]
+        );
+        // Off, dollars are text.
+        let blocks = parse(r"Euler: $e^{i\pi}$", &plain());
+        assert_eq!(
+            texts(blocks[0].field("s").unwrap()),
+            vec![(r"Euler: $e^{i\pi}$".into(), false)]
+        );
+        // A display formula is a block of its own, the text around it
+        // paragraphs.
+        let blocks = parse("The integral\n$$\\int_0^1 x\\,dx$$\nis a half.", &math());
+        assert_eq!(kinds(&blocks), ["p", "math", "p"]);
+        assert_eq!(
+            blocks[1].field("tex"),
+            Some(&Value::from(r"\int_0^1 x\,dx"))
+        );
+        assert_eq!(
+            texts(blocks[0].field("s").unwrap()),
+            vec![("The integral".into(), false)]
+        );
+        let blocks = parse("- $$x^2$$", &math());
+        let Some(Value::List(items)) = blocks[0].field("items") else {
+            panic!("a list");
+        };
+        let Value::List(item) = &items[0] else {
+            panic!("an item");
+        };
+        assert_eq!(kinds(item), ["math"]);
+    }
+
+    #[test]
+    fn dollars_that_are_not_math_stay_text() {
+        for text in [
+            "It costs $5 and $10 later.",
+            "Run `echo` with ${HOME}/bin and ${PATH} set.",
+            "Set $(CC) and $(LD).",
+        ] {
+            let blocks = parse(text, &math());
+            let runs = texts(blocks[0].field("s").unwrap());
+            assert!(runs.iter().all(|(_, m)| !m), "{text}: {runs:?}");
+            let joined: String = runs.iter().map(|(x, _)| x.as_str()).collect();
+            assert!(joined.contains('$'), "{text}: {joined}");
         }
     }
     fn same(a: &Value, b: &Value) -> bool {
@@ -992,6 +1384,34 @@ mod tests {
     }
 
     #[test]
+    fn blocks_say_the_line_they_start_on() {
+        let lines = Options {
+            lines: true,
+            ..plain()
+        };
+        let text = "# Title\n\nA paragraph\nthat wraps.\n\n- one\n- two\n\n```\ncode\n```\n";
+        let starts = |blocks: &[Value]| -> Vec<f64> {
+            blocks
+                .iter()
+                .map(|b| match b.field("line") {
+                    Some(Value::Num(n)) => *n,
+                    _ => 0.,
+                })
+                .collect()
+        };
+        assert_eq!(starts(&parse(text, &lines)), [1., 3., 6., 9.]);
+        assert!(
+            parse(text, &plain())[0].field("line").is_none(),
+            "asked for"
+        );
+        // Streamed, the tail parsed again counts on from the lines before.
+        let mut stream = Incremental::new(lines);
+        stream.set_text("# Title\n\nA paragraph");
+        stream.set_text(text);
+        assert_eq!(starts(&stream.blocks()), [1., 3., 6., 9.]);
+    }
+
+    #[test]
     fn breaks_keep_line_breaks() {
         let blocks = parse(
             "one\ntwo",
@@ -1058,6 +1478,42 @@ mod tests {
         assert!(runs.iter().all(|r| r.field("f").is_none()));
     }
 
+    /// A lone image is a block; beside text or other images, and in a
+    /// table's cells, each is a run of its own, its source with it.
+    #[test]
+    fn images_are_blocks_alone_and_runs_beside_others() {
+        let text = "![shot](https://a.b/1.png)\n\n![a](https://a.b/a.png) ![b](https://a.b/b.png)\n\nSee ![c](https://a.b/c.png) here\n\n| Before | After |\n| --- | --- |\n| ![x](https://a.b/x.png) | ![y](https://a.b/y.png) |";
+        let blocks = parse(text, &plain());
+        assert_eq!(
+            kinds(&blocks),
+            ["img", "p", "p", "table"],
+            "no empty paragraph"
+        );
+        let json = |v: Option<&Value>| v.map(|v| v.to_json()).unwrap_or_default();
+        assert_eq!(json(blocks[0].field("src")), "\"https://a.b/1.png\"");
+        assert_eq!(json(blocks[0].field("alt")), "\"shot\"");
+        let images = |runs: &[Value]| -> Vec<(String, String)> {
+            runs.iter()
+                .filter(|r| r.field("img").is_some())
+                .map(|r| (json(r.field("img")), json(r.field("x"))))
+                .collect()
+        };
+        let pair = blocks[1].field("s").unwrap().list();
+        assert_eq!(
+            images(pair),
+            [
+                ("\"https://a.b/a.png\"".into(), "\"a\"".into()),
+                ("\"https://a.b/b.png\"".into(), "\"b\"".into())
+            ]
+        );
+        let inline = blocks[2].field("s").unwrap().list();
+        assert_eq!(inline.len(), 3, "text, the image, text");
+        assert_eq!(json(inline[1].field("img")), "\"https://a.b/c.png\"");
+        let row = blocks[3].field("rows").unwrap().list()[0].list();
+        assert_eq!(json(row[0].list()[0].field("img")), "\"https://a.b/x.png\"");
+        assert_eq!(json(row[1].list()[0].field("img")), "\"https://a.b/y.png\"");
+    }
+
     #[test]
     fn tight_items_keep_their_text_before_a_nested_list() {
         let blocks = parse("- one\n  - two\n- three", &plain());
@@ -1065,6 +1521,22 @@ mod tests {
         let first = items[0].list();
         assert_eq!(kinds(first), ["p", "ul"]);
         assert!(first[0].field("tight").is_some());
+    }
+
+    #[test]
+    fn task_items_carry_their_box_not_a_glyph() {
+        let blocks = parse("- [x] done\n- [ ] open\n- plain", &plain());
+        let items = blocks[0].field("items").unwrap().list();
+        let task = |i: usize| items[i].list()[0].field("task").cloned();
+        assert!(matches!(task(0), Some(Value::Bool(true))));
+        assert!(matches!(task(1), Some(Value::Bool(false))));
+        assert!(task(2).is_none(), "a plain item has no box");
+        let runs = items[0].list()[0].field("s").unwrap().list();
+        let text = runs[0].field("x").unwrap();
+        assert!(
+            matches!(text, Value::Str(t) if &**t == "done"),
+            "the text alone"
+        );
     }
 
     #[test]
@@ -1139,6 +1611,24 @@ mod tests {
                 .all(|(a, b)| same(a, b)),
             "the blocks before the tail are the same values"
         );
+    }
+
+    #[test]
+    fn a_streaming_fence_is_open_until_its_closer_comes() {
+        let mut parser = Incremental::new(plain());
+        parser.set_text("Here:\n\n```mermaid\ngraph TD\n  A --> B\n");
+        let blocks = parser.blocks();
+        assert_eq!(blocks[1].field("open"), Some(&Value::Bool(true)));
+        assert_eq!(
+            blocks[1].field("text"),
+            Some(&Value::from("graph TD\n  A --> B"))
+        );
+        parser.set_text("Here:\n\n```mermaid\ngraph TD\n  A --> B\n```\n");
+        assert_eq!(parser.blocks()[1].field("open"), None, "closed");
+        // A shorter run of backticks inside doesn't close it.
+        assert!(fence_open("````\n```\n"));
+        assert!(!fence_open("~~~\ncode\n  ~~~~ \n"));
+        assert!(!fence_open("    indented\n"));
     }
 
     #[test]

@@ -182,3 +182,29 @@ fn taffy_laid_out_rows_keep_an_icons_size() {
     );
     assert_eq!(rects[1].width, 15., "{rects:?}");
 }
+
+#[test]
+fn a_childs_own_minimum_counts_toward_its_parents() {
+    // Two tabs whose words truncate to nothing, but which shrink no
+    // narrower than 60, in a row that may shrink: the row needs their 120
+    // (CSS's min-content contribution keeps to `min-width`), so its
+    // sibling gives way.
+    assert!(word_width() > 60., "{}", word_width());
+    let tab = || {
+        row().min_w(60.).flex_shrink(1.).child(
+            text(WORD)
+                .text_wrap(false)
+                .truncate()
+                .min_w(0.)
+                .flex_shrink(1.),
+        )
+    };
+    let rects = children(
+        row()
+            .w(200.)
+            .child(div().w(180.).h(10.).flex_shrink(1.))
+            .child(row().flex_shrink(1.).child(tab()).child(tab())),
+    );
+    assert!((rects[1].width - 120.).abs() < 0.01, "{rects:?}");
+    assert!((rects[0].width - 80.).abs() < 0.01, "{rects:?}");
+}

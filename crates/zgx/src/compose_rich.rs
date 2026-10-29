@@ -19,6 +19,23 @@ impl PartialEq for InlineAction {
         Rc::ptr_eq(&self.0, &other.0)
     }
 }
+/// A link's own context menu (`TextSpan::context_menu`): its entries,
+/// built when asked, and its panel's styles.
+#[derive(Clone)]
+pub(crate) struct LinkMenu {
+    build: Rc<RefCell<crate::compose_context_menu::ContextMenuBuilder>>,
+    style: Option<Rc<Styles>>,
+}
+impl std::fmt::Debug for LinkMenu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkMenu")
+    }
+}
+impl PartialEq for LinkMenu {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.build, &other.build)
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Link {
     pub range: Range<usize>,
@@ -28,6 +45,10 @@ pub(crate) struct Link {
     pub href: Option<Arc<str>>,
     /// It restyles under the pointer, so no hover ring.
     pub styled_hover: bool,
+    /// What its tooltip says (`TextSpan::tooltip`).
+    pub tooltip: Option<Arc<str>>,
+    /// Its own context menu, in place of Open Link and Copy Link.
+    pub menu: Option<LinkMenu>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Content {
@@ -42,6 +63,13 @@ pub(crate) struct InlineIcon {
     pub range: Range<usize>,
     pub svg: Arc<crate::svg::SvgData>,
     pub size: f32,
+    /// Its height, if not `size`.
+    pub height: f32,
+    /// How far below the text's baseline its bottom sits, if it sits on
+    /// the baseline rather than centred on the line; with the run's font
+    /// size, which places the baseline.
+    pub descent: Option<f32>,
+    pub font_size: f32,
     /// How far into the room it starts (the span's padding before it).
     pub inset: f32,
 }
@@ -52,12 +80,21 @@ pub(crate) struct InlineIcon {
 pub struct SpanIcon {
     /// The icon.
     pub svg: Arc<crate::svg::SvgData>,
-    /// Its width and height.
+    /// Its width, and its height unless `height` says otherwise.
     pub size: f32,
+    /// Its height, if not `size` (a formula is as wide as it is).
+    pub height: Option<f32>,
+    /// How far below the text's baseline its bottom sits: set on the
+    /// baseline as a formula is (its descent), rather than centred on the
+    /// line. A line grows to hold an icon taller than it.
+    pub descent: Option<f32>,
     /// The room between it and the text.
     pub gap: f32,
     /// Its colour, or a colour token; `None` paints it as the SVG says.
     pub tint: Option<crate::theme::Themed<Color>>,
+    /// After the text rather than before it (a file link's open glyph),
+    /// `gap` from it.
+    pub after: bool,
 }
 /// What keeps an icon's room in the line: a word joiner (zero width, and
 /// no line break either side, so the icon stays with its text), padded.
@@ -77,6 +114,9 @@ pub struct TextSpan {
     pub(crate) radius: f32,
     pub(crate) hover: Option<SpanHover>,
     pub(crate) icon: Option<SpanIcon>,
+    pub(crate) copy: Option<Arc<str>>,
+    pub(crate) tooltip: Option<Arc<str>>,
+    pub(crate) menu: Option<LinkMenu>,
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's
 /// `a:hover { text-decoration: underline }`.
@@ -101,6 +141,9 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
         radius: 0.,
         hover: None,
         icon: None,
+        copy: None,
+        tooltip: None,
+        menu: None,
     }
 }
 impl TextSpan {
@@ -109,6 +152,12 @@ impl TextSpan {
     /// that follows the text colour takes the span's.
     pub fn icon(mut self, icon: SpanIcon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+    /// Copied as `text` rather than as it shows, whole once any of it is
+    /// selected: a formula drawn as an icon copies as its source.
+    pub fn copy_as(mut self, text: impl Into<Arc<str>>) -> Self {
+        self.copy = Some(text.into());
         self
     }
     /// Restyled under the pointer, once it's a link (`on_click`), in place
@@ -154,6 +203,27 @@ impl TextSpan {
     /// it handles itself, in `on_click`.
     pub fn href(mut self, url: impl Into<Arc<str>>) -> Self {
         self.href = Some(url.into());
+        self
+    }
+
+    /// Once it's a link (`on_click`, `href`): `text` in a tooltip while
+    /// the pointer rests on it, as a browser shows where a link goes.
+    pub fn tooltip(mut self, text: impl Into<Arc<str>>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+    /// Once it's a link: a menu of its own on a secondary click (or Shift+F10
+    /// on it), `build` making its entries when asked, in place of Open Link
+    /// and Copy Link; `style` styles its panel (see `View::context_menu`).
+    pub fn context_menu(
+        mut self,
+        build: impl FnMut(&crate::compose_context_menu::ContextMenuEvent) -> Vec<View> + 'static,
+        style: Option<Styles>,
+    ) -> Self {
+        self.menu = Some(LinkMenu {
+            build: Rc::new(RefCell::new(Box::new(build))),
+            style: style.map(Rc::new),
+        });
         self
     }
 
@@ -306,8 +376,8 @@ impl From<RichTextView> for View {
     }
 }
 
-/// What a link does: its action, and where it goes.
-type LinkTarget = (Option<InlineAction>, Option<Arc<str>>);
+/// What a link does: its action, where it goes, and its own menu.
+type LinkTarget = (Option<InlineAction>, Option<Arc<str>>, Option<LinkMenu>);
 /// Link `node`'s context menu: Open Link and Copy Link for its `href` (none
 /// without one, so the press goes on to what it is in).
 fn mount_link_menu(
@@ -317,10 +387,19 @@ fn mount_link_menu(
     platform: Option<Rc<crate::platform::PlatformService>>,
     environment: crate::compose::Environment,
 ) {
+    let style = link
+        .borrow()
+        .2
+        .as_ref()
+        .and_then(|m| m.style.as_deref().cloned());
     crate::compose_context_menu::mount(
         ui,
         node,
-        Box::new(move |_| {
+        Box::new(move |event| {
+            let own = link.borrow().2.as_ref().map(|m| m.build.clone());
+            if let Some(build) = own {
+                return (build.borrow_mut())(event);
+            }
             let Some(url) = link.borrow().1.clone() else {
                 return Vec::new();
             };
@@ -347,7 +426,7 @@ fn mount_link_menu(
                 })]);
             items
         }),
-        None,
+        style,
         false,
         environment,
     );
@@ -387,6 +466,8 @@ pub(crate) fn mount_links(
         menu: bool,
         /// Restyled under the pointer: no ring for hover.
         styled: Rc<Cell<bool>>,
+        /// Its tooltip's text and the view showing it.
+        tooltip: Option<(Arc<str>, NodeId)>,
     }
     let bounds = ui.observe_bounds(paragraph);
     let owner_bounds = ui.observe_bounds(owner);
@@ -482,7 +563,11 @@ pub(crate) fn mount_links(
                     .borrow_mut()
                     .set_cursor(node, Some(crate::cursor::Cursor::Pointer));
                 let fragments = Rc::new(RefCell::new(Vec::new()));
-                let action = Rc::new(RefCell::new((link.action.clone(), link.href.clone())));
+                let action = Rc::new(RefCell::new((
+                    link.action.clone(),
+                    link.href.clone(),
+                    link.menu.clone(),
+                )));
                 let focus = Rc::new(Cell::new(false));
                 let hover = Rc::new(Cell::new(false));
                 let styled = Rc::new(Cell::new(link.styled_hover));
@@ -620,19 +705,41 @@ pub(crate) fn mount_links(
                     hover,
                     styled,
                     menu: false,
+                    tooltip: None,
                 });
             }
             let entry = &mut mounted[index];
             entry.styled.set(link.styled_hover);
-            let old = entry
-                .action
-                .replace((link.action.clone(), link.href.clone()));
+            let old =
+                entry
+                    .action
+                    .replace((link.action.clone(), link.href.clone(), link.menu.clone()));
             drop(old);
             if !ui.scene.borrow().contains(owner) {
                 return;
             }
-            // Its context menu, once it has an `href` to open or copy.
-            if !entry.menu && link.href.is_some() {
+            // Its tooltip: a view over it that shows it while the pointer
+            // rests there.
+            if entry.tooltip.as_ref().map(|(text, _)| text) != link.tooltip.as_ref() {
+                if let Some((_, view)) = entry.tooltip.take() {
+                    ui.remove(view);
+                }
+                if let Some(text) = &link.tooltip {
+                    let view = crate::compose::div()
+                        .w_full()
+                        .h_full()
+                        .tooltip(text.to_string());
+                    let node =
+                        crate::compose::mount(&mut ui, entry.node, view, environment.clone());
+                    entry.tooltip = Some((text.clone(), node));
+                }
+                if !ui.scene.borrow().contains(owner) {
+                    return;
+                }
+            }
+            // Its context menu, once it has an `href` to open or copy, or a
+            // menu of its own.
+            if !entry.menu && (link.href.is_some() || link.menu.is_some()) {
                 entry.menu = true;
                 mount_link_menu(
                     &mut ui,
@@ -656,6 +763,16 @@ pub(crate) fn mount_links(
             style.margin.left = bounds.x - owner_bounds.x + first.x - padding.left;
             style.margin.top = bounds.y - owner_bounds.y + first.y - padding.top;
             ui.scene.borrow_mut().set_style(entry.node, style);
+            // Its tooltip's view covers it.
+            if let Some((_, tip)) = &entry.tooltip {
+                let mut scene = ui.scene.borrow_mut();
+                if scene.contains(*tip) {
+                    let mut style = scene.style(*tip);
+                    style.width = Some(first.width);
+                    style.height = Some(first.height);
+                    scene.set_style(*tip, style);
+                }
+            }
             ui.set_disabled(entry.node, rects.is_empty());
             if !ui.scene.borrow().contains(owner) {
                 return;
@@ -750,16 +867,24 @@ pub(crate) fn mount_icons(
         let padding = ui.scene.borrow().content_insets(owner);
         for (index, (icon, rect)) in data.icons.iter().zip(rects.iter()).enumerate() {
             let rect = rect.unwrap_or_default();
-            // At the room's start, centred on the line; placed from the
-            // owner's content box.
+            // At the room's start, centred on the line, or on its baseline
+            // (which sits 0.8 of the size below the top of the size's box
+            // centred in the line); placed from the owner's content box.
+            let y = match icon.descent {
+                Some(descent) => {
+                    let baseline =
+                        rect.y + (rect.height - icon.font_size) / 2. + icon.font_size * 0.8;
+                    baseline + descent - icon.height
+                }
+                None => rect.y + (rect.height - icon.height) / 2.,
+            };
             let style = Style {
                 absolute: true,
                 width: Some(icon.size),
-                height: Some(icon.size),
+                height: Some(icon.height),
                 margin: crate::scene::Insets {
                     left: bounds.x - owner_bounds.x + rect.x + icon.inset - padding.left,
-                    top: bounds.y - owner_bounds.y + rect.y + (rect.height - icon.size) / 2.
-                        - padding.top,
+                    top: bounds.y - owner_bounds.y + y - padding.top,
                     ..Default::default()
                 },
                 ..Default::default()

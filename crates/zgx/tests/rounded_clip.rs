@@ -417,18 +417,105 @@ fn fade_overflow_shows_only_the_bands_content_runs_past() {
 }
 
 #[test]
-fn fade_overflow_measures_a_scroll_views_content() {
+fn a_label_fading_at_its_end_inside_a_fading_list_fades_at_both() {
     let mut ui = Ui::new(400., 300.);
-    let offset = ui.signal(0_f32);
     let view = ui.mount(
         column().child(
-            zgx::compose::scroll(offset.clone())
+            column()
+                .w(200.)
+                .h(100.)
+                .overflow_hidden()
+                .fade_edges(14., 18.)
+                .fade_overflow(true)
+                .child(
+                    column().shrink_0().h(300.).child(
+                        // A row's title, as the sidebar's: its end fades
+                        // only while it runs past.
+                        row()
+                            .id("title")
+                            .w(120.)
+                            .h(20.)
+                            .overflow_hidden()
+                            .fade_sides(0., 20., 0., 0.)
+                            .fade_overflow(true)
+                            .child(div().id("text").shrink_0().w(300.).h(20.)),
+                    ),
+                ),
+        ),
+    );
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    ui.prepare_frame();
+    let node = view.find("text").unwrap();
+    let scene = ui.scene.borrow();
+    let item = scene
+        .layer_items(None)
+        .into_iter()
+        .find(|item| item.id == node)
+        .unwrap();
+    let (rect, bands) = item.mask().expect("faded");
+    // The list's bottom (its content runs past it) and the title's end.
+    assert_eq!(bands, [0., 20., 18., 0.]);
+    assert_eq!(rect.x + rect.width, 120.);
+    assert_eq!(rect.y + rect.height, 100.);
+}
+
+#[test]
+fn an_eased_fade_slides_its_whole_band_in_as_a_label_grows_too_long() {
+    // A 120-point box holding a label `wide` points wide: its mask.
+    let mask = |wide: f32| {
+        let mut ui = Ui::new(400., 300.);
+        let view = ui.mount(
+            column().child(
+                row()
+                    .w(120.)
+                    .h(20.)
+                    .overflow_hidden()
+                    .fade_sides(0., 20., 0., 0.)
+                    .fade_overflow(true)
+                    .fade_eased(true)
+                    .child(div().id("text").shrink_0().w(wide).h(20.)),
+            ),
+        );
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        ui.prepare_frame();
+        let node = view.find("text").unwrap();
+        let scene = ui.scene.borrow();
+        scene
+            .layer_items(None)
+            .into_iter()
+            .find(|item| item.id == node)
+            .unwrap()
+            .mask()
+    };
+    // Fitting, it does not fade.
+    assert_eq!(mask(100.), None);
+    // A quarter band too long: the whole band, starting past the edge (by
+    // 20 less a smoothstep of a quarter), so the last glyphs only dim.
+    let (rect, bands) = mask(125.).expect("faded");
+    assert_eq!(bands, [0., 20., 0., 0.]);
+    let eased = 0.25 * 0.25 * (3. - 2. * 0.25);
+    assert!((rect.x + rect.width - (120. + 20. * (1. - eased))).abs() < 1e-3);
+    // A band or more too long: the band ends at the box's edge.
+    let (rect, bands) = mask(300.).expect("faded");
+    assert_eq!(bands, [0., 20., 0., 0.]);
+    assert_eq!(rect.x + rect.width, 120.);
+}
+
+#[test]
+fn fade_overflow_looks_through_a_scroll_views_viewport() {
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let view = ui.mount(
+        column().child(
+            scroll(offset.clone())
                 .id("view")
                 .w(200.)
                 .h(100.)
                 .fade_edges(14., 18.)
                 .fade_overflow(true)
-                .child(column().id("list").h(300.).child(div().id("row").h(20.))),
+                .child(column().h(300.).child(div().id("row").h(20.))),
         ),
     );
     let bands = |ui: &mut Ui| {
@@ -443,11 +530,47 @@ fn fade_overflow_measures_a_scroll_views_content() {
             .unwrap();
         item.mask().map(|(_, bands)| bands)
     };
-    // The scrolled content sits under the scroll view's own viewport: its
-    // overflow counts all the same.
     assert_eq!(bands(&mut ui), Some([0., 0., 18., 0.]));
     offset.set(5.);
     assert_eq!(bands(&mut ui), Some([5., 0., 18., 0.]));
+    offset.set(400.);
+    assert_eq!(bands(&mut ui), Some([14., 0., 0., 0.]));
+}
+
+#[test]
+fn fade_overflow_measures_an_editors_text_inside_its_padding() {
+    let mut ui = Ui::new(400., 300.);
+    let value = ui.signal("line\n".repeat(30));
+    let view = ui.mount(
+        column().child(
+            text_area("notes", value)
+                .id("notes")
+                .w(200.)
+                .h(60.)
+                .p(6.)
+                .fade_edges(12., 12.)
+                .fade_overflow(true),
+        ),
+    );
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    let root = view.find("notes").unwrap();
+    let scene = ui.scene.borrow();
+    let mut inside = vec![root];
+    let mut i = 0;
+    while i < inside.len() {
+        inside.extend_from_slice(scene.children(inside[i]));
+        i += 1;
+    }
+    let bands: Vec<_> = scene
+        .layer_items(None)
+        .into_iter()
+        .filter(|item| item.id != root && inside.contains(&item.id))
+        .filter_map(|item| item.mask().map(|(_, bands)| bands))
+        .collect();
+    // At the start, the text runs past the bottom only.
+    assert!(!bands.is_empty());
+    assert!(bands.iter().all(|b| *b == [0., 0., 12., 0.]));
 }
 
 #[test]

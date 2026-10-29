@@ -475,3 +475,98 @@ fn ordinary_computed_styles_match_element_styles() {
         }
     }
 }
+
+#[test]
+fn group_hover_styles_follow_the_hover_group_without_script() {
+    let mut h = Harness::inline(
+        r##"
+        local row = ui.variants {
+            base = { w = 40, h = 20, bg = "#ff0000" },
+            variants = {
+                selected = {
+                    [true] = { bg = "#0000ff" },
+                    [false] = { group_hover = { bg = "#00ff00" } },
+                },
+            },
+        }
+        local selected = ui.state("selected", false)
+        return ui.column {
+            ui.row {
+                id = "group",
+                hover_group = true,
+                w = 200,
+                h = 20,
+                ui.div { id = "handle", w = 40, h = 20 },
+                ui.div { id = "close", w = 40, h = 20, bg = "#ff0000", group_hover = { bg = "#00ff00" } },
+                ui.div { id = "chosen", variants = row { selected = selected } },
+                ui.div { id = "reveal", w = 20, h = 20, hidden = true, group_hover = { hidden = false } },
+            },
+            ui.div { id = "outside", w = 40, h = 20, bg = "#ff0000", group_hover = { bg = "#00ff00" } },
+            ui.button { id = "select", w = 10, h = 10, on_click = function() selected:set(true) end },
+        }
+        "##,
+    );
+    assert!(h.error().is_none(), "{:?}", h.error());
+    assert_eq!((h.fill("close"), h.fill("chosen")), (RED, RED));
+    assert_eq!(h.bounds("reveal").width, 0., "hidden at rest");
+    // Over another child of the group: both follow its hover, in Rust.
+    let calls = h.calls();
+    h.hover("handle");
+    h.frame();
+    assert_eq!((h.fill("close"), h.fill("chosen")), (GREEN, GREEN));
+    assert_eq!(h.bounds("reveal").width, 20., "`hidden = false` shows it");
+    assert_eq!(h.calls(), calls, "no script ran");
+    assert_eq!(h.fill("outside"), RED, "outside a group it never applies");
+    h.hover("outside");
+    h.frame();
+    assert_eq!((h.fill("close"), h.fill("outside")), (RED, RED));
+    // A variant chosen by state decides whether the group's hover shows.
+    h.click("select");
+    h.hover("handle");
+    h.frame();
+    assert_eq!(h.fill("chosen"), BLUE);
+}
+
+#[test]
+fn a_group_hover_does_not_run_the_nodes_own_style_functions_again() {
+    // A node whose own style is a function, with a group hover over it:
+    // the pointer crossing the group re-merges the two, without the script.
+    let mut h = Harness::inline(
+        r##"
+        local runs = ui.state("runs", 0)
+        local tone = ui.state("tone", "#ff0000")
+        return ui.column {
+            ui.row {
+                id = "group",
+                hover_group = true,
+                w = 200,
+                h = 20,
+                ui.div {
+                    id = "chip",
+                    w = 40,
+                    h = 20,
+                    bg = function()
+                        runs:set(runs:peek() + 1)
+                        return tone:get()
+                    end,
+                    group_hover = { opacity = 0.5 },
+                },
+            },
+            ui.button { id = "blue", w = 10, h = 10, on_click = function() tone:set("#0000ff") end },
+        }
+        "##,
+    );
+    assert!(h.error().is_none(), "{:?}", h.error());
+    assert_eq!(h.fill("chip"), RED);
+    let calls = h.calls();
+    h.hover("group");
+    h.frame();
+    assert_eq!(h.opacity("chip"), 0.5, "the group's hover shows");
+    assert_eq!(h.calls(), calls, "and ran nothing");
+    // What the function reads still restyles it, the hover kept.
+    h.click("blue");
+    h.hover("group");
+    h.frame();
+    assert_eq!(h.fill("chip"), BLUE);
+    assert_eq!(h.opacity("chip"), 0.5);
+}

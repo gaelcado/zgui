@@ -1,5 +1,5 @@
-//! Scripts' input placeholders, selection API, select-on-focus, window drag
-//! regions, and hover's enter/leave semantics.
+//! Scripts' input placeholders, selection API, select-on-focus, text
+//! areas that grow with their text, window drag regions, and hover's enter/leave semantics.
 mod common;
 
 use common::Harness;
@@ -216,4 +216,57 @@ fn an_unknown_inputmode_is_an_error() {
     Harness::inline(
         r##"return ui.input { label = "Phone", value = ui.state("p", ""), inputmode = "phone" }"##,
     );
+}
+
+/// `auto_height = true`: a text area is as tall as its text (wrapped at its width)
+/// and its padding, held between `min_h` and `max_h`, past which it
+/// scrolls; restyling it keeps the fitted height, and it settles (no frame
+/// asks for another).
+#[test]
+fn an_auto_height_text_area_grows_and_shrinks_with_its_text() {
+    let mut h = Harness::new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r##"
+local v = ui.state("v", "one")
+local lit = ui.state("lit", false)
+local function set(text: string) return function() v:set(text) end end
+return ui.column { w = 300,
+    ui.textarea { id = "t", value = v, w = 200, auto_height = true, min_h = 30, max_h = 120,
+        wrap = true, py = 4, line_height = 20,
+        border_color = function() return if lit:get() then "#ff0000" else "#00ff00" end },
+    ui.button { id = "three", w = 10, h = 10, on_click = set("one\ntwo\nthree") },
+    ui.button { id = "nine", w = 10, h = 10, on_click = set(string.rep("line\n", 8) .. "end") },
+    ui.button { id = "wrap", w = 10, h = 10, on_click = set("a few words that wrap once") },
+    ui.button { id = "lit", w = 10, h = 10, on_click = function() lit:set(true) end },
+}"##,
+        )
+    });
+    h.frames(3);
+    assert_eq!(h.bounds("t").height, 30., "one line (28) rises to min_h");
+    h.click("three");
+    h.frames(3);
+    assert_eq!(
+        h.bounds("t").height,
+        68.,
+        "three lines of 20 and 8 of padding"
+    );
+    h.click("lit");
+    h.frames(3);
+    assert_eq!(h.bounds("t").height, 68., "a restyle keeps it");
+    h.click("nine");
+    h.frames(3);
+    assert_eq!(h.bounds("t").height, 120., "held at max_h");
+    h.click("wrap");
+    h.frames(3);
+    let wrapped = h.bounds("t").height;
+    assert!(
+        wrapped == 48. || wrapped == 68.,
+        "wrapped lines count: {wrapped}"
+    );
+    let calls = h.host.script_calls();
+    h.frames(5);
+    assert_eq!(h.host.script_calls(), calls, "it settles");
+    assert!(!h.clock.wants_frame(), "and asks for no frame");
 }

@@ -14,7 +14,7 @@ description = "Luau scripts that describe zgx component trees, with hot reload."
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words"]
+default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words", "mermaid", "math"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
@@ -32,6 +32,12 @@ scene3d = ["dep:zgx-3d"]
 # it. Without it `ui.i18n` and `ui.t` work, with English's plural rules
 # (`one`, `other`) and numbers as Rust writes them. zgx-run turns it on.
 i18n = ["zgx/i18n"]
+# Mermaid diagrams laid out (`ui.mermaid`), by a pure Rust renderer.
+mermaid = ["dep:mermaid-rs-renderer", "zgx-gpu/svg-text"]
+# TeX math laid out (`ui.math`, `ui.markdown`'s `math`), as Zeron sets it:
+# zatex over six bundled OpenType math faces (about 4 MB, a face parsed
+# only once a formula uses it).
+math = ["dep:zatex", "svg"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
@@ -57,6 +63,10 @@ serde_json = "1"
 # Markdown for `ui.markdown` and `zgx_script::markdown`.
 pulldown-cmark = { version = "0.13", default-features = false }
 smallvec = "1.16"
+# Mermaid's layout and drawing (`ui.mermaid`), as Zeron renders diagrams.
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false, optional = true }
+# Zeron's TeX math layout (`ui.math`).
+zatex = { path = "../../vendor/zatex", features = ["bundled"], optional = true }
 # Devtools' snapshots (`inspect`).
 png = { version = "0.18", optional = true }
 
@@ -91,6 +101,10 @@ required-features = ["scene3d"]
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop" }
+# The styleguide example's menus (`zgx_run::serve_commands`). Without its
+# default features: its `mimalloc` would turn on zgx-desktop's for every
+# example and test (features unify).
+zgx-run = { path = "../zgx-run", default-features = false, features = ["fetch"] }
 # The benchmark workload of the vlist_luau example.
 zgx-workload = { path = "../../comparisons/workload" }
 

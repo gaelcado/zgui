@@ -148,10 +148,7 @@ pub(crate) fn animate(
         crate::check_duration(lua, "duration", ms, looping);
     }
     let (timing, callbacks, id) = {
-        let p = Params {
-            own: &params,
-            defaults: None,
-        };
+        let p = Params::new(&params, None);
         (
             build::timing(&ctx, &p).map_err(rt)?,
             build::callbacks(&p),
@@ -168,15 +165,7 @@ pub(crate) fn animate(
             engine: engine.clone(),
         };
         let targets = targets(&ctx, targets_value.clone())?;
-        let compiled = build::compile(
-            &ctx,
-            &targets,
-            &Params {
-                own: params,
-                defaults: None,
-            },
-            &|_, _, _| None,
-        )?;
+        let compiled = build::compile(&ctx, &targets, &Params::new(params, None), &|_, _, _| None)?;
         *clip.tracks.borrow_mut() = compiled.tracks;
         clip.timing.borrow_mut().iteration = compiled.iteration;
         Ok(())
@@ -222,10 +211,7 @@ fn timeline(lua: &Lua, params: Option<Table>) -> mlua::Result<ClipUd> {
         Some(p) => p,
         None => lua.create_table()?,
     };
-    let p = Params {
-        own: &params,
-        defaults: None,
-    };
+    let p = Params::new(&params, None);
     let timing = build::timing(&ctx, &p).map_err(rt)?;
     let autoplay = timing.autoplay;
     let (lua2, engine) = (lua.clone(), ctx.engine.clone());
@@ -260,10 +246,7 @@ fn timer(lua: &Lua, params: Option<Table>) -> mlua::Result<ClipUd> {
         Some(p) => p,
         None => lua.create_table()?,
     };
-    let p = Params {
-        own: &params,
-        defaults: None,
-    };
+    let p = Params::new(&params, None);
     let mut timing = build::timing(&ctx, &p).map_err(rt)?;
     // A timer without a duration runs until stopped, as in anime.js.
     timing.iteration = match p.get(&["duration"]) {
@@ -747,10 +730,7 @@ fn spring(params: Option<Table>, perceptual: bool) -> mlua::Result<EaseUd> {
 fn utils_set(lua: &Lua, (targets_value, props): (mlua::Value, Table)) -> mlua::Result<()> {
     let ctx = ctx(lua)?;
     let list = targets(&ctx, targets_value).map_err(rt)?;
-    let p = Params {
-        own: &props,
-        defaults: None,
-    };
+    let p = Params::new(&props, None);
     let zero = lua.create_table()?;
     for pair in props.pairs::<mlua::Value, mlua::Value>() {
         let (k, v) = pair?;
@@ -759,16 +739,8 @@ fn utils_set(lua: &Lua, (targets_value, props): (mlua::Value, Table)) -> mlua::R
     zero.raw_set("duration", 0)?;
     zero.raw_set("ease", "linear")?;
     let _ = p;
-    let compiled = build::compile(
-        &ctx,
-        &list,
-        &Params {
-            own: &zero,
-            defaults: None,
-        },
-        &|_, _, _| None,
-    )
-    .map_err(rt)?;
+    let compiled =
+        build::compile(&ctx, &list, &Params::new(&zero, None), &|_, _, _| None).map_err(rt)?;
     let mut writes = Vec::new();
     for track in compiled.tracks {
         // A set takes the property from any animation holding it.

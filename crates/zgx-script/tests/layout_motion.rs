@@ -223,6 +223,34 @@ fn without_animate_rows_jump_and_nothing_runs() {
     assert_eq!(h.ui.scene.borrow().transform(node).y, 0.);
 }
 
+/// An animated list's row whose item changes under its key is built again
+/// in its place, as a plain list's is, without playing `enter`.
+#[test]
+fn an_animated_rows_changed_item_builds_it_again() {
+    let mut h = Harness::inline(
+        r##"local items = ui.state("items", { { id = "a", text = "One" }, { id = "b", text = "Two" } })
+        return ui.column {
+            ui.each(items, function(item)
+                return ui.text { item.text, id = `row_{item.id}` }
+            end, {
+                key = function(item) return item.id end,
+                animate = { duration = 100 },
+                enter = { opacity = { 0, 1 }, duration = 100 },
+            }),
+            ui.button { id = "edit", w = 4, h = 4, on_click = function()
+                items:set { { id = "a", text = "One" }, { id = "b", text = "Two, edited" } }
+            end },
+        }"##,
+    );
+    h.frames(5);
+    assert_eq!(h.text("row_b"), "Two");
+    h.click("edit");
+    h.frame();
+    assert_eq!(h.text("row_b"), "Two, edited");
+    assert_eq!(h.text("row_a"), "One");
+    assert_eq!(h.opacity("row_b"), 1., "no enter for a row built again");
+}
+
 #[test]
 fn layout_position_slides_a_node_layout_moves() {
     let mut h = Harness::inline(
@@ -309,6 +337,48 @@ fn a_layout_id_hands_its_box_to_the_node_that_takes_it() {
     h.change("a");
     let r = h.shown("hl_a");
     assert_eq!((r.x, r.width), (0., 20.));
+    assert!(!h.clock.wants_frame());
+}
+
+/// `layout_ease = "critical"`: Zeron's composer glide between the new
+/// session's canvas and a thread's dock, critically damped (twelve time
+/// constants over its duration): quick out of the start, never past its
+/// end, there at its end.
+#[test]
+fn a_critical_handoff_glides_without_overshoot() {
+    let mut h = Harness::inline(
+        r##"local at = ui.state("at", "a")
+        local function slot(name)
+            return ui.div { w = 100, h = 20, shrink = 0,
+                ui.show(function() return at:get() == name end,
+                    ui.div { id = "c_" .. name, layout_id = "composer", layout_duration = 400,
+                        layout_ease = "critical", w = 20, h = 20 }),
+            }
+        end
+        return ui.column {
+            ui.row { slot("a"), slot("b") },
+            ui.button { id = "b", w = 4, h = 4, on_click = function() at:set("b") end },
+        }"##,
+    );
+    h.change("b");
+    close(h.x("c_b"), 0., "from the canvas's place");
+    h.run_ms(100.);
+    // 1 - (1 + 3)e^-3 of the way at a quarter of its time.
+    let quarter = 100. * (1. - 4. * (-3f32).exp());
+    assert!(
+        (h.x("c_b") - quarter).abs() < 3.,
+        "{} vs {quarter}",
+        h.x("c_b")
+    );
+    let mut last = h.x("c_b");
+    for _ in 0..20 {
+        h.frame();
+        let x = h.x("c_b");
+        assert!(x >= last - 0.01 && x <= 100.01, "no overshoot: {x}");
+        last = x;
+    }
+    h.run_ms(200.);
+    assert_eq!(h.x("c_b"), 100.);
     assert!(!h.clock.wants_frame());
 }
 

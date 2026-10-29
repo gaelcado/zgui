@@ -264,6 +264,21 @@ impl LineCache {
         }
         Some(colors)
     }
+    /// A short text's colours, over its bytes: each of its lines in turn,
+    /// highlighted after what the one before left (each from the cache if
+    /// it is there, so an edit asks for the lines it changed).
+    pub(crate) fn text_colors(&self, text: &str) -> Option<LineColors> {
+        let highlight = self.highlighter.borrow().clone()?;
+        let mut out = Vec::new();
+        let (mut state, mut at) = (0, 0);
+        for line in text.split('\n') {
+            let (colors, leaves) = self.highlight(&highlight, line, state);
+            out.extend(colors.iter().map(|(r, c)| (r.start + at..r.end + at, *c)));
+            state = leaves;
+            at += line.len() + 1;
+        }
+        Some(out)
+    }
     /// `text` highlighted after a line that left `before` (from the cache
     /// if it is there; no borrow is held while the highlighter runs).
     fn highlight(&self, highlight: &Highlighter, text: &str, before: u32) -> (Rc<LineColors>, u32) {

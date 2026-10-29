@@ -1,0 +1,218 @@
+{
+	"name": "palenight",
+	"type": "dark",
+	"extends": "zgx-dark",
+	"tokens": {
+		"background": "#292d3e",
+		"surface": {
+			"sunken": "#292d3e",
+			"base": "#232635",
+			"raised": "#34384c",
+			"overlay": "#2d3143"
+		},
+		"text": {
+			"primary": "#eeffff",
+			"secondary": "#a6accd",
+			"tertiary": "#697098",
+			"disabled": "#eeffff61"
+		},
+		"border": "#ffffff1a",
+		"border.subtle": "#ffffff0f",
+		"border.strong": "#ffffff2e",
+		"accent": "#82aaff",
+		"accent.hover": "#a5c2ff",
+		"accent.text": "#000000",
+		"danger": "#ff5572",
+		"warning": "#ffcb6b",
+		"success": "#c3e88d",
+		"info": "#ffcb6b",
+		"selection": "#82aaff59",
+		"selection.item": "#ebebeb1c",
+		"focus.ring": "{border.strong}",
+		"hover": "#ffffff1c",
+		"pressed": "#82aaff2e",
+		"scrollbar": {
+			"thumb": "#eeffff4c",
+			"thumb.active": "#eeffff8c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#232635cc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#34384cb8",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#292d3e",
+			"dialog": "#2b2f41",
+			"input.border": "#bdc7d117",
+			"solid": "#ebebef",
+			"on_solid": "#000000",
+			"danger.muted": "#fa8599",
+			"danger.strong": "#cc445b",
+			"danger.text": "#ffffff",
+			"danger.hover": "#bc3f54",
+			"danger.pressed": "#ab394c",
+			"info.strong": "#8c703b",
+			"info.text": "#ffffff",
+			"info.hover": "#816736",
+			"info.pressed": "#765e32",
+			"warning.strong": "#ffcb6b",
+			"warning.text": "#000000",
+			"warning.hover": "#ffcf77",
+			"warning.pressed": "#ffd383",
+			"success.strong": "#c3e88d",
+			"success.text": "#000000",
+			"success.hover": "#c8ea96",
+			"success.pressed": "#cdec9f",
+			"warning.muted": "#fbd890",
+			"success.muted": "#ceeeaa",
+			"accent": {
+				"wash": "#82aaff38",
+				"selection": "#82aaff59"
+			},
+			"ink": {
+				"1": "#ffffff0a",
+				"2": "#ffffff0f",
+				"3": "#ffffff14",
+				"4": "#ffffff1c",
+				"5": "#ffffff29",
+				"6": "#ffffff38"
+			},
+			"diff": {
+				"add": "#c3e88d",
+				"delete": "#ff5572",
+				"hunk": "#82aaff14"
+			},
+			"cursor": "#eeffff66",
+			"scrim": "#00000099",
+			"code.wash": "#82aaff38",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#ffffff1c",
+				"hover": "#ffffff0d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#d4d4da",
+			"solid.pressed": "#c4c5cc",
+			"terminal": {
+				"fg": "#eeffff",
+				"selection": "#585b68",
+				"ansi": {
+					"0": "#676e95",
+					"1": "#ff5572",
+					"2": "#a9c77d",
+					"3": "#ffcb6b",
+					"4": "#82aaff",
+					"5": "#c792ea",
+					"6": "#89ddff",
+					"7": "#ffffff",
+					"8": "#676e95",
+					"9": "#ff5572",
+					"10": "#c3e88d",
+					"11": "#ffcb6b",
+					"12": "#82aaff",
+					"13": "#c792ea",
+					"14": "#89ddff",
+					"15": "#ffffff"
+				}
+			}
+		}
+	},
+	"_source": {
+		"family": "palenight",
+		"name": "Palenight",
+		"treatment": "Opaque",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

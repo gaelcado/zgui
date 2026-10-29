@@ -27,6 +27,9 @@ pub enum Field {
     BorderColor,
     /// The corner radius of every corner, `Styled::rounded`.
     Radius,
+    /// Single corners of the radius: top left 1, top right 2, bottom right
+    /// 4, bottom left 8. They refine the radius (or corners) set with them.
+    Corner(u8),
     /// The border width, `Styled::border`.
     BorderWidth,
     /// Padding on the given sides, `Styled::p` (or `pt`, `pr`, `pb`, `pl`).
@@ -35,6 +38,13 @@ pub enum Field {
     Margin(u8),
     /// The room between children, `Styled::gap`.
     Gap,
+    /// `Styled::gap_x`: the room between columns, in points.
+    GapX,
+    /// `Styled::gap_y`: the room between rows, in points.
+    GapY,
+    /// An absolute view's insets on the given sides, in points: top 1,
+    /// right 2, bottom 4, left 8 (`Styled::top` and the rest).
+    Inset(u8),
     /// The font size, `Styled::text_size`.
     TextSize,
     /// The line height, `Styled::line_height`; a value that is not a number gives
@@ -67,7 +77,7 @@ impl Field {
     /// Sides of padding or margin, else 15.
     fn sides(self) -> u8 {
         match self {
-            Field::Padding(m) | Field::Margin(m) => m,
+            Field::Padding(m) | Field::Margin(m) | Field::Corner(m) | Field::Inset(m) => m,
             _ => 15,
         }
     }
@@ -79,6 +89,8 @@ impl Field {
         match self {
             Field::Padding(_) => Field::Padding(sides),
             Field::Margin(_) => Field::Margin(sides),
+            Field::Corner(_) => Field::Corner(sides),
+            Field::Inset(_) => Field::Inset(sides),
             other => other,
         }
     }
@@ -235,6 +247,9 @@ pub(crate) fn rebound<S: Styled>(mut style: S, field: Field, token: Option<Token
     rebind(style.styles_mut(), field, token);
     style
 }
+fn is_corner(field: Field) -> bool {
+    matches!(field, Field::Corner(_))
+}
 /// Replace `field`'s binding: drop what binds it, then bind it to `token`.
 pub(crate) fn rebind(styles: &mut Styles, field: Field, token: Option<TokenId>) {
     unbind(styles, field);
@@ -268,6 +283,26 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
         Field::Radius => {
             s.rounded(number());
         }
+        Field::Corner(mask) => {
+            let v = number();
+            let mut c = match s.corners {
+                Some(Some(c)) => c,
+                _ => crate::decoration::Corners::all(s.radius.get().unwrap_or(0.)),
+            };
+            if mask & 1 != 0 {
+                c.top_left = v;
+            }
+            if mask & 2 != 0 {
+                c.top_right = v;
+            }
+            if mask & 4 != 0 {
+                c.bottom_right = v;
+            }
+            if mask & 8 != 0 {
+                c.bottom_left = v;
+            }
+            s.rounded_corners(c);
+        }
         Field::BorderWidth => {
             s.border(number());
         }
@@ -297,6 +332,21 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
         }
         Field::Gap => {
             s.gap(number());
+        }
+        Field::GapX => {
+            s.gap_x(crate::layout::Length::Px(number()));
+        }
+        Field::GapY => {
+            s.gap_y(crate::layout::Length::Px(number()));
+        }
+        Field::Inset(sides) => {
+            let v = crate::layout::Length::Px(number());
+            let s = if sides & 1 != 0 { s.top(v) } else { s };
+            let s = if sides & 2 != 0 { s.right(v) } else { s };
+            let s = if sides & 4 != 0 { s.bottom(v) } else { s };
+            if sides & 8 != 0 {
+                s.left(v);
+            }
         }
         Field::TextSize => {
             s.text_size(number());
@@ -376,7 +426,11 @@ pub(crate) fn resolve(styles: &mut Styles, scope: &ThemeScope) {
     let Some(bindings) = styles.fields_mut(crate::style::bit::TOKENS).tokens.take() else {
         return;
     };
-    for (field, token, mix) in &bindings.0 {
+    // Single corners refine the radius, so they go after it.
+    for (field, token, mix) in bindings.0.iter().filter(|(f, _, _)| !is_corner(*f)) {
+        apply(styles, *field, &value(scope, *token, *mix));
+    }
+    for (field, token, mix) in bindings.0.iter().filter(|(f, _, _)| is_corner(*f)) {
         apply(styles, *field, &value(scope, *token, *mix));
     }
     styles.fields_mut(crate::style::bit::TOKENS).tokens = Some(bindings);
@@ -395,10 +449,26 @@ fn sets(styles: &Styles, field: Field) -> u8 {
         Field::TextColor => all(styles.text_color.is_some()),
         Field::BorderColor => all(styles.border_color.is_some()),
         Field::Radius => all(styles.radius.is_some()),
+        Field::Corner(_) => all(matches!(styles.corners, Some(Some(_)))),
         Field::BorderWidth => all(styles.border_width.is_some()),
         Field::Padding(_) => sides(styles.padding.is_some(), styles.padding_sides),
         Field::Margin(_) => sides(styles.margin.is_some(), styles.margin_sides),
         Field::Gap => all(styles.gap.is_some()),
+        Field::GapX => all(styles
+            .layout_options
+            .as_ref()
+            .is_some_and(|o| o.gap_x.is_some())),
+        Field::GapY => all(styles
+            .layout_options
+            .as_ref()
+            .is_some_and(|o| o.gap_y.is_some())),
+        Field::Inset(_) => styles.layout_options.as_ref().map_or(0, |o| {
+            let side = |set: bool, bit: u8| if set { bit } else { 0 };
+            side(o.inset.top.is_some(), 1)
+                | side(o.inset.right.is_some(), 2)
+                | side(o.inset.bottom.is_some(), 4)
+                | side(o.inset.left.is_some(), 8)
+        }),
         Field::TextSize => all(styles.text_size.is_some()),
         Field::LineHeight => all(styles.line_height.is_some()),
         Field::LetterSpacing => all(styles.rare().letter_spacing.is_some()),
@@ -503,7 +573,13 @@ impl StyleTheme {
             return false;
         };
         let stale = self.fresh & (1 << slot) == 0;
-        for (field, token, mix) in &bindings.0 {
+        // Single corners refine the radius, so they go after it.
+        let order = bindings
+            .0
+            .iter()
+            .filter(|(f, _, _)| !is_corner(*f))
+            .chain(bindings.0.iter().filter(|(f, _, _)| is_corner(*f)));
+        for (field, token, mix) in order {
             if stale {
                 apply(patch, *field, &value(&self.scope, *token, *mix));
             } else {

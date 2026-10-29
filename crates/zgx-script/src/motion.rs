@@ -76,7 +76,7 @@ fn ease_of(value: mlua::Value, what: &str) -> mlua::Result<Option<Ease>> {
 
 /// `animate = true | "outQuint" | anime.spring {...} | { duration, ease } |
 /// { bounce, duration } | { spring = anime.spring {...} }`.
-fn timing_of(value: mlua::Value) -> mlua::Result<Option<Timing>> {
+pub(crate) fn timing_of(value: mlua::Value) -> mlua::Result<Option<Timing>> {
     Ok(match value {
         mlua::Value::Nil | mlua::Value::Boolean(false) => None,
         mlua::Value::Boolean(true) => Some(Timing::default()),
@@ -238,6 +238,19 @@ struct Rows {
     /// Where each row was (from the region's corner) before a change whose
     /// layout pass has not run yet.
     before: Option<HashMap<RowKey, (f32, f32)>>,
+    /// Each identity's item as its row was built: a row whose item changes
+    /// under its key is built again, in place.
+    items: HashMap<Rc<str>, Value>,
+    /// Rows built again for a changed item: they replace theirs without
+    /// playing `enter`.
+    rebuilt: HashSet<RowKey>,
+}
+
+/// Whether two items are the same: one table, or equal ones (a list set
+/// again in another order holds new tables of the same items).
+fn same_item(a: &Value, b: &Value) -> bool {
+    let id = crate::value::identity(a);
+    (id != 0 && id == crate::value::identity(b)) || a == b
 }
 
 /// Where layout put `node`, from `origin`'s corner.
@@ -306,7 +319,7 @@ pub(crate) fn each(
     };
     let change = {
         let (rows, shown, motion, vm) = (rows.clone(), shown.clone(), motion.clone(), vm.clone());
-        move |ids: Vec<Rc<str>>| {
+        move |ids: Vec<Rc<str>>, items: Vec<Value>| {
             let mut leaving_out = Vec::new();
             let flip;
             let list = {
@@ -339,11 +352,31 @@ pub(crate) fn each(
                 let mut live = HashMap::with_capacity(ids.len());
                 let mut indices = HashMap::with_capacity(ids.len());
                 let mut keys = Vec::with_capacity(ids.len());
-                for (i, id) in ids.into_iter().enumerate() {
-                    let generation = st.live.remove(&id).unwrap_or_else(|| {
-                        st.next += 1;
-                        st.next
-                    });
+                let mut last_items = std::mem::take(&mut st.items);
+                for (i, (id, item)) in ids.into_iter().zip(items).enumerate() {
+                    let generation = match st.live.remove(&id) {
+                        // The same item: the row stays.
+                        Some(generation)
+                            if last_items
+                                .remove(&id)
+                                .is_some_and(|last| same_item(&last, &item)) =>
+                        {
+                            generation
+                        }
+                        // Its item changed: built again in its place, the
+                        // old one gone at once.
+                        Some(old) => {
+                            st.elements.remove(&RowKey(id.clone(), old));
+                            st.next += 1;
+                            st.rebuilt.insert(RowKey(id.clone(), st.next));
+                            st.next
+                        }
+                        None => {
+                            st.next += 1;
+                            st.next
+                        }
+                    };
+                    st.items.insert(id.clone(), item);
                     live.insert(id.clone(), generation);
                     indices.insert(id.clone(), i);
                     keys.push(RowKey(id, generation));
@@ -449,8 +482,13 @@ pub(crate) fn each(
     let from = items.clone();
     let mut item_keys = crate::lower::ItemKeys::default();
     cx.retain(runtime.effect(move || {
-        let ids = from.with(|list| identities(list, &key, &mut item_keys, &key_vm));
-        untracked.untracked(|| change(ids));
+        let (ids, items) = from.with(|list| {
+            (
+                identities(list, &key, &mut item_keys, &key_vm),
+                list.list().to_vec(),
+            )
+        });
+        untracked.untracked(|| change(ids, items));
     }));
     let (build_rows, vm, low) = (rows.clone(), vm.clone(), low.clone());
     let region_rows = Rc::downgrade(&rows);
@@ -458,10 +496,14 @@ pub(crate) fn each(
         move || shown.get(),
         move |row: RowKey, cx| {
             let (index, enters) = {
-                let st = build_rows.borrow();
+                let mut st = build_rows.borrow_mut();
                 let index = st.indices.get(&row.0).copied().unwrap_or(0);
                 let first = st.first_end.is_none_or(|end| row.1 < end);
-                (index, motion.enter.is_some() && (!first || motion.initial))
+                let rebuilt = st.rebuilt.remove(&row);
+                (
+                    index,
+                    motion.enter.is_some() && (!first || motion.initial) && !rebuilt,
+                )
             };
             let item = items.with_untracked(|list| list.list().get(index).cloned());
             let content = build_scoped(

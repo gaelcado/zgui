@@ -7,10 +7,12 @@ events posted to the app's own queue.
 Builds the key_routing_probe example (with `--ghostty`, its terminal pane
 too) and runs it. With zgx's own box focused, a menu item's key nothing else
 uses (⌘U), a menu item's key the page or terminal takes (⌘K) and a zgx key
-binding in no menu (⌘⇧L) each fire. With the page focused, the page hears
-all three; ⌘U and ⌘⇧L, which it leaves alone, still reach the app, and ⌘K,
-which it takes, does not. With the terminal focused, ⌘U and ⌘⇧L reach the
-app and ⌘K stays Ghostty's. AppKit's own menu keys still act with each
+binding in no menu (⌘⇧L) each fire, and the app's key handler hears ⌘J, a
+key nothing binds. With the page focused, the page hears all of them; ⌘U,
+⌘⇧L and ⌘J, which it leaves alone, still reach the app, and ⌘K, which it
+takes, does not. With the terminal focused, ⌘U, ⌘⇧L and ⌘J (a ⌘ key
+Ghostty binds to nothing is the app's) reach the app and ⌘K stays
+Ghostty's. AppKit's own menu keys still act with each
 part focused: ⌘H hides the app, ⌘M minimizes the window, ⌘Q quits.
 
 The keys go to the app's own queue (`-[NSApplication postEvent:atStart:]`),
@@ -69,11 +71,14 @@ def main():
                 standard[key, part] = (run.returncode, run.stdout)
     actions = set(re.findall(r'^ACTION (\S+) focus=(\S+)$', out, re.M))
     pages = set(re.findall(r'^PAGE (.+) focus=web$', out, re.M))
+    heard = set(re.findall(r'^HEARD j focus=(\S+)$', out, re.M))
     checks = {
         'zgx: the unused menu key': ('unused', 'zgx') in actions,
         'zgx: the menu key a view uses': ('used', 'zgx') in actions,
         'zgx: the binding in no menu': ('binding', 'zgx') in actions,
-        'page: heard all three': {'u meta', 'k meta', 'L meta shift'} <= pages,
+        "zgx: the app's key handler hears a key nothing binds": 'zgx' in heard,
+        'page: heard them all': {'u meta', 'k meta', 'L meta shift', 'j meta'} <= pages,
+        "page: a key nothing binds reaches the app's key handler": 'web' in heard,
         'page: an unused menu key falls through': ('unused', 'web') in actions,
         'page: a binding in no menu falls through': ('binding', 'web') in actions,
         'page: the key it took stays its': ('used', 'web') not in actions,
@@ -83,6 +88,7 @@ def main():
         checks.update({
             'terminal: an unused menu key falls through': ('unused', 'terminal') in actions,
             'terminal: a binding in no menu reaches the app': ('binding', 'terminal') in actions,
+            "terminal: a ⌘ key Ghostty binds to nothing reaches the app's key handler": 'terminal' in heard,
             "terminal: Ghostty's binding stays its": ('used', 'terminal') not in actions,
         })
     for (key, part), (code, text) in standard.items():
@@ -92,7 +98,7 @@ def main():
         else:
             ok = code == 0 and ('HIDDEN true' if key == 'h' else 'MINIMIZED true') in text
         checks[f'{part}: ⌘{key.upper()} {name}'] = ok
-    print('\n'.join(line for line in out.splitlines() if re.match(r'(ACTION|PAGE|FIRST|NO_KEY) ', line)))
+    print('\n'.join(line for line in out.splitlines() if re.match(r'(ACTION|PAGE|FIRST|NO_KEY|HEARD) ', line)))
     for name, ok in checks.items():
         print(('ok  ' if ok else 'FAIL') + ' ' + name)
     return 0 if all(checks.values()) else 1

@@ -1,0 +1,218 @@
+{
+	"name": "zeron-light",
+	"type": "light",
+	"extends": "zgx-light",
+	"tokens": {
+		"background": "#ffffff",
+		"surface": {
+			"sunken": "#fafafa",
+			"base": "#f3f3f5",
+			"raised": "#ededf0",
+			"overlay": "#ffffff"
+		},
+		"text": {
+			"primary": "#303035",
+			"secondary": "#62626a",
+			"tertiary": "#797981",
+			"disabled": "#30303561"
+		},
+		"border": "#0000001f",
+		"border.subtle": "#00000012",
+		"border.strong": "#00000038",
+		"accent": "#5b43e8",
+		"accent.hover": "#7965ec",
+		"accent.text": "#ffffff",
+		"danger": "#dc2626",
+		"warning": "#a16207",
+		"success": "#15803d",
+		"info": "#2563eb",
+		"selection": "#5b43e83d",
+		"selection.item": "#1a1a1a0f",
+		"focus.ring": "{border.strong}",
+		"hover": "#0000000f",
+		"pressed": "#5b43e81a",
+		"scrollbar": {
+			"thumb": "#3030354c",
+			"thumb.active": "#3030358c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#f3f3f5cc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#ffffff",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#ffffff",
+			"dialog": "#fefefe",
+			"input.border": "#4352601a",
+			"solid": "#232328",
+			"on_solid": "#ffffff",
+			"danger.muted": "#ac292a",
+			"danger.strong": "#dc2626",
+			"danger.text": "#ffffff",
+			"danger.hover": "#ca2323",
+			"danger.pressed": "#b92020",
+			"info.strong": "#2563eb",
+			"info.text": "#ffffff",
+			"info.hover": "#225bd8",
+			"info.pressed": "#1f53c5",
+			"warning.strong": "#a16207",
+			"warning.text": "#ffffff",
+			"warning.hover": "#945a06",
+			"warning.pressed": "#875206",
+			"success.strong": "#15803d",
+			"success.text": "#ffffff",
+			"success.hover": "#137638",
+			"success.pressed": "#126c33",
+			"warning.muted": "#855612",
+			"success.muted": "#1c6c3b",
+			"accent": {
+				"wash": "#5b43e81f",
+				"selection": "#5b43e83d"
+			},
+			"ink": {
+				"1": "#0000000a",
+				"2": "#0000000f",
+				"3": "#00000014",
+				"4": "#0000001c",
+				"5": "#00000029",
+				"6": "#00000038"
+			},
+			"diff": {
+				"add": "#15803d",
+				"delete": "#dc2626",
+				"hunk": "#5b43e812"
+			},
+			"cursor": "#3030358c",
+			"scrim": "#00000099",
+			"code.wash": "#5b43e81f",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#0000001c",
+				"hover": "#0000000d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#3d3d42",
+			"solid.pressed": "#4f4f53",
+			"terminal": {
+				"fg": "#303035",
+				"selection": "#d2d2d2",
+				"ansi": {
+					"0": "#1f1f1f",
+					"1": "#dc2626",
+					"2": "#16a34a",
+					"3": "#b45309",
+					"4": "#2563eb",
+					"5": "#9333ea",
+					"6": "#0e7490",
+					"7": "#3f3f46",
+					"8": "#71717a",
+					"9": "#b91c1c",
+					"10": "#15803d",
+					"11": "#92400e",
+					"12": "#1d4ed8",
+					"13": "#7e22ce",
+					"14": "#155e75",
+					"15": "#18181b"
+				}
+			}
+		}
+	},
+	"_source": {
+		"family": "zeron",
+		"name": "Zeron Light",
+		"treatment": "Frosted",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

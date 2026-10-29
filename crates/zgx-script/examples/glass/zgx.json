@@ -1,0 +1,10 @@
+{
+	"title": "Glass",
+	"width": 1180,
+	"height": 760,
+	"min_width": 720,
+	"min_height": 460,
+	"titlebar": "inset",
+	"glass": "plain",
+	"app_id": "zgx-glass"
+}

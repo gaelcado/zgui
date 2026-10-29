@@ -113,6 +113,11 @@ impl NativeHost {
         #[cfg(not(all(windows, feature = "webview2")))]
         let supported = cfg!(target_os = "macos");
         natives.set_supported(supported);
+        // Terminals are Ghostty surfaces, on macOS for now.
+        natives.set_terminals(cfg!(all(target_os = "macos", feature = "ghostty")));
+        // A page's store of its own lasts on macOS 14 and later.
+        #[cfg(target_os = "macos")]
+        natives.set_temporary_stores(!webkit::named_stores_supported());
         Self {
             natives,
             diagnostics: Default::default(),

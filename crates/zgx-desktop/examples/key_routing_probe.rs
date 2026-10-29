@@ -6,7 +6,8 @@
 //! - ⌘U, a menu item's key nothing else uses;
 //! - ⌘K, a menu item's key the page takes (`preventDefault`) and Ghostty
 //!   binds (`clear_screen`);
-//! - ⌘⇧L, a zgx key binding that is in no menu.
+//! - ⌘⇧L, a zgx key binding that is in no menu;
+//! - ⌘J, a key nothing binds, which an app's key handler hears (`HEARD j`).
 //!
 //! Each is pressed with zgx's own box focused, then the page, then (with
 //! `--features ghostty`) a terminal. It prints `ACTION <name> focus=<who>`
@@ -118,6 +119,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     event.prevent_default();
                 }
             });
+            // The app's own key handler, at the root, as a script's `on_key`.
+            let keyed = focus.clone();
+            cx.ui.on_event(root, false, move |event| {
+                if event.phase != EventPhase::Capture
+                    && let InputEvent::KeyDown { key, modifiers, .. } = &event.event
+                    && modifiers.meta
+                    && *key == Key::Character("j".into())
+                {
+                    println!("HEARD j focus={}", keyed.borrow());
+                    event.prevent_default();
+                }
+            });
             let command_shift = Modifiers {
                 meta: true,
                 shift: true,
@@ -139,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     keys::press("u", 32, true, false);
                     keys::press("k", 40, true, false);
                     keys::press("l", 37, true, true);
+                    keys::press("j", 38, true, false);
                 };
                 pause(2500).await;
                 if ime {

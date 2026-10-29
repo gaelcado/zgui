@@ -17,6 +17,8 @@ mod example_scripts;
 mod examples;
 #[path = "../frame_profiler.rs"]
 mod frame_profiler;
+#[path = "../glass_example.rs"]
+mod glass_example;
 #[path = "../mail_example.rs"]
 mod mail_example;
 #[path = "../monitor_example.rs"]
@@ -25,7 +27,11 @@ mod monitor_example;
 mod plugins_example;
 #[path = "../sketch_example.rs"]
 mod sketch_example;
+#[path = "../styleguide.rs"]
+mod styleguide;
 #[path = "../team_example.rs"]
 mod team_example;
 #[path = "../terminal_example.rs"]
 mod terminal_example;
+#[path = "../zeron_app.rs"]
+mod zeron_app;

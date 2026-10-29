@@ -34,7 +34,7 @@ use std::{
 use zgx::{
     compose::{TaskRunner, View, ViewHandle, provide},
     frame::{Frame, FrameClock},
-    input::{InputEvent, Key, Modifiers},
+    input::{InputEvent, Key, Modifiers, PointerButton},
     reactive::Runtime,
     scene::{NodeId, NodeKind, Rect},
     task::LocalExecutor,
@@ -44,11 +44,14 @@ use zgx::{
 /// A desktop's clipboard and file dialogs, for [`TestApp::with_desktop`]:
 /// each dialog answers with what the test queued for it ([`pick`],
 /// [`save_to`]), or as a cancelled one does when nothing is queued, and
-/// keeps what it was asked ([`asked`]).
+/// keeps what it was asked ([`asked`]); the sounds and banners asked for
+/// are kept too, never played nor shown ([`played`], [`notified`]).
 ///
 /// [`pick`]: FakeDesktop::pick
 /// [`save_to`]: FakeDesktop::save_to
 /// [`asked`]: FakeDesktop::asked
+/// [`played`]: FakeDesktop::played
+/// [`notified`]: FakeDesktop::notified
 #[derive(Default)]
 pub struct FakeDesktop {
     clipboard: RefCell<String>,
@@ -56,6 +59,10 @@ pub struct FakeDesktop {
     opens: RefCell<std::collections::VecDeque<Vec<std::path::PathBuf>>>,
     saves: RefCell<std::collections::VecDeque<std::path::PathBuf>>,
     asked: RefCell<Vec<zgx::platform::FilePicker>>,
+    opened: RefCell<Vec<String>>,
+    played: RefCell<Vec<std::path::PathBuf>>,
+    notified: RefCell<Vec<zgx::platform::Notification>>,
+    inactive: Cell<bool>,
 }
 impl FakeDesktop {
     /// The next open dialog picks `files`.
@@ -70,6 +77,30 @@ impl FakeDesktop {
     /// What the dialogs shown so far were asked to show, in order.
     pub fn asked(&self) -> Vec<zgx::platform::FilePicker> {
         self.asked.borrow().clone()
+    }
+    /// The URLs handed to the system's browser (`ui.open_url`), in order.
+    pub fn opened(&self) -> Vec<String> {
+        self.opened.borrow().clone()
+    }
+    /// The sound files played (`ui.play_sound`), in order: none plays.
+    pub fn played(&self) -> Vec<std::path::PathBuf> {
+        self.played.borrow().clone()
+    }
+    /// The banners posted (`ui.notify`), in order: none shows.
+    pub fn notified(&self) -> Vec<zgx::platform::Notification> {
+        self.notified.borrow().clone()
+    }
+    /// A click on the `index`th banner posted, as the desktop reports one
+    /// (`zgx::platform::notification_clicked`): one posted with `data`
+    /// reaches the script's `ui.on_notification`.
+    pub fn click_notification(&self, index: usize) {
+        let id = self.notified.borrow()[index].id.clone();
+        zgx::platform::notification_clicked(&id);
+    }
+    /// Whether the app is frontmost (it is unless set otherwise), as a
+    /// banner for the background asks.
+    pub fn set_active(&self, active: bool) {
+        self.inactive.set(!active);
     }
     /// The clipboard's text.
     pub fn clipboard(&self) -> String {
@@ -95,6 +126,21 @@ impl zgx::platform::Platform for FakeDesktop {
     fn set_clipboard_text(&self, text: String) -> bool {
         *self.clipboard.borrow_mut() = text;
         true
+    }
+    fn open_url(&self, url: &str) -> bool {
+        self.opened.borrow_mut().push(url.into());
+        true
+    }
+    fn play_sound(&self, path: &std::path::Path) -> bool {
+        self.played.borrow_mut().push(path.into());
+        true
+    }
+    fn notify(&self, notification: &zgx::platform::Notification) -> bool {
+        self.notified.borrow_mut().push(notification.clone());
+        true
+    }
+    fn app_active(&self) -> bool {
+        !self.inactive.get()
     }
     fn clipboard_image(&self) -> zgx::platform::Pending<Option<zgx::image::ImageData>> {
         // A copy sharing the pixels.
@@ -308,9 +354,16 @@ impl TestApp {
         let node = self.node(id);
         self.ui.scene.borrow().bounds(node)
     }
-    /// The text of node `id`, or of the first text inside it.
+    /// The text of node `id` (an editor's, what it holds however it shows
+    /// it, or its placeholder while empty), or of the first text inside it.
     pub fn text(&mut self, id: &str) -> String {
         let node = self.node(id);
+        if let Some(editor) = self.ui.editor(node) {
+            let value = editor.value().get().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
         self.text_in(node)
     }
     /// Row `n` (from 1) of the list `list` among those mounted, top to
@@ -387,6 +440,20 @@ impl TestApp {
     }
     fn click_at(&mut self, b: Rect) {
         crate::driver::click_at(&mut self.ui, b);
+        self.settle();
+    }
+    /// Click node `id` holding `modifiers` (`"cmd"`, `"shift"`, `"cmd+shift"`:
+    /// as [`Harness::keys`] names them), as a ⌘-click adds to a choice.
+    pub fn click_with(&mut self, id: &str, modifiers: &str) {
+        let (_, modifiers) =
+            crate::driver::parse_keys(&format!("{modifiers}+a")).unwrap_or_else(|e| panic!("{e}"));
+        let b = self.bounds(id);
+        let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+        let button = PointerButton::Primary;
+        self.ui
+            .dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, modifiers);
+        self.ui
+            .dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, modifiers);
         self.settle();
     }
     /// Click field `id` (giving it focus) and type `text` into it.

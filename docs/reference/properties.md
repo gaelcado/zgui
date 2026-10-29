@@ -71,7 +71,7 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | `color` | `Color` | `#e5edf7` | text, and a progress bar's fill and a slider's thumb; inherited |
 | `rounded` | `number` | `0` (controls: `6`) | corner radius |
 | `corners` | `Corners` | | `{ tl, tr, br, bl }`, as a list or keyed |
-| `rounded_tl`, `rounded_tr`, `rounded_br`, `rounded_bl` | `number` | | one corner, refining `rounded` or `corners` |
+| `rounded_tl`, `rounded_tr`, `rounded_br`, `rounded_bl` | `number` or a token | | one corner, refining `rounded` or `corners` (a token corner resolves after the radius) |
 | `border` | `number` | `0` | width, inside the box |
 | `border_sides` | `Sides` | | `{ top, right, bottom, left }` widths: a dock open at the bottom is `{ 1, 1, 0, 1 }` |
 | `border_color` | `Color` | | |
@@ -178,13 +178,15 @@ return ui.scroll {
 
 | Property | Type | Default | |
 | --- | --- | --- | --- |
+| `hover_group` | `boolean` | `false` | descendants' `group_hover` styles hold while the pointer is over this node or anything inside it (Tailwind's `group`) |
+| `group_hover` | `Styles` | | styles while the nearest `hover_group` ancestor is hovered (Tailwind's `group-hover:`), under the node's own `hover`, `active` and `focus`: a row's close button showing as the pointer enters the row, with no `on_hover` and no state; outside a group they never apply |
 | `hover`, `active`, `focus` | `Styles` | (controls: a hover color and an accent focus ring) | styles while the pointer is over it, while it is pressed, while it has keyboard focus; `focus = { border = 0 }` turns a control's ring off |
 | `disabled` | `boolean \| state \| function \| Styles` | `false` | a condition disables the node (and what is inside); a table is the styles it shows while disabled |
 | `selectable` | `boolean` | `false` | the pointer selects the text in it and in everything it holds, across nodes, as on a web page (CSS `user-select: text`); `false` keeps a part of a selectable node out. See [selectable text](text.md#selectable-text) |
 | `selection_color` | `Color \| Readable<Color> \| (() -> Color)` | `$selection` | a selectable node's highlight (CSS `::selection { background }`), in either window state |
 | `selected_text_color` | `Color \| Readable<Color> \| (() -> Color)` | `$selection.text` | the selected glyphs' colour (CSS `::selection { color }`); transparent keeps their own |
 | `window_drag` | `boolean` | `false` | a press on it, or on what inside takes no input, moves the window; a double click zooms it (CSS `-webkit-app-region: drag`) |
-| `tooltip` | `string` or a node | none | shown over it while the pointer rests on it: after 300 ms, at once within a second of another tooltip; gone when the pointer leaves or presses, or a key is pressed anywhere (as a browser's and the system's do). Text takes the theme's look (an overlay card, small text); a node is the app's own content. It fades in over 140 ms and out over 100 ms, at once when it takes over from another; one shows at a time. It takes no focus and lets the pointer through |
+| `tooltip` | `string`, a node, or a function making one | none | shown over it while the pointer rests on it: after 300 ms, at once within a second of another tooltip; gone when the pointer leaves or presses, or a key is pressed anywhere (as a browser's and the system's do). Text takes the theme's look (an overlay card, small text); a node is the app's own content, and a function makes that node as it first shows (a hover card on each row of a list costs nothing until one shows). It fades in over 140 ms and out over 100 ms, at once when it takes over from another; one shows at a time. It takes no focus and lets the pointer through |
 | `provide` | `{ [string]: any }` | none | values the components and rows built in its subtree read with `ui.use_context(name)`, as React's context gives them ([components](state.md#components)) |
 | `tooltip_placement` | `Placement` | above, centred, 6 points off | where the tooltip sits (as a popover's `placement`) |
 | `tooltip_delay` | `number` | `300` | milliseconds the pointer rests before it shows. Keyboard focus shows it too (not a click's), and a text tip describes the node to assistive technology, which doesn't see the tip itself |
@@ -210,6 +212,7 @@ What assistive technology (VoiceOver, Narrator, Orca) reads for a node beyond wh
 | `description` | `string` | | read after the name, as a hint (`aria-description`) |
 | `error` | `string \| state \| function` | | what is wrong with its value, followed; nil while fine: assistive technology hears it invalid (`aria-invalid`), and the message after its description. `field` gives a form's |
 | `aria_hidden` | `boolean` | `false` | leaves it and what it holds out of the accessibility tree (`aria-hidden`): decoration such as an unread dot, or what is said elsewhere |
+| `focus_wrap` | `boolean` | `role = "tablist"`, `"menu"`: `true` | whether a focus group's arrows go round past its ends (ARIA's tabs and menus do; a list box stops at them) |
 | `focus_group` | `"vertical" \| "horizontal" \| "both"` | `role = "listbox"`: `"vertical"`; `"toolbar"`, `"tablist"`: `"horizontal"` | one Tab stop for the focusable things inside, as ARIA's composite widgets are: Tab lands on the one last focused there (else the `selected` one, else the first), and the arrows along the axis, Home and End move among them. A field inside keeps its own arrows |
 
 ```lua
@@ -277,7 +280,7 @@ return ui.column {
 ## Gotchas
 
 - A state or function whose value does not fit the property (a string for `w` that is not a length, a boolean for `bg`) is ignored at run time; a literal that does not fit is an error. In the editor both are type errors.
-- `hover`, `active`, `focus`, `disabled` and `context_menu_style` take plain values: a state, function or binding in them is an error. To animate on hover, animate the base style from `on_hover`.
+- `hover`, `active`, `focus`, `disabled`, `group_hover` and `context_menu_style` take plain values: a state, function or binding in them is an error. To animate on hover, animate the base style from `on_hover`.
 - Children stretch across their container (`items = "stretch"`) and shrink in one too small for them (`shrink = 1`), as CSS's flexbox; text does not wrap (`wrap = false`) unless asked. A child that shrinks stops at its content's narrowest (CSS's `min-width: auto`: a text's longest word), unless it clips (`overflow`, a scroll) or sets `min_w = 0`; `shrink = 0` holds it.
 - `gap` is points only; `gap_x` and `gap_y` take percentages.
 - A transparent border still takes its width; a ring that must not move content is `border_over = true`.

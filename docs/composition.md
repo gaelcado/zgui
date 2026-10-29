@@ -177,7 +177,10 @@ wrapping; Escape closes it, the match selected where the text is selectable
 (a field's match is scrolled to but its selection left until then). On
 macOS Command-E finds what is selected (Use Selection for Find), and an app
 menu with an Edit menu gains AppKit's Find submenu (Find…, Find Next, Find
-Previous, Use Selection for Find) unless its own items take those keys.
+Previous, Use Selection for Find) unless its own items take those keys. Its
+items act as their keys typed in the window: the app's own key handlers hear
+them first, with a page or a terminal focused too, and find takes what they
+leave.
 A long list's rows are counted a slice a frame (the bar says `+` until
 done), and nothing runs once they are, or while no find is open. A keymap or
 menu item binding the key keeps it (the code editor example's own find);
@@ -699,12 +702,15 @@ macOS's and Safari's rubber band. A trackpad gesture pushed past an edge stretch
 the view: its content moves on, ever less for each further pixel (AppKit's curve),
 while the offset an app reads stays in range. Pulling back unwinds the stretch
 before the content scrolls, and lifting the fingers springs it back, critically
-damped, in about 0.4 s. A flick's momentum that reaches an edge bounces. It
+damped, in about 0.4 s. A flick's momentum that reaches an edge bounces, once: what it runs on
+after, and the momentum of a gesture that already stretched the view, push it
+no further. It
 stretches the view the gesture is latched to; otherwise, as a page bounces rather
 than a box in it, the outermost view under the pointer that scrolls along that
 axis. The host reports the gesture's phases as `InputEvent::ScrollGesture`. A mouse
 wheel, and scrolling the app does, never stretch. Off, a dispatch checks one flag.
-Virtual lists do not stretch yet. Disabled viewports ignore input while still following model updates. Offset-only
+Virtual lists stretch too, their content moved in a binding of its own: a stretch
+builds no row and places none. Disabled viewports ignore input while still following model updates. Offset-only
 changes translate the retained subtree without layout or remounting children.
 All children remain mounted offscreen; use `virtual_list` for large collections
 that need bounded row construction and memory.
@@ -995,6 +1001,8 @@ means, as ARIA's attributes do in HTML; a view that sets none pays nothing:
   moves to its nearest focusable ancestor that stays, else to the next Tab
   stop (a focus group's own), else the one before: never to the window,
   which a screen reader would announce.
+- `.focus_wrap(true)`: the group's arrows go round past its ends, as ARIA's tabs
+  and menus do (`TabList` and `Menu` wrap without asking; a list box stops).
 - Escape in a text field (with no composition to cancel) goes on to the dialog
   or menu around it, which closes and gives focus back.
 

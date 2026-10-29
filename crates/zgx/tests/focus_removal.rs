@@ -74,3 +74,40 @@ fn a_focus_group_next_is_entered_at_its_own_stop() {
     ui.prepare_frame();
     assert_eq!(focused(&ui, &view, &names).as_deref(), Some("b"));
 }
+
+#[test]
+fn a_press_that_replaces_its_node_keeps_the_focus_its_handler_gave() {
+    // A title pressed turns into its editor, which takes focus as it
+    // mounts: the press doesn't then focus what it pressed (gone) and take
+    // the focus away again.
+    let mut ui = Ui::new(400., 300.);
+    let editing = ui.signal(false);
+    let flip = editing.clone();
+    let view = ui.mount(column().child(switch(
+        move || editing.get(),
+        move |on, _| {
+            if on {
+                named("editor").on_mount(|handle| {
+                    handle.focus();
+                })
+            } else {
+                let flip = flip.clone();
+                named("title").on_event(move |cx| {
+                    if matches!(cx.event, zgx::input::InputEvent::PointerDown { .. })
+                        && cx.phase == zgx::input::EventPhase::Target
+                    {
+                        flip.set(true);
+                    }
+                })
+            }
+        },
+    )));
+    ui.prepare_frame();
+    let b = ui.scene.borrow().bounds(view.find("title").unwrap());
+    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+    let button = zgx::input::PointerButton::Primary;
+    ui.dispatch(zgx::input::InputEvent::PointerDown { x, y, button });
+    ui.dispatch(zgx::input::InputEvent::PointerUp { x, y, button });
+    ui.prepare_frame();
+    assert_eq!(focused(&ui, &view, &["editor"]).as_deref(), Some("editor"));
+}

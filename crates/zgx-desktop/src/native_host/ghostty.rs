@@ -190,29 +190,7 @@ impl App {
                 eprintln!("zgx: ghostty_init failed");
                 return None;
             }
-            let config = g::ghostty_config_new();
-            if config.is_null() {
-                eprintln!("zgx: ghostty_config_new failed");
-                return None;
-            }
-            g::ghostty_config_load_default_files(config);
-            g::ghostty_config_load_recursive_files(config);
-            let path =
-                std::env::temp_dir().join(format!("zgx-ghostty-{}.conf", std::process::id()));
-            if std::fs::write(&path, CONFIG).is_ok()
-                && let Ok(path_c) = CString::new(path.to_string_lossy().as_bytes())
-            {
-                g::ghostty_config_load_file(config, path_c.as_ptr());
-            }
-            let _ = std::fs::remove_file(&path);
-            g::ghostty_config_finalize(config);
-            for index in 0..g::ghostty_config_diagnostics_count(config) {
-                let diagnostic = g::ghostty_config_get_diagnostic(config, index);
-                if !diagnostic.message.is_null() {
-                    let message = CStr::from_ptr(diagnostic.message).to_string_lossy();
-                    eprintln!("zgx: Ghostty config: {message}");
-                }
-            }
+            let config = configuration("")?;
             let runtime = g::ghostty_runtime_config_s {
                 userdata: std::ptr::null_mut(),
                 supports_selection_clipboard: false,
@@ -233,6 +211,41 @@ impl App {
             g::ghostty_app_set_focus(app, true);
             Some(Self { app })
         }
+    }
+}
+
+/// The user's Ghostty configuration, then zgx's (`CONFIG`), then `extra`
+/// (a terminal's own, `Terminal::configure`), finalized; what is wrong in
+/// them is said on stderr. The caller frees it.
+fn configuration(extra: &str) -> Option<g::ghostty_config_t> {
+    // SAFETY: main thread (the app's and the surfaces' callers). `config`
+    // is checked non-null before use; every path passed is a NUL-terminated
+    // `CString` alive for its call; the diagnostics' messages are strings
+    // the config owns, copied before it is returned.
+    unsafe {
+        let config = g::ghostty_config_new();
+        if config.is_null() {
+            eprintln!("zgx: ghostty_config_new failed");
+            return None;
+        }
+        g::ghostty_config_load_default_files(config);
+        g::ghostty_config_load_recursive_files(config);
+        let path = std::env::temp_dir().join(format!("zgx-ghostty-{}.conf", std::process::id()));
+        if std::fs::write(&path, format!("{CONFIG}\n{extra}\n")).is_ok()
+            && let Ok(path_c) = CString::new(path.to_string_lossy().as_bytes())
+        {
+            g::ghostty_config_load_file(config, path_c.as_ptr());
+        }
+        let _ = std::fs::remove_file(&path);
+        g::ghostty_config_finalize(config);
+        for index in 0..g::ghostty_config_diagnostics_count(config) {
+            let diagnostic = g::ghostty_config_get_diagnostic(config, index);
+            if !diagnostic.message.is_null() {
+                let message = CStr::from_ptr(diagnostic.message).to_string_lossy();
+                eprintln!("zgx: Ghostty config: {message}");
+            }
+        }
+        Some(config)
     }
 }
 
@@ -423,6 +436,21 @@ extern "C" fn action(
                 if view_of(surface).is_some() {
                     // SAFETY: still in `SURFACES`, so not freed; main thread.
                     unsafe { g::ghostty_surface_draw(surface as g::ghostty_surface_t) };
+                }
+            });
+            true
+        }
+        g::GHOSTTY_ACTION_SCROLLBAR => {
+            // SAFETY: SCROLLBAR's member, plain integers.
+            let bar = unsafe { payload.scrollbar };
+            let scrollback = zgx::terminal::Scrollback {
+                total: bar.total,
+                offset: bar.offset,
+                visible: bar.len,
+            };
+            deliver(surface, move |term| {
+                if term.state().with_untracked(|s| s.scrollback) != Some(scrollback) {
+                    term.update_state(|state| state.scrollback = Some(scrollback));
                 }
             });
             true
@@ -899,6 +927,9 @@ pub(crate) struct ViewState {
     front: RefCell<Option<crate::terminal_process::ForegroundProcess>>,
     /// Focus asked for before the view was in a window (a tab switching in).
     pending_focus: Cell<bool>,
+    /// The configuration given over the app's (`Terminal::configure`),
+    /// kept while the surface uses it; null for the app's own.
+    config: Cell<g::ghostty_config_t>,
     /// The size Ghostty was last given, in points.
     size: Cell<(f64, f64)>,
     /// When the view last took a new size, and the size it was asked for
@@ -1134,19 +1165,11 @@ define_class!(
         // Keyboard.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            // A shortcut no menu took (AppKit offers them first) that is a
-            // key binding of the app's: the app's, before the program's, up
-            // the responder chain to zgx's view, which hears it as one.
-            if event
-                .modifierFlags()
-                .intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control)
-                && super::macos::app_binds_key(self, event)
-            {
-                // SAFETY: AppKit's own responder chain, on the main thread;
-                // the next responder is a live view or the window.
-                if let Some(next) = unsafe { self.nextResponder() } {
-                    next.keyDown(event);
-                }
+            // A shortcut no menu took (AppKit offers them first) that is the
+            // app's: up the responder chain to zgx's view, which hears it as
+            // one.
+            if self.app_takes(event) {
+                self.to_app(event);
                 return;
             }
             self.handle_key_down(event);
@@ -1364,6 +1387,7 @@ impl TerminalView {
             resolved: Cell::new(false),
             front: RefCell::new(None),
             pending_focus: Cell::new(false),
+            config: Cell::new(std::ptr::null_mut()),
             size: Cell::new((0., 0.)),
             resized_at: Cell::new(None),
             wanted: Cell::new(None),
@@ -1678,6 +1702,46 @@ impl TerminalView {
         });
     }
 
+    /// Whether Ghostty binds `event` (copy, paste, clear, font size…).
+    fn ghostty_binds(&self, event: &NSEvent) -> bool {
+        let surface = self.ivars().surface.get();
+        if surface.is_null() {
+            return false;
+        }
+        let mut key = key_event(event, g::GHOSTTY_ACTION_PRESS, None);
+        let chars = event
+            .characters()
+            .map(|chars| chars.to_string())
+            .unwrap_or_default();
+        let chars = CString::new(chars).unwrap_or_default();
+        key.text = chars.as_ptr();
+        let mut flags: g::ghostty_binding_flags_e = 0;
+        // SAFETY: non-null, so live (`free` nulls it first); main thread.
+        // `key.text` is a NUL-terminated `CString` alive past the call;
+        // `flags` is a writable local.
+        unsafe { g::ghostty_surface_key_is_binding(surface, key, &mut flags) }
+    }
+    /// Whether `event` is the app's, not the program's: a ⌘ key Ghostty
+    /// binds to nothing (the app's shortcuts are ⌘ keys, as a Mac
+    /// terminal's are its menus'; the app's configuration unbinds one of
+    /// Ghostty's to have it), or a ⌘ or ⌃ key a zgx key binding where
+    /// focus is takes.
+    fn app_takes(&self, event: &NSEvent) -> bool {
+        let flags = event.modifierFlags();
+        if !flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control) {
+            return false;
+        }
+        (flags.contains(NSEventModifierFlags::Command) && !self.ghostty_binds(event))
+            || super::macos::app_binds_key(self, event)
+    }
+    /// `event` up the responder chain, to zgx's view.
+    fn to_app(&self, event: &NSEvent) {
+        // SAFETY: AppKit's own responder chain, on the main thread; the
+        // next responder is a live view or the window.
+        if let Some(next) = unsafe { self.nextResponder() } {
+            next.keyDown(event);
+        }
+    }
     fn handle_key_down(&self, event: &NSEvent) {
         let surface = self.ivars().surface.get();
         if surface.is_null() {
@@ -1933,6 +1997,10 @@ impl TerminalView {
                 // Not a binding: let the menus try it first. If nothing
                 // takes it, it comes back (doCommandBySelector:) to encode.
                 if self.ivars().last_perform_key.take() == Some(event.timestamp()) {
+                    if self.app_takes(event) {
+                        self.to_app(event);
+                        return true;
+                    }
                     event
                         .characters()
                         .map(|c| c.to_string())
@@ -2100,8 +2168,34 @@ impl MacTerminal {
         // SAFETY: just made, live; main thread.
         unsafe { g::ghostty_surface_set_focus(surface, false) };
         refresh_process(surface as usize);
-        view.scale_changed();
-        Some(Self { view })
+        let this = Self { view };
+        let config = term.config();
+        if !config.is_empty() {
+            this.configure(&config);
+        }
+        this.view.scale_changed();
+        Some(this)
+    }
+    /// The surface configured with `extra` over the app's configuration;
+    /// the configuration it had before goes.
+    fn configure(&self, extra: &str) {
+        let surface = self.view.ivars().surface.get();
+        if surface.is_null() {
+            return;
+        }
+        let Some(config) = configuration(extra) else {
+            return;
+        };
+        // SAFETY: non-null, so live (`free` nulls it first); main thread.
+        // The surface may read `config` until it is given another: it is
+        // kept until then (and until the surface goes), as Ghostty's own
+        // app keeps a surface's.
+        unsafe { g::ghostty_surface_update_config(surface, config) };
+        let old = self.view.ivars().config.replace(config);
+        if !old.is_null() {
+            // SAFETY: the surface's previous configuration, replaced above.
+            unsafe { g::ghostty_config_free(old) };
+        }
     }
     pub fn view(&self) -> &NSView {
         &self.view
@@ -2122,6 +2216,11 @@ impl MacTerminal {
         // after (callbacks queued for it find nothing). The view it renders
         // into is still alive (`self.view`). Main thread.
         unsafe { g::ghostty_surface_free(surface) };
+        let config = self.view.ivars().config.replace(std::ptr::null_mut());
+        if !config.is_null() {
+            // SAFETY: the freed surface's configuration, nothing else's.
+            unsafe { g::ghostty_config_free(config) };
+        }
     }
 }
 impl TerminalBackend for MacTerminal {
@@ -2189,6 +2288,7 @@ impl TerminalBackend for MacTerminal {
                     )
                 };
             }
+            TerminalCommand::Configure(config) => self.configure(&config),
             TerminalCommand::Close => self.free(),
             _ => {}
         }

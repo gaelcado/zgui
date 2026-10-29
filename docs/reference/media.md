@@ -1,4 +1,4 @@
-# Images and canvas: image, svg, canvas
+# Images and canvas: image, svg, canvas, voice_glyph
 
 Pixels from files, vector icons, and drawing in script. Paths in `src` are relative to the script's directory. The same section covers what makes paint for these and other nodes: `ui.path` and `ui.linear` for canvases, `ui.bitmap` for masks, and `ui.shader` for shader fills.
 
@@ -10,6 +10,7 @@ ui.path() -> Path
 ui.linear(x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush
 ui.bitmap(w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap
 ui.shader(source: string, opts: { fps: number? }?) -> Shader
+ui.voice_glyph(props: VoiceGlyphProps) -> Node
 ```
 
 ## image
@@ -96,6 +97,24 @@ return ui.overlay {
 	},
 }
 ```
+
+## voice_glyph
+
+A call's dot-matrix glyph (Zeron's, from `zgx-components::voice`): a `field`, the call's disc, where a voice starts at the heart and is pushed out ring by ring, or a `beam` (`kind = "beam"`), a strip filling its box that rises from its bottom as the voice does. Every dot's level, ink and size come from the two voices' bands and the `mode` (`"connecting"`, `"listening"`, `"thinking"`, `"asking"`, `"processing"`, `"muted"`; a new mode passes in over 0.8 s, one arriving mid-passage joining the blend). Light is a halftone: lit dots swell until they touch. Each dot takes one of its voice's three inks (`agent_inks`, the sunrise rows by default; `user_inks`, the accent's), scattered at random and never blended; muted, the user's voice is not shown. The voices are a sample's: whoever `speaking` names (`"user"`, `"agent"`) talks in words and syllables made up in the engine.
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `kind` | `"field" \| "beam"` | `"field"` | |
+| `dots` | `number \| { cols, rows }` | `44` | a field's dots; its box is theirs |
+| `dot` | `number` | `3` (a beam's `2.4`) | a dot's width; the gap is a third of it |
+| `outline` | `"square" \| "disc" \| "stadium" \| "rounded" \| "under"` | `"square"` | the shape the dots keep, fading where they meet it; `radius` for `rounded` and `under` (a field's in dots, a beam's in points) |
+| `falloff`, `soft_rim`, `dissolve` | `number`, `boolean`, `boolean` | `0.35`, off, off | a field: how much of a voice its reach loses, a quiet rim, no edge at all |
+| `rest` | `number` | `1` | how present the dots are at rest |
+| `mode`, `speaking`, `still` | a value, a state or a function | `"listening"`, nobody, `false` | followed in Rust; `still` (reduced motion) holds its mode's pattern |
+| `touch` | `boolean` | `false` | the pointer lights the dots under it, the light holding a moment where it left them |
+| `label` | a string, a state or a function | none | what it says to assistive technology |
+
+The engine steps it on the window's frame clock at 30 frames a second while anything in it moves (a voice, its mode's motion, a passage, the pointer's light) and while it shows, and asks for no frame once it rests (muted and quiet, or held still): no script runs as it animates.
 
 ## Masks and shaders
 

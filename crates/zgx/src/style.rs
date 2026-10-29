@@ -729,6 +729,7 @@ pub(crate) struct RareStyles {
     pub(crate) fade_edges_x: Option<[f32; 2]>,
     pub(crate) fade_insets_x: Option<[f32; 2]>,
     pub(crate) fade_overflow: Option<bool>,
+    pub(crate) fade_eased: Option<bool>,
     pub(crate) snap: Option<bool>,
     /// `Styled::direction`: which way its lines run.
     pub(crate) direction: Option<crate::scene::Direction>,
@@ -787,6 +788,7 @@ impl RareStyles {
         fade_edges_x: None,
         fade_insets_x: None,
         fade_overflow: None,
+        fade_eased: None,
         snap: None,
         direction: None,
         border_style: None,
@@ -840,6 +842,9 @@ impl RareStyles {
         }
         if other.fade_overflow.is_some() {
             self.fade_overflow = other.fade_overflow;
+        }
+        if other.fade_eased.is_some() {
+            self.fade_eased = other.fade_eased;
         }
         if other.snap.is_some() {
             self.snap = other.snap;
@@ -1305,6 +1310,12 @@ pub trait Styled: Sized {
     /// keeps its component state. `flex` or `grid` shows it again.
     fn hidden(mut self) -> Self {
         self.styles_mut().layout_options_mut().display = Some(crate::layout::Display::None);
+        self
+    }
+    /// Undo a `hidden` it is laid over (a hover or variant showing what the
+    /// base hides): the display goes back to the default.
+    fn shown(mut self) -> Self {
+        self.styles_mut().layout_options_mut().shown = Some(true);
         self
     }
     /// Paint the view again after `invisible`.
@@ -2670,6 +2681,14 @@ pub trait Styled: Sized {
     /// scrolls under that edge.
     fn fade_overflow(mut self, value: bool) -> Self {
         self.styles_mut().rare_mut().fade_overflow = Some(value);
+        self
+    }
+    /// With `fade_overflow`, keep each band whole and slide it in from past
+    /// its edge as content runs past, reaching the edge once the content
+    /// runs a band past: a label too long for its box fades its end in
+    /// gently (see `scene::Style::fade_eased`).
+    fn fade_eased(mut self, value: bool) -> Self {
+        self.styles_mut().rare_mut().fade_eased = Some(value);
         self
     }
     /// Lay this node's edges on whole points after layout (percentages and

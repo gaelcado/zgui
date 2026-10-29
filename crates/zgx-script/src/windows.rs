@@ -113,6 +113,38 @@ pub(crate) const CONTROLS: &str = "zgx.window.controls";
 pub(crate) const ZOOM: &str = "zgx.window.zoom";
 pub(crate) const ZOOMABLE: &str = "zgx.window.zoomable";
 
+/// The shared key holding whether the app's window is the active one
+/// (`ui.window.active`).
+pub(crate) const ACTIVE: &str = "zgx.window.active";
+
+/// The shared key holding the modifier keys held (`ui.keys`).
+pub(crate) const KEYS: &str = "zgx.keys";
+
+/// The shared key holding what the window shows as the platform's own
+/// (`ui.native`).
+pub(crate) const NATIVE: &str = "zgx.native";
+
+/// `ui.native`'s value: `{ web, terminals, temporary_stores }`, whether
+/// pages and terminals show as the platform's own here (a placeholder box
+/// otherwise), and whether a page's named store keeps nothing past the run.
+pub(crate) fn native(web: bool, terminals: bool, temporary_stores: bool) -> Value {
+    Value::Map(Rc::from([
+        (Rc::from("temporary_stores"), Value::Bool(temporary_stores)),
+        (Rc::from("terminals"), Value::Bool(terminals)),
+        (Rc::from("web"), Value::Bool(web)),
+    ]))
+}
+
+/// `ui.keys`'s value: `{ shift, ctrl, alt, meta }`.
+pub(crate) fn keys(held: zgx::input::Modifiers) -> Value {
+    Value::Map(Rc::from([
+        (Rc::from("alt"), Value::Bool(held.alt)),
+        (Rc::from("ctrl"), Value::Bool(held.control)),
+        (Rc::from("meta"), Value::Bool(held.meta)),
+        (Rc::from("shift"), Value::Bool(held.shift)),
+    ]))
+}
+
 /// Installs `ui.window`: called, it declares a window; its
 /// `titlebar_area` and `controls` are the app's own window's.
 pub(crate) fn install(
@@ -132,7 +164,19 @@ pub(crate) fn install(
             State::new(shared.state(TITLEBAR_AREA, Value::Nil)),
         )?;
         window.set("controls", State::new(shared.state(CONTROLS, Value::Nil)))?;
+        window.set(
+            "active",
+            State::new(shared.state(ACTIVE, Value::Bool(true))),
+        )?;
     }
+    ui.set(
+        "keys",
+        State::new(shared.state(KEYS, keys(zgx::input::Modifiers::default()))),
+    )?;
+    ui.set(
+        "native",
+        State::new(shared.state(NATIVE, native(false, false, false))),
+    )?;
     let meta = lua.create_table()?;
     // `zoom` and `zoomable` made as a script first reads them: a script that
     // never does makes neither.

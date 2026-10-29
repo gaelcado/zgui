@@ -60,6 +60,9 @@ application menu. Linux and Windows use the rendered menu implementation;
 mount `cx.app_menu_bar()` in the content layout for retained, accessible menus
 with keyboard traversal, disabled-item skipping, Escape dismissal, focus
 restoration, and nested submenus. `has_native_app_menu()` exposes the distinction.
+`AppMenu::application(label, entries)` is the application's own menu: on macOS
+its entries lead the menu AppKit names for the app, above Services, Hide and
+Quit; a rendered bar shows it first, titled `label` (the process's name if empty).
 
 ```no_run
 use zgx_desktop::{AppMenu, AppMenuEntry, Application};

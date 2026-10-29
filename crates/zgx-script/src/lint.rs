@@ -155,6 +155,7 @@ pub const RULES: &[(&str, &str)] = &[
 /// one or the other (`every_ui_function_is_classified`).
 const NOT_ELEMENTS: &[&str] = &[
     "on_open",
+    "on_notification",
     "state",
     "shared",
     "persist",
@@ -168,6 +169,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "batch",
     "every",
     "after",
+    "clock",
     "shortcut_text",
     "set",
     "toggle",
@@ -195,6 +197,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "on_mount",
     "null",
     "fetch",
+    "mermaid",
     "variants",
     "component",
     "on_cleanup",
@@ -210,6 +213,10 @@ const NOT_ELEMENTS: &[&str] = &[
     "i18n",
     "t",
     "selector",
+    "open_url",
+    "haptic",
+    "play_sound",
+    "notify",
 ];
 
 /// Lint every `.luau` script at `paths` (files, or directories searched).
@@ -764,7 +771,9 @@ impl Linter<'_> {
             return false;
         };
         match previous.kind {
-            Kind::Punct => !matches!(previous.text.as_str(), ")" | "]" | "}" | ";"),
+            // `?` ends an optional type (Luau has no `?:`): a function's
+            // `(): string?` and then its body's first statement.
+            Kind::Punct => !matches!(previous.text.as_str(), ")" | "]" | "}" | ";" | "?"),
             Kind::Name => matches!(
                 previous.text.as_str(),
                 "return" | "and" | "or" | "not" | "in"
@@ -1549,13 +1558,14 @@ mod tests {
 
     /// Functions of `ui` that return no `Node` yet whose arguments are read
     /// while the interface is built: a window's options, a contribution, a
-    /// document parsed into blocks, a 3D scene's objects.
+    /// document parsed into blocks, a formula laid out, a 3D scene's objects.
     const BUILDS: &[&str] = &[
         "window",
         "contribute",
         "filter",
         "override",
         "markdown",
+        "math",
         "mesh",
         "light",
         "group",
@@ -1780,6 +1790,25 @@ return ui.column {
                 (11, "untracked-get".to_string()),
             ]
         );
+    }
+
+    /// A body starting with an `if` statement after an optional return type
+    /// keeps its function's scope: what it reads after the `if` is tracked.
+    #[test]
+    fn an_if_after_an_optional_return_type_opens_a_block() {
+        let source = r##"
+local chat = ui.state("chat", "")
+local work = ui.state("work", "idle")
+return ui.presence(function(): string?
+    if chat:get() == "" then
+        return nil
+    end
+    return if work:get() == "awaiting" then "asking" else "plain"
+end, function(kind: string): Node
+    return ui.text { kind }
+end)
+"##;
+        assert!(rules(source).is_empty(), "{:?}", rules(source));
     }
 
     #[test]

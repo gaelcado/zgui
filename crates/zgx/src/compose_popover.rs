@@ -94,10 +94,13 @@ pub(crate) fn mount(
         Some(at),
         over,
         arrow,
+        4.,
     );
 }
 
-/// A submenu starts beside its trigger, flipping left when the right side lacks room.
+/// A submenu starts beside its trigger, `gap` from it (4 unless set: a
+/// placement's offset), flipping left when the right side lacks room.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mount_submenu(
     ui: &mut Ui,
     owner: NodeId,
@@ -105,9 +108,11 @@ pub(crate) fn mount_submenu(
     overlay: NodeId,
     position: NodeId,
     panel: NodeId,
+    gap: Option<f32>,
 ) {
+    let gap = gap.filter(|gap| gap.is_finite()).unwrap_or(4.);
     mount_placement(
-        ui, owner, anchor, overlay, position, panel, None, None, None,
+        ui, owner, anchor, overlay, position, panel, None, None, None, gap,
     );
 }
 
@@ -210,6 +215,8 @@ fn mount_placement(
     at: Option<Placement>,
     over: Option<Box<dyn Fn() -> Option<NodeId>>>,
     arrow: Option<Arrow>,
+    // A submenu's distance from its trigger.
+    gap: f32,
 ) {
     let anchor_bounds = ui.observe_bounds(anchor);
     let viewport = ui.observe_bounds(overlay);
@@ -249,7 +256,7 @@ fn mount_placement(
             (_, Some(item)) => {
                 over_placement(anchor, viewport, panel.width, panel.height, item, rtl)
             }
-            (None, _) => submenu_placement(anchor, viewport, panel.width, panel.height, rtl),
+            (None, _) => submenu_placement(anchor, viewport, panel.width, panel.height, rtl, gap),
             (Some(mut at), None) => {
                 at.offset += arrow.map_or(0., |arrow| arrow.size);
                 // Shown on the trigger's other side by the platform
@@ -546,12 +553,13 @@ fn submenu_placement(
     width: f32,
     height: f32,
     rtl: bool,
+    gap: f32,
 ) -> (f32, f32) {
     let right_edge = viewport.x + viewport.width;
-    let right = anchor.x + anchor.width + 4.;
-    let left = anchor.x - width - 4.;
+    let right = anchor.x + anchor.width + gap;
+    let left = anchor.x - width - gap;
     let right_room = right_edge - right;
-    let left_room = anchor.x - 4. - viewport.x;
+    let left_room = anchor.x - gap - viewport.x;
     let x = match rtl {
         false if right_room >= width || right_room >= left_room => right,
         false => left,
@@ -696,11 +704,11 @@ mod tests {
         // room.
         let menu = Rect::new(10., 20., 300., 200.);
         assert_eq!(
-            submenu_placement(Rect::new(230., 190., 60., 20.), menu, 100., 60., true),
+            submenu_placement(Rect::new(230., 190., 60., 20.), menu, 100., 60., true, 4.),
             (126., 160.)
         );
         assert_eq!(
-            submenu_placement(Rect::new(30., 50., 80., 20.), menu, 100., 60., true),
+            submenu_placement(Rect::new(30., 50., 80., 20.), menu, 100., 60., true, 4.),
             (114., 50.)
         );
         // A pop-up button's item lines up with its right edge.
@@ -775,20 +783,48 @@ mod tests {
     fn submenu_placement_flips_and_clamps_with_nonzero_viewport_origin() {
         let viewport = Rect::new(10., 20., 300., 200.);
         assert_eq!(
-            submenu_placement(Rect::new(30., 50., 80., 20.), viewport, 100., 60., false),
+            submenu_placement(
+                Rect::new(30., 50., 80., 20.),
+                viewport,
+                100.,
+                60.,
+                false,
+                4.
+            ),
             (114., 50.)
         );
         assert_eq!(
-            submenu_placement(Rect::new(230., 190., 60., 20.), viewport, 100., 60., false),
+            submenu_placement(
+                Rect::new(230., 190., 60., 20.),
+                viewport,
+                100.,
+                60.,
+                false,
+                4.
+            ),
             (126., 160.)
         );
         // Both sides are too small; choose the more spacious side then clamp.
         assert_eq!(
-            submenu_placement(Rect::new(140., 10., 40., 20.), viewport, 180., 60., false),
+            submenu_placement(
+                Rect::new(140., 10., 40., 20.),
+                viewport,
+                180.,
+                60.,
+                false,
+                4.
+            ),
             (130., 20.)
         );
         assert_eq!(
-            submenu_placement(Rect::new(30., 50., 80., 20.), viewport, 400., 300., false),
+            submenu_placement(
+                Rect::new(30., 50., 80., 20.),
+                viewport,
+                400.,
+                300.,
+                false,
+                4.
+            ),
             (10., 20.)
         );
     }

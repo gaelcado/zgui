@@ -15,6 +15,9 @@ pub struct VariableHeights {
     index: Rc<RefCell<HeightIndex>>,
     revision: Signal<u64>,
     end: Rc<Cell<bool>>,
+    /// Rows clip what they draw to their height (while heights ease, a row
+    /// shrinking under its content).
+    clip: Rc<Cell<bool>>,
 }
 impl VariableHeights {
     /// `count` rows, each `estimate` tall until measured. Panics if `estimate`
@@ -29,6 +32,7 @@ impl VariableHeights {
             index: Rc::new(RefCell::new(HeightIndex::try_new(count, estimate)?)),
             revision: runtime.signal(0),
             end: Default::default(),
+            clip: Default::default(),
         })
     }
     /// Keep a viewport resting at the end there through height and count
@@ -39,11 +43,19 @@ impl VariableHeights {
         self.end.set(true);
         self
     }
+    /// Clip each row to its height (or stop): while heights ease, a row
+    /// is shorter than what it draws. At rest rows draw unclipped.
+    pub fn set_clip_rows(&self, clip: bool) {
+        if self.clip.replace(clip) != clip {
+            self.changed();
+        }
+    }
     fn changed(&self) {
         self.revision
             .update(|revision| *revision = revision.wrapping_add(1));
     }
-    /// Update one finite positive height. Once mounted in measured mode, values
+    /// Update one finite height: positive, or zero for a row folded away
+    /// (it is not built while it is). Once mounted in measured mode, values
     /// below one logical pixel clamp to one, including offscreen estimates.
     pub fn set_height(&self, index: usize, height: f32) -> Result<bool, HeightError> {
         let changed = self.index.borrow_mut().set_height(index, height)?;
@@ -293,10 +305,11 @@ struct Entry {
     measurement: Option<Signal<(f32, f32)>>,
     /// The run that last showed it.
     run: u64,
-    /// Where and how wide it was last placed: top, height and width.
-    at: Option<(u32, u32, u32)>,
+    /// Where and how wide it was last placed: top, height, width and
+    /// whether it clipped.
+    at: Option<(u32, u32, u32, bool)>,
 }
-fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
+fn row_style(width: f32, height: f32, measured: bool, clip: bool) -> crate::scene::Style {
     if measured {
         crate::scene::Style {
             width: Some(width),
@@ -304,7 +317,10 @@ fn row_style(width: f32, height: f32, measured: bool) -> crate::scene::Style {
             ..Default::default()
         }
     } else {
-        crate::widgets::fixed(width, height)
+        crate::scene::Style {
+            clip,
+            ..crate::widgets::fixed(width, height)
+        }
     }
 }
 fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
@@ -592,8 +608,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     (length, total, position, target, geometry, next_anchor)
                 };
                 // Release the index borrow before application key/build callbacks.
+                // A row folded to nothing is not built (nor kept).
                 let keys: Vec<_> = geometry
                     .into_iter()
+                    .filter(|(_, _, row_height)| *row_height > 0.)
                     .map(|(index, top, row_height)| (key(index), index, top, row_height))
                     .collect();
                 // Rows kept are stamped with this run: one shown twice is a
@@ -663,7 +681,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         let row = ui.container(
                             content,
                             Layout::Overlay,
-                            row_style(width, *row_height, measured),
+                            row_style(width, *row_height, measured, heights.clip.get()),
                         );
                         crate::selection::mount_row(&mut ui, row, &index_signal);
                         let node = mount(&mut ui, row, view, environment.clone());
@@ -720,14 +738,17 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         scene.set_style(content, crate::widgets::fixed(width, total));
                         stretch.place(&mut scene, position);
                         order.clear();
+                        let clip = heights.clip.get();
                         for (key, _, top, row_height) in &keys {
                             let entry = entries.get_mut(key).expect("a row");
                             // A row placed as it was, at the same width, stays.
-                            let at = Some((top.to_bits(), row_height.to_bits(), width.to_bits()));
+                            let at =
+                                Some((top.to_bits(), row_height.to_bits(), width.to_bits(), clip));
                             if entry.at != at {
                                 entry.at = at;
                                 let node = entry.node;
-                                scene.set_style(node, row_style(width, *row_height, measured));
+                                scene
+                                    .set_style(node, row_style(width, *row_height, measured, clip));
                                 scene.set_transform(
                                     node,
                                     crate::scene::Transform { x: 0.0, y: *top },

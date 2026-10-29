@@ -516,3 +516,154 @@ fn a_long_editor_takes_a_character_straddling_a_chunk_cut() {
         assert_eq!(editor.text(), text, "{wide}");
     }
 }
+
+#[test]
+fn finished_references_draw_as_chips_and_delete_whole() {
+    let mut ui = Ui::new(500., 200.);
+    let fill = zgx::scene::Color(10, 132, 255, 40);
+    let value = ui.signal(String::from("see @src/a.rs and @b"));
+    let mounted = ui.mount(
+        text_area("Draft", value.clone())
+            .id("draft")
+            .size(400., 100.)
+            .chips("@", move || fill),
+    );
+    let draft = mounted.find("draft").unwrap();
+    ui.prepare_frame();
+    let chips = |ui: &Ui| {
+        let scene = ui.scene.borrow();
+        descendants(ui, draft)
+            .into_iter()
+            .filter(|n| matches!(scene.kind(*n), NodeKind::Quad(q) if q.fill == fill))
+            .map(|n| scene.bounds(n))
+            .collect::<Vec<_>>()
+    };
+    // The finished one is a chip; "@b", still being typed, is not.
+    let drawn = chips(&ui);
+    assert_eq!(drawn.len(), 1, "{drawn:?}");
+    assert!(drawn[0].width > 20. && drawn[0].height > 10.);
+    // A backspace at its end takes it whole.
+    assert!(ui.input.focus(&ui.scene, Some(draft)));
+    let editor = ui.focused_editor().unwrap();
+    editor.editor.borrow_mut().set_selection(13, 13);
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Backspace,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    assert_eq!(value.get(), "see  and @b");
+    ui.prepare_frame();
+    assert!(chips(&ui).is_empty());
+    // A delete at its start too; plain text deletes by the character.
+    value.set("x @c.rs y".into());
+    ui.prepare_frame();
+    assert_eq!(chips(&ui).len(), 1);
+    editor.editor.borrow_mut().set_selection(2, 2);
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Delete,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    assert_eq!(value.get(), "x  y");
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Backspace,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    assert_eq!(value.get(), "x y");
+    // A chip stays one when the space after it goes: the next backspace
+    // still takes it whole.
+    value.set("x @d.rs ".into());
+    ui.prepare_frame();
+    editor.editor.borrow_mut().set_selection(8, 8);
+    for _ in 0..2 {
+        ui.dispatch(InputEvent::KeyDown {
+            key: Key::Backspace,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        });
+        ui.prepare_frame();
+        if value.get() == "x @d.rs" {
+            assert_eq!(chips(&ui).len(), 1, "still a chip");
+        }
+    }
+    assert_eq!(value.get(), "x ");
+}
+
+/// A no-break space joins a reference's words, so a title of several (a
+/// chat dropped on the draft) is one chip and deletes whole.
+#[test]
+fn a_no_break_space_keeps_a_reference_one_chip() {
+    let mut ui = Ui::new(500., 200.);
+    let fill = zgx::scene::Color(10, 132, 255, 40);
+    let value = ui.signal(String::from("ask @Write\u{a0}the\u{a0}notes and \u{a0}@x "));
+    let mounted = ui.mount(
+        text_area("Draft", value.clone())
+            .id("draft")
+            .size(400., 100.)
+            .chips("@", move || fill),
+    );
+    let draft = mounted.find("draft").unwrap();
+    ui.prepare_frame();
+    let chips = |ui: &Ui| {
+        let scene = ui.scene.borrow();
+        descendants(ui, draft)
+            .into_iter()
+            .filter(|n| matches!(scene.kind(*n), NodeKind::Quad(q) if q.fill == fill))
+            .count()
+    };
+    // The title, and "@x" after a no-break space that starts no word.
+    assert_eq!(chips(&ui), 2);
+    assert!(ui.input.focus(&ui.scene, Some(draft)));
+    let editor = ui.focused_editor().unwrap();
+    let end = "ask @Write\u{a0}the\u{a0}notes".len();
+    editor.editor.borrow_mut().set_selection(end, end);
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Backspace,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    assert_eq!(value.get(), "ask  and \u{a0}@x ");
+}
+
+#[test]
+fn an_editor_says_whether_its_text_fits_one_line_with_hysteresis() {
+    use zgx::widgets::line_fits;
+    // Opening out past the room; folding back only well under it.
+    assert!(line_fits(true, Some(250.), 250.));
+    assert!(!line_fits(true, Some(251.), 250.));
+    assert!(!line_fits(false, Some(230.), 250.), "within the hysteresis");
+    assert!(line_fits(false, Some(210.), 250.));
+    assert!(!line_fits(true, None, 250.), "a line break never fits");
+    assert!(!line_fits(true, Some(10.), 150.), "too little room");
+
+    let mut ui = Ui::new(600., 200.);
+    let value = ui.signal(String::from("short"));
+    let fits = ui.signal(true);
+    let inset = ui.signal(0_f32);
+    let read = inset.clone();
+    let mounted = ui.mount(
+        text_area("Draft", value.clone())
+            .size(400., 60.)
+            .fits(fits.clone(), move || read.get()),
+    );
+    ui.prepare_frame();
+    assert!(fits.get(), "a short draft fits");
+    value.set("word ".repeat(40));
+    ui.prepare_frame();
+    assert!(!fits.get(), "a long one does not");
+    value.set("short again".into());
+    ui.prepare_frame();
+    assert!(fits.get(), "short again, it fits");
+    value.set("one\ntwo".into());
+    ui.prepare_frame();
+    assert!(!fits.get(), "a second line");
+    value.set("short".into());
+    ui.prepare_frame();
+    assert!(fits.get());
+    // Less room (the row's controls beside it), and there is too little.
+    inset.set(250.);
+    ui.prepare_frame();
+    assert!(!fits.get(), "under the least room");
+    mounted.unmount();
+}

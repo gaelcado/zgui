@@ -20,5 +20,7 @@ mod system_preferences;
 mod text_range_area;
 #[path = "../theme.rs"]
 mod theme;
+#[path = "../veil.rs"]
+mod veil;
 #[path = "../zoomed_text_geometry.rs"]
 mod zoomed_text_geometry;

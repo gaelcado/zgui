@@ -34,6 +34,7 @@ pub mod check;
 mod command;
 mod data;
 mod design;
+mod draft_markdown;
 pub mod driver;
 mod element;
 #[cfg(target_os = "macos")]
@@ -57,6 +58,10 @@ mod library;
 pub mod lint;
 mod lower;
 pub mod markdown;
+#[cfg(feature = "math")]
+mod math;
+#[cfg(feature = "mermaid")]
+mod mermaid;
 mod meter;
 mod motion;
 mod node;
@@ -787,6 +792,9 @@ pub enum Capability {
     /// `ui.window`: windows of its own, which could pose as the app's or
     /// the system's (asking for a password).
     Windows,
+    /// `ui.notify` and `ui.play_sound`: the desktop's banners, which could
+    /// pose as another app's, and sounds.
+    Notify,
     /// What the app defines (`expose_action`, `expose_shared`): a host
     /// action or shared state a plugin reaches only if granted it.
     Named(String),
@@ -962,6 +970,11 @@ struct Inner {
     picked: io::Picked,
     /// `ui.args` and `ui.on_open` (`ScriptHost::args`, `open`).
     opens: Rc<opens::Opens>,
+    /// The haptics scripts asked for (`haptics`).
+    felt: Rc<io::Felt>,
+    /// Banners posted with `data`, and what hears their clicks
+    /// (`ui.on_notification`).
+    banners: Rc<io::Banners>,
     /// Whether errors show over the interface (`error_banner`).
     show_errors: bool,
     /// What hears each script error (`on_error`), and what follows them.
@@ -1067,6 +1080,9 @@ fn diagnostics_requested() -> bool {
 /// Loads an application script and its plugins and mounts what they describe.
 #[derive(Clone)]
 pub struct ScriptHost(Rc<Inner>);
+/// A sandboxed script run (`ScriptHost::sandboxed`): its VM, the node it
+/// returned and its `ui.on_mount` callbacks.
+pub(crate) type Sandboxed = (Rc<Vm>, Rc<node::Node>, Vec<mlua::Function>);
 /// A script run: its VM, the view it returned and its slot contributions.
 type Ran = (
     Rc<Vm>,
@@ -1114,6 +1130,8 @@ impl ScriptHost {
             platform: Rc::default(),
             picked: Rc::default(),
             opens: Rc::default(),
+            felt: Rc::default(),
+            banners: io::Banners::new(),
             show_errors: cfg!(debug_assertions),
             error_hooks: Rc::default(),
             error_watch: RefCell::default(),
@@ -1592,6 +1610,13 @@ impl ScriptHost {
     /// no script (a resize the layout engine handles alone).
     pub fn script_calls(&self) -> u64 {
         self.0.warnings.calls.get()
+    }
+    /// How many haptics the scripts asked for (`ui.haptic`) since the
+    /// host's start, and the last one's pattern, whether or not a trackpad
+    /// felt them: what a test reads to check that a slider taps once a
+    /// step, and never at a step it stays on.
+    pub fn haptics(&self) -> (u64, Option<zgx::platform::Haptic>) {
+        (self.0.felt.count.get(), self.0.felt.last.get())
     }
     /// Bytes the loaded scripts' VMs hold after a full collection (each is
     /// capped at `Limits::memory` or `Limits::plugin_memory`): what a test reads over many updates to
@@ -2096,6 +2121,41 @@ impl ScriptHost {
                 persist.set_tasks(cx.tasks());
                 timers.set_tasks(cx.tasks());
             }
+            // `ui.keys`: the modifier keys held, as the window says.
+            if let Some(held) = cx.try_service::<zgx::input::HeldKeys>() {
+                let keys = host
+                    .0
+                    .shared
+                    .state(windows::KEYS, windows::keys(Default::default()));
+                let held = held.0.clone();
+                cx.retain(cx.runtime().effect(move || {
+                    keys.set(windows::keys(held.get()));
+                }));
+            }
+            // `ui.window.active`: whether the window is the active one.
+            if let Some(active) = cx.try_service::<zgx::input::WindowActive>() {
+                let state = host.0.shared.state(windows::ACTIVE, Value::Bool(true));
+                let active = active.0.clone();
+                cx.retain(cx.runtime().effect(move || {
+                    let now = Value::Bool(active.get());
+                    if state.with_untracked(|was| *was != now) {
+                        state.set(now);
+                    }
+                }));
+            }
+            // `ui.native`: whether pages and terminals are the platform's
+            // own in this window.
+            if let Some(natives) = cx.try_service::<zgx::native_view::NativeViews>() {
+                let native = windows::native(
+                    natives.supported(),
+                    natives.terminals(),
+                    natives.temporary_stores(),
+                );
+                host.0
+                    .shared
+                    .state(windows::NATIVE, native.clone())
+                    .set(native);
+            }
             // The clipboard and file dialogs, from the window.
             if let Some(platform) = cx.try_service::<zgx::platform::PlatformService>() {
                 *host.0.platform.borrow_mut() = Some((*platform).clone());
@@ -2278,6 +2338,7 @@ impl ScriptHost {
                 depth: Default::default(),
                 #[cfg(feature = "components")]
                 commands: self.0.commands.clone(),
+                host: Rc::downgrade(&self.0),
             }),
         })
     }
@@ -2315,6 +2376,10 @@ impl ScriptHost {
     ) -> mlua::Result<()> {
         let host = Rc::downgrade(&self.0);
         let modules: Rc<RefCell<HashMap<PathBuf, Option<mlua::Value>>>> = Rc::default();
+        // Where each path asked for (made absolute) resolved to, once its
+        // module ran: a `require` inside a component (each mount) finds
+        // the module again without asking the disk.
+        let resolved: RefCell<HashMap<PathBuf, PathBuf>> = RefCell::default();
         let root = dir.map(|d| d.canonicalize().unwrap_or(d));
         let aliases = root
             .as_deref()
@@ -2439,7 +2504,13 @@ impl ScriptHost {
             } else {
                 root.join(&name)
             };
-            let mut path = normalize(&joined);
+            let asked = normalize(&joined);
+            if let Some(path) = resolved.borrow().get(&asked)
+                && let Some(Some(value)) = modules.borrow().get(path)
+            {
+                return Ok(value.clone());
+            }
+            let mut path = asked.clone();
             if files.is_dir(&path) {
                 path = path.join("init.luau");
             } else if path.extension().is_none() {
@@ -2471,7 +2542,10 @@ impl ScriptHost {
                 files
             };
             match modules.borrow().get(&path) {
-                Some(Some(value)) => return Ok(value.clone()),
+                Some(Some(value)) => {
+                    resolved.borrow_mut().insert(asked, path.clone());
+                    return Ok(value.clone());
+                }
                 Some(None) => return Err(fail("a require cycle".into())),
                 None => {}
             }
@@ -2500,7 +2574,10 @@ impl ScriptHost {
                     return Err(e);
                 }
             };
-            modules.borrow_mut().insert(path, Some(value.clone()));
+            modules
+                .borrow_mut()
+                .insert(path.clone(), Some(value.clone()));
+            resolved.borrow_mut().insert(asked, path);
             Ok(value)
         })?;
         lua.globals().set("require", require)
@@ -2509,15 +2586,60 @@ impl ScriptHost {
     /// Run `script`: the application's, or a `plugin` (sandboxed further:
     /// only what the host grants it).
     fn run(&self, script: &Script, plugin: bool) -> Result<Ran, String> {
+        self.run_in(
+            script,
+            plugin,
+            self.0.error.clone(),
+            self.0.commands.clone(),
+        )
+    }
+
+    /// A script from source the app holds (`ui.sandbox`: an agent's
+    /// visual), sandboxed as a plugin named `name` is (its grants, the
+    /// plugins' limits) and read as source whatever the app's files are:
+    /// its VM, the node it returned and its `ui.on_mount` callbacks. Its
+    /// errors go to `errors`, not the app's banner; the commands it
+    /// declares go nowhere.
+    pub(crate) fn sandboxed(
+        &self,
+        name: &str,
+        code: &str,
+        errors: Signal<Option<String>>,
+    ) -> Result<Sandboxed, String> {
+        let script = Script::Inline {
+            name: name.to_owned(),
+            code: code.to_owned(),
+        };
+        let commands = Rc::new(command::Commands::new(&self.0.runtime));
+        let (vm, root, _, _) = self.run_in(&script, true, errors, commands)?;
+        let root = root.ok_or_else(|| format!("{name}: a sandboxed script returns a ui node"))?;
+        let mounted = vm
+            .lua
+            .app_data_ref::<node::Env>()
+            .map(|env| env.mounted.take())
+            .unwrap_or_default();
+        Ok((vm, root, mounted))
+    }
+
+    fn run_in(
+        &self,
+        script: &Script,
+        plugin: bool,
+        errors: Signal<Option<String>>,
+        commands: Rc<command::Commands>,
+    ) -> Result<Ran, String> {
         let name = script.name();
         let fail = |error: mlua::Error| describe(&name, &error);
-        // A plugin outside the app's bundle reads from the disk.
+        // A plugin outside the app's bundle reads from the disk, and one
+        // held in memory is source: never bytecode, which Luau does not
+        // check.
         let files = match (self.0.files, script) {
             (Files::Bundle(bundle), Script::File(path) | Script::Plugin { path, .. })
                 if plugin && !path.starts_with(bundle.root) =>
             {
                 Files::Disk
             }
+            (Files::Bundle(_), Script::Inline { .. }) if plugin => Files::Disk,
             (files, _) => files,
         };
         let grants = Rc::new(if plugin {
@@ -2563,7 +2685,7 @@ impl ScriptHost {
             deadline,
             budget: limits.call,
             runtime: self.0.runtime.clone(),
-            errors: self.0.error.clone(),
+            errors,
             layout_ids: Default::default(),
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
@@ -2611,7 +2733,7 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         term::install(&lua, &ui, self.0.terms.clone()).map_err(fail)?;
         node::install_web(&lua, &ui, self.0.webs.clone()).map_err(fail)?;
-        command::install(&lua, &ui, self.0.commands.clone()).map_err(fail)?;
+        command::install(&lua, &ui, commands).map_err(fail)?;
         i18n::install(&lua, &ui, self.0.locales.clone(), self.0.files).map_err(fail)?;
         windows::install(&lua, &ui, self.0.windows.clone(), &self.0.shared).map_err(fail)?;
         let may = |capability: Capability| grants.allows(&capability);
@@ -2622,8 +2744,10 @@ impl ScriptHost {
             &ui,
             self.0.platform.clone(),
             self.0.picked.clone(),
-            may(Capability::Clipboard),
-            may(Capability::Files),
+            self.0.felt.clone(),
+            self.0.banners.clone(),
+            &grants,
+            script.dir(),
         )
         .map_err(fail)?;
         theme::install(&lua, &ui, script.dir(), self.packages(plugin)).map_err(fail)?;

@@ -246,6 +246,26 @@ mod other {
     pub(crate) fn warm(_: &zgx_gpu::GpuContext, _: f32) {}
 }
 
+/// Whether popup root `root`'s panel (what the root holds) paints a shadow
+/// of its own. Its window then casts none: AppKit would shadow (or, since
+/// macOS 26, rim) the painted shadow's soft edge, not the panel's box.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn paints_shadow(scene: &zgx::scene::Scene, root: zgx::scene::NodeId) -> bool {
+    use zgx::scene::NodeKind;
+    let Some(&panel) = scene.children(root).first() else {
+        return false;
+    };
+    let (NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }) = scene.kind(panel) else {
+        return false;
+    };
+    let decorated = quad
+        .decoration
+        .as_ref()
+        .and_then(|d| d.shadows.as_ref())
+        .is_some_and(|shadows| !shadows.is_empty());
+    quad.shadow.is_some() || decorated
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::PopupInput;
@@ -544,22 +564,6 @@ mod macos {
                 bounds.height = bottom.max(y) - bounds.y;
             }
             bounds
-        }
-    }
-    /// Whether the window server shadows popup `root`'s window: not when
-    /// its panel paints a shadow of its own. The window then takes in that
-    /// shadow's ink, and the window server's shadow, which follows what the
-    /// window shows, would outline the whole soft shadow (on macOS 26 a
-    /// dark rim round it) besides the panel's own.
-    fn window_shadow(scene: &Scene, root: NodeId) -> bool {
-        let Some(panel) = scene.children(root).first() else {
-            return true;
-        };
-        match scene.kind(*panel) {
-            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
-                quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
-            }
-            _ => true,
         }
     }
     /// A mask of `material`'s shape (its rounded box and arrow), the size of
@@ -1398,12 +1402,6 @@ mod macos {
                 panel.renderer.as_mut().expect("made above").present()?;
                 panel.back(material, frame);
                 panel.place(&parent, &content, frame);
-                if panel.preview.is_none() {
-                    let shadow = window_shadow(scene, root);
-                    if panel.window.hasShadow() != shadow {
-                        panel.window.setHasShadow(shadow);
-                    }
-                }
                 if new {
                     panel.host.setHidden(false);
                 }
@@ -1437,7 +1435,13 @@ mod macos {
                     }
                     panel.window.orderFront(None);
                 }
-                if new || moved {
+                // A panel with a shadow of its own casts no window shadow,
+                // nor does a drag preview.
+                let casts = panel.preview.is_none() && !super::paints_shadow(scene, root);
+                if panel.window.hasShadow() != casts {
+                    panel.window.setHasShadow(casts);
+                }
+                if casts && (new || moved) {
                     // Its rim (macOS 26 menus have no drop shadow, only a
                     // rim) follows what it shows.
                     panel.window.invalidateShadow();
@@ -1550,7 +1554,7 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
-        use super::{Material, window_shadow};
+        use super::Material;
         use objc2_app_kit::NSVisualEffectMaterial;
         use zgx::{compose::prelude::*, widgets::Ui};
 
@@ -1598,14 +1602,10 @@ mod macos {
                 let mut ui = Ui::new(400., 300.);
                 let handle = ui.mount(view);
                 ui.prepare_frame();
-                window_shadow(&ui.scene.borrow(), handle.node())
+                !super::super::paints_shadow(&ui.scene.borrow(), handle.node())
             };
             assert!(!shadow(shadowed(0x00000099)));
             assert!(shadow(div().child(chip())), "a menu's or popover's rim");
-            assert!(
-                shadow(shadowed(0x00000000)),
-                "a clear shadow paints nothing"
-            );
             // The panel keeps its own box: the shadow's ink is no material.
             let material = material(shadowed(0x00000099), false).expect("a material");
             assert_eq!(material.bounds(), material.rect);
@@ -2540,5 +2540,56 @@ mod x11 {
             home.into_iter().map(|(_, popup)| popup).collect()
         });
         home.into_iter().for_each(release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zgx::scene::{BoxShadow, Color, Layout, NodeKind, QuadStyle, Scene, Style, Transform};
+
+    #[test]
+    fn a_panel_painting_its_own_shadow_casts_no_window_shadow() {
+        let mut scene = Scene::new(400., 300.);
+        let root = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style::default(),
+        );
+        let quad = QuadStyle {
+            fill: Color(30, 30, 30, 200),
+            radius: 12.,
+            ..Default::default()
+        };
+        let panel = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Column,
+                quad: quad.clone(),
+            },
+            Style::default(),
+        );
+        assert!(
+            !super::paints_shadow(&scene, root),
+            "a plain panel: the system's"
+        );
+        scene.set_kind(
+            panel,
+            NodeKind::Panel {
+                layout: Layout::Column,
+                quad: QuadStyle {
+                    shadow: Some(BoxShadow {
+                        color: Color(0, 0, 0, 120),
+                        offset: Transform { x: 0., y: 12. },
+                        blur_radius: 20.,
+                        spread: 0.,
+                    }),
+                    ..quad
+                },
+            },
+        );
+        assert!(
+            super::paints_shadow(&scene, root),
+            "its own: none from AppKit"
+        );
     }
 }

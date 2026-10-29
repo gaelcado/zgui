@@ -1,0 +1,22 @@
+{
+	"zeron": {
+		"repository": "zeron (comet)",
+		"commit": "344436efb28298a8b122ad1a970aff6be3880524",
+		"version": "v0.2.108",
+		"files": {
+			"crates/theme/src/builtins.rs": "the zeron-dark and zeron-light variants: every colour role, derived in variant()",
+			"crates/theme/src/lib.rs": "the derivations (with_alpha, mix, ensure_contrast, best_on_color, AccentRoles::derive)",
+			"crates/ui/src/theme.rs": "radii (BUBBLE 16, PANEL 10, CONTROL 6), SPACE_XS..LG, GLASS_ALPHA .8, ink/hairline/wash, glass(), composer_surface_border, scrollbar alphas",
+			"crates/ui/src/typography.rs": "Geist and Geist Mono, the 16 px rem base, the code and terminal sizes",
+			"crates/ui/src/markdown/render.rs": "heading and body metrics the type scale's upper steps follow",
+			"crates/ui/src/popover.rs": "CARD_RADIUS 12, MENU_ITEM_RADIUS 7, PICKER_ROW_HEIGHT 32",
+			"crates/ui/src/composer.rs": "COMPOSER_RADIUS 26",
+			"crates/ui/src/motion.rs": "the curves and specs behind motion.* and zeron.motion.*"
+		}
+	},
+	"sen": {
+		"example": "crates/zgx-script/examples/composer_states/states.luau",
+		"what": "the composer states' structure and motion; its warm palette is not used"
+	},
+	"icons": "lucide, as crates/zgx-script/examples/frame_profiler/icons.luau and composer_states/states.luau carry them, plus a few more"
+}

@@ -36,8 +36,35 @@ pub fn decode_image(bytes: &[u8]) -> Result<Arc<ImageData>, GpuError> {
         .map(Arc::new)
         .map_err(|e| GpuError(e.into()))
 }
+/// The fonts SVG text is set in: those the app registered (`FontData`),
+/// the first registered family standing for the generic ones.
+#[cfg(feature = "svg-text")]
+static SVG_FONTS: std::sync::Mutex<Option<Arc<resvg::usvg::fontdb::Database>>> =
+    std::sync::Mutex::new(None);
+/// Make `bytes` (a font file) available to SVG text, as `FontData::install`
+/// does to the app's.
+#[cfg(feature = "svg-text")]
+pub(crate) fn add_svg_font(bytes: &Arc<[u8]>) {
+    let mut fonts = SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut db = fonts.as_deref().cloned().unwrap_or_default();
+    let first = db.is_empty();
+    let ids = db.load_font_source(resvg::usvg::fontdb::Source::Binary(Arc::new(bytes.clone())));
+    if first
+        && let Some(family) = ids
+            .first()
+            .and_then(|id| db.face(*id))
+            .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+    {
+        db.set_sans_serif_family(family.clone());
+        db.set_serif_family(family);
+    }
+    *fonts = Some(Arc::new(db));
+}
+#[cfg(not(feature = "svg-text"))]
+pub(crate) fn add_svg_font(_: &Arc<[u8]>) {}
 /// Rasterize an SVG at the requested physical size. External resources are disabled.
-/// SVG text needs conversion to outlines; the lightweight SVG dependency disables fonts.
+/// Its text is set in the app's fonts with the `svg-text` feature (none
+/// without: the lightweight SVG dependency has no fonts).
 pub fn decode_svg(bytes: &[u8], width: u32, height: u32) -> Result<Arc<ImageData>, GpuError> {
     if bytes.len() > 4 * 1024 * 1024
         || width == 0
@@ -119,6 +146,17 @@ fn render_svg(
 ) -> Result<(), GpuError> {
     let mut options = resvg::usvg::Options::default();
     options.image_href_resolver.resolve_string = Box::new(|_, _| None);
+    #[cfg(feature = "svg-text")]
+    if let Some(fonts) = SVG_FONTS.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if let Some(family) = fonts
+            .faces()
+            .next()
+            .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+        {
+            options.font_family = family;
+        }
+        options.fontdb = fonts;
+    }
     let tree =
         resvg::usvg::Tree::from_data(bytes, &options).map_err(|e| GpuError(e.to_string()))?;
     let transform = contain(tree.size().width(), tree.size().height(), width, height);
@@ -245,6 +283,23 @@ mod tests {
                 [0, 255, 255, 0]
             );
         }
+    }
+    /// SVG text is set in the fonts the app registered: a label with none
+    /// draws nothing, and once a font is registered it shows.
+    #[cfg(feature = "svg-text")]
+    #[test]
+    fn svg_text_is_set_in_the_registered_fonts() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="24"><text x="2" y="18" font-family="Geist" font-size="16" fill="black">Hi</text></svg>"#;
+        let ink =
+            |image: &zgx::image::ImageData| image.pixels().chunks(4).filter(|p| p[3] > 0).count();
+        let font = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fonts/GeistVariable-subset.ttf"
+        ))
+        .unwrap();
+        super::add_svg_font(&std::sync::Arc::from(font));
+        let image = super::decode_svg(svg, 64, 24).unwrap();
+        assert!(ink(&image) > 20, "the label is drawn");
     }
     /// A format left out fails to decode, with an error naming the feature
     /// that brings it back.

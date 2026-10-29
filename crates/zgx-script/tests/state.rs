@@ -611,6 +611,60 @@ fn timers_fire_on_their_clock_and_stop() {
     assert_eq!(h.text("out"), "3 1", "every stopped at 3, after fired once");
 }
 
+#[test]
+fn after_zero_runs_once_the_update_has_run_whatever_the_clock_says() {
+    // A view hands work to `ui.after(0, …)` (Zeron's canvas sending its
+    // first message as the thread opens): it runs before the next frame
+    // however fast frames come, not once a millisecond has passed.
+    let mut h = Harness::inline(
+        r#"local n = ui.state("n", 0)
+        return ui.column {
+            ui.button { id = "go", on_click = function()
+                ui.after(0, function() n:set(n:peek() + 1) end)
+            end, "go" },
+            ui.text { "{n}", id = "out" } }"#,
+    );
+    for i in 1..=20 {
+        h.click("go");
+        h.frame();
+        assert_eq!(h.text("out"), i.to_string(), "ran before the frame");
+    }
+}
+
+#[test]
+fn a_clock_ticks_on_its_own_boundaries_without_the_script() {
+    let mut h = Harness::inline(
+        r#"local start = ui.now() - 61000
+        local elapsed = ui.clock { since = start }
+        local word = ui.clock { since = start, every = 20, cycle = { "a", "b", "c" }, offset = 1 }
+        local long = ui.clock { since = ui.now() - (2 * 86400 + 3 * 3600) * 1000 }
+        return ui.column {
+            ui.text { elapsed, id = "elapsed" },
+            ui.text { word, id = "word" },
+            ui.text { long, id = "long" },
+        }"#,
+    );
+    // A minute and a second in: two units at most.
+    assert!(
+        ["1m 1s", "1m 2s"].contains(&h.text("elapsed").as_str()),
+        "{}",
+        h.text("elapsed")
+    );
+    assert_eq!(h.text("long"), "2d 3h");
+    let calls = h.calls();
+    // It moves on by itself, at its next second.
+    let ticked = h.wait_until(|h| !["1m 1s"].contains(&h.text("elapsed").as_str()));
+    assert!(ticked, "the clock ticked: {}", h.text("elapsed"));
+    // The words go round from the offset, every 20 ms.
+    let mut seen = std::collections::HashSet::new();
+    h.wait_until(|h| {
+        seen.insert(h.text("word"));
+        seen.len() == 3
+    });
+    assert_eq!(seen.len(), 3, "every word in turn: {seen:?}");
+    assert_eq!(h.calls(), calls, "no script ran as it ticked");
+}
+
 /// Items converted for scripts per `set_key` on one row of a list of `n`
 /// rows that a filter computed and a list of its rows read.
 fn converted_per_row_write(n: usize) -> u64 {

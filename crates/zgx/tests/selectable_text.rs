@@ -595,6 +595,25 @@ fn the_inactive_window_colour_and_copy_text_spacing() {
     );
 }
 
+#[test]
+fn views_hear_the_window_go_to_the_back_and_come_forward() {
+    let mut ui = Ui::new(400., 300.);
+    let heard = Rc::new(Cell::new(None));
+    let seen = heard.clone();
+    ui.mount(component(move |cx| {
+        let active = cx.service::<zgx::input::WindowActive>().0.clone();
+        cx.retain(cx.runtime().effect(move || seen.set(Some(active.get()))));
+        text("Body")
+    }));
+    ui.prepare_frame();
+    assert_eq!(heard.get(), Some(true), "active until the host says not");
+    ui.set_window_active(false);
+    assert_eq!(heard.get(), Some(false));
+    assert!(!ui.window_active().get());
+    ui.set_window_active(true);
+    assert_eq!(heard.get(), Some(true));
+}
+
 fn rows(ui: &mut Ui, offset: zgx::reactive::Signal<f32>) -> zgx::compose::ViewHandle {
     let handle = ui.mount(
         column()

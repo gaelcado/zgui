@@ -141,6 +141,13 @@ pub(crate) fn register(
     shown
 }
 
+/// What `root`'s scroll view (or list) shows of its stretch.
+pub(crate) fn shown(ui: &Ui, root: NodeId) -> Option<Signal<f32>> {
+    let state = ui.elastic_state().borrow();
+    let (_, view) = state.views.iter().rev().find(|(node, _)| *node == root)?;
+    Some(view.upgrade()?.shown.clone())
+}
+
 fn active(ui: &Ui) -> Option<Rc<Elastic>> {
     ui.elastic_state().borrow().active.as_ref()?.upgrade()
 }

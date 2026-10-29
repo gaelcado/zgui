@@ -1,0 +1,22 @@
+# Zeron's LaTeX math layout (comet's crates/zatex at v0.2.129), as Zeron
+# typesets formulas: `ui.math` in zgx-script (its `math` feature).
+[package]
+name = "zatex"
+version = "0.2.129"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Fast, low-memory LaTeX math layout over any OpenType math font"
+
+# Parser + TeX layout driven entirely by the font's MATH table, emitting a flat
+# display list (glyph ids and rules). UI-free: hosts paint the glyph outlines.
+[dependencies]
+ttf-parser = "0.25.1"
+
+[features]
+# Six math faces compiled in (`zatex::bundled`), ~4 MB of read-only data;
+# a face is only parsed (and its pages touched) once something uses it.
+bundled = []
+
+# Its own workspace: a path dependency outside zgx's.
+[workspace]

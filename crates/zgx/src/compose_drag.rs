@@ -40,7 +40,7 @@ impl View {
                     button: PointerButton::Primary,
                 } if !cx.capture_requested() => {
                     origin = Some((x, y));
-                    cx.capture_pointer();
+                    cx.capture_for_drag();
                 }
                 InputEvent::PointerMove { x, y } => {
                     let far = cx.drag_threshold();

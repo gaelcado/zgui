@@ -1705,6 +1705,9 @@ fn apply_resolved(
     if let Some(value) = rare.fade_overflow {
         style.fade_overflow = value;
     }
+    if let Some(value) = rare.fade_eased {
+        style.fade_eased = value;
+    }
     if let Some(value) = rare.snap {
         style.snap = value;
     }

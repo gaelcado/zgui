@@ -94,6 +94,56 @@ fn a_segmented_control_is_a_radio_group_the_arrows_choose_in() {
 }
 
 #[test]
+fn a_segmented_controls_arrows_go_round_past_its_ends() {
+    let mut ui = Ui::new(400., 100.);
+    let chosen = ui.signal(2usize);
+    let view = ui.mount(row().child(segmented("View", chosen.clone(), ["Day", "Week", "Month"])));
+    ui.prepare_frame();
+    let radios = with_role(&ui, &view, Role::RadioButton);
+    ui.input.focus(&ui.scene, Some(radios[2]));
+    key(&mut ui, Key::ArrowRight);
+    assert_eq!(
+        chosen.get(),
+        0,
+        "past the last, the first (WAI-ARIA's radios)"
+    );
+    key(&mut ui, Key::ArrowLeft);
+    assert_eq!(chosen.get(), 2);
+}
+
+#[test]
+fn segments_drawn_by_the_app_are_the_groups_radios() {
+    let mut ui = Ui::new(400., 100.);
+    let chosen = ui.signal(0usize);
+    let names = ["List", "Grid"];
+    let view = ui.mount(
+        row().child(segmented_with("Layout", chosen.clone(), 2, |i, b| {
+            // An icon's face, no text: the app names it.
+            b.id(names[i])
+                .accessible_label(names[i])
+                .w(28.)
+                .h(24.)
+                .child(div().w(14.).h(14.))
+        })),
+    );
+    ui.prepare_frame();
+    let radios = with_role(&ui, &view, Role::RadioButton);
+    assert_eq!(radios.len(), 2);
+    assert_eq!(
+        radios[1],
+        view.find("Grid").unwrap(),
+        "the app's own button"
+    );
+    assert_eq!(ui.semantics.borrow().get(radios[1]).unwrap().label, "Grid");
+    assert_eq!(ui.scene.borrow().bounds(radios[1]).width, 28.);
+    click(&mut ui, radios[1]);
+    assert_eq!(chosen.get(), 1);
+    assert_eq!(checked(&ui, radios[1]), Some(true));
+    key(&mut ui, Key::ArrowRight);
+    assert_eq!(chosen.get(), 0, "and its arrows");
+}
+
+#[test]
 fn a_stepper_steps_by_key_and_button_and_takes_what_is_typed() {
     let mut ui = Ui::new(300., 100.);
     let value = ui.signal(5.);

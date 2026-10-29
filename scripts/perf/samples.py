@@ -47,8 +47,9 @@ def main():
                 if cell.tag == 'thread':
                     name = cell.attrib.get('fmt', '')
                 elif cell.tag == 'tagged-backtrace':
+                    # Newer xctrace puts the frames in it directly.
                     found = cell.find('backtrace')
-                    stack = resolve(found) if found is not None else None
+                    stack = resolve(found) if found is not None else cell
                 elif cell.tag == 'backtrace':
                     stack = cell
             if thread and (name is None or thread not in name):

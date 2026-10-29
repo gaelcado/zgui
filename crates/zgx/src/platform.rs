@@ -1,5 +1,6 @@
 //! What an app reaches on the machine beyond its window: the clipboard (text,
-//! HTML and images) and the file dialogs. A desktop host provides it to the components it renders
+//! HTML and images), the file dialogs, the trackpad's haptics, sounds and
+//! the desktop's banners. A desktop host provides it to the components it renders
 //! (`compose::provide`, as `Context::try_service::<PlatformService>()`);
 //! headless runs have none, and tests provide a fake.
 use std::{future::Future, path::PathBuf, pin::Pin, rc::Rc, sync::Arc};
@@ -22,6 +23,89 @@ pub struct FilePicker {
     pub multiple: bool,
 }
 
+/// A tap of the trackpad under the user's finger (`Platform::haptic`), as
+/// macOS names its patterns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Haptic {
+    /// A control moved to its next detent: a slider's step, a stepper.
+    Level,
+    /// Something snapped into place: a dragged item settling, a guide met.
+    Alignment,
+    /// Any other feedback.
+    Generic,
+}
+
+impl Haptic {
+    /// The pattern a name gives (`"level"`, `"alignment"`, `"generic"`).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "level" => Self::Level,
+            "alignment" => Self::Alignment,
+            "generic" => Self::Generic,
+            _ => return None,
+        })
+    }
+}
+
+/// A desktop banner (`Platform::notify`): the system's notification, the
+/// app's name and icon on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Notification {
+    /// Its first line.
+    pub title: String,
+    /// What it says under the title.
+    pub body: String,
+    /// What a click on it hands back ([`notification_clicked`]); empty for
+    /// a banner the app does not follow.
+    pub id: String,
+}
+
+type ClickListener = Rc<dyn Fn(&str)>;
+thread_local! {
+    static CLICK_LISTENERS: std::cell::RefCell<Vec<(u64, ClickListener)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static NEXT_CLICK_LISTENER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A banner was clicked: the platform calls this with its
+/// [`Notification::id`], on the UI thread, and every listener
+/// ([`on_notification_click`]) hears it.
+pub fn notification_clicked(id: &str) {
+    if id.is_empty() {
+        return;
+    }
+    let listeners: Vec<ClickListener> =
+        CLICK_LISTENERS.with(|l| l.borrow().iter().map(|(_, f)| f.clone()).collect());
+    for listener in listeners {
+        listener(id);
+    }
+}
+
+/// Hear each banner clicked (its [`Notification::id`]) until the
+/// subscription drops. A platform that cannot tell (a banner shown by
+/// another program) never calls it.
+pub fn on_notification_click(listener: impl Fn(&str) + 'static) -> NotificationClicks {
+    let id = NEXT_CLICK_LISTENER.with(|next| {
+        next.set(next.get() + 1);
+        next.get()
+    });
+    CLICK_LISTENERS.with(|l| l.borrow_mut().push((id, Rc::new(listener))));
+    NotificationClicks(id)
+}
+
+/// Keeps an [`on_notification_click`] listener; dropping it stops it.
+pub struct NotificationClicks(u64);
+impl Drop for NotificationClicks {
+    fn drop(&mut self) {
+        let id = self.0;
+        let _ = CLICK_LISTENERS.try_with(|l| {
+            if let Ok(mut l) = l.try_borrow_mut() {
+                l.retain(|(own, _)| *own != id);
+            }
+        });
+    }
+}
+
 /// The clipboard, the system's URL handler and file dialogs, as a desktop
 /// host provides them (see the module docs).
 pub trait Platform {
@@ -34,6 +118,33 @@ pub trait Platform {
     fn open_url(&self, url: &str) -> bool {
         let _ = url;
         false
+    }
+    /// Tap the trackpad now; whether the platform could. A machine without a
+    /// haptic trackpad (and every platform but macOS) feels nothing.
+    fn haptic(&self, haptic: Haptic) -> bool {
+        let _ = haptic;
+        false
+    }
+    /// Play the sound file at `path` (a WAV, an AIFF, an MP3) now, over what
+    /// it played before; whether the platform could. The same file played
+    /// again starts over. None plays nothing.
+    fn play_sound(&self, path: &std::path::Path) -> bool {
+        let _ = path;
+        false
+    }
+    /// Show `notification` as the desktop's banner, even while the app is
+    /// frontmost (whether to is the app's to decide, with `app_active`);
+    /// whether it was handed to the system. None shows nothing. A click on
+    /// it calls [`notification_clicked`] with its id, where the platform
+    /// tells.
+    fn notify(&self, notification: &Notification) -> bool {
+        let _ = notification;
+        false
+    }
+    /// Whether the app is frontmost: one of its windows has the keyboard.
+    /// A platform that cannot tell says it is.
+    fn app_active(&self) -> bool {
+        true
     }
     /// The misspelled words in `text`, as UTF-8 byte ranges, by the system's
     /// spelling checker (`View::spellcheck`). None checks nothing.
@@ -95,3 +206,21 @@ pub trait Platform {
 /// The platform, as a service components find.
 #[derive(Clone)]
 pub struct PlatformService(pub Rc<dyn Platform>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_banner_s_click_reaches_its_listeners_while_they_listen() {
+        let heard = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let into = heard.clone();
+        let listening = on_notification_click(move |id| into.borrow_mut().push(id.to_owned()));
+        notification_clicked("chat:a1");
+        // A banner without an id is not followed.
+        notification_clicked("");
+        drop(listening);
+        notification_clicked("chat:a2");
+        assert_eq!(*heard.borrow(), ["chat:a1"]);
+    }
+}

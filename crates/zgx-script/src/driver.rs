@@ -533,7 +533,8 @@ pub fn type_into(ui: &mut Ui, node: NodeId, text: &str) {
     click_at(ui, bounds);
     ui.dispatch(InputEvent::Text(text.into()));
 }
-/// Press and release `key` with `modifiers`, wherever focus is.
+/// Press and release `key` with `modifiers`, wherever focus is; then the
+/// modifiers are let go too (a click after ⌘E is a plain one).
 pub fn press(ui: &mut Ui, key: Key, modifiers: Modifiers) {
     ui.dispatch(InputEvent::KeyDown {
         key: key.clone(),
@@ -541,6 +542,7 @@ pub fn press(ui: &mut Ui, key: Key, modifiers: Modifiers) {
         repeat: false,
     });
     ui.dispatch(InputEvent::KeyUp { key, modifiers });
+    ui.input.set_modifiers(Modifiers::default());
 }
 /// Scroll the viewport under `node`'s middle by `dy` points (down is
 /// positive).

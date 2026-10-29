@@ -618,7 +618,7 @@ fn data_store(profile: &WebProfile, mtm: MainThreadMarker) -> Retained<WKWebsite
     })
 }
 /// Persistent stores of their own need macOS 14.
-fn named_stores_supported() -> bool {
+pub(crate) fn named_stores_supported() -> bool {
     // SAFETY: NSObject's `+respondsToSelector:`, returning BOOL.
     unsafe {
         msg_send![objc2::class!(WKWebsiteDataStore), respondsToSelector: sel!(dataStoreForIdentifier:)]

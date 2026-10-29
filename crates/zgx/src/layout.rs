@@ -132,6 +132,10 @@ impl InlineEdges {
 pub struct LayoutOptions {
     /// Flex, grid, or out of layout (CSS `display`).
     pub display: Option<Display>,
+    /// Shown: merged over options that hide the view (`Display::None`), it
+    /// takes their display back to the default. A hover or a variant can
+    /// show what the base hides without knowing its display.
+    pub shown: Option<bool>,
     /// `Some(false)` keeps its room in layout but paints none of it and
     /// takes no input (CSS `visibility: hidden`).
     pub visible: Option<bool>,
@@ -284,9 +288,16 @@ impl LayoutOptions {
     }
     /// Take each option `other` sets, keeping the rest.
     pub fn merge(&mut self, other: Self) {
+        if other.shown == Some(true)
+            && other.display.is_none()
+            && self.display == Some(Display::None)
+        {
+            self.display = None;
+        }
         macro_rules! merge{($($field:ident),* $(,)?)=>{$(if other.$field.is_some(){self.$field=other.$field;})*};}
         merge!(
             display,
+            shown,
             visible,
             wrap,
             reverse,

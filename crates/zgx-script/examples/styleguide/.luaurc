@@ -1,0 +1,9 @@
+{
+	"languageMode": "strict",
+	"aliases": {
+		"kit": "./kit",
+		"pages": "./pages",
+		"shell": "./shell",
+		"lib": "./lib"
+	}
+}

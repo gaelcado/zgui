@@ -1,0 +1,218 @@
+{
+	"name": "winter-dark-blue",
+	"type": "dark",
+	"extends": "zgx-dark",
+	"tokens": {
+		"background": "#011627",
+		"surface": {
+			"sunken": "#011627",
+			"base": "#01111d",
+			"raised": "#0b253a",
+			"overlay": "#082032"
+		},
+		"text": {
+			"primary": "#d6deeb",
+			"secondary": "#8ca6ba",
+			"tertiary": "#5f7e97",
+			"disabled": "#d6deeb61"
+		},
+		"border": "#ffffff1a",
+		"border.subtle": "#ffffff0f",
+		"border.strong": "#ffffff2e",
+		"accent": "#219fd5",
+		"accent.hover": "#5fbae1",
+		"accent.text": "#000000",
+		"danger": "#ef5350",
+		"warning": "#ffca28",
+		"success": "#22da6e",
+		"info": "#87aff4",
+		"selection": "#219fd559",
+		"selection.item": "#ebebeb1c",
+		"focus.ring": "{border.strong}",
+		"hover": "#ffffff1c",
+		"pressed": "#219fd52e",
+		"scrollbar": {
+			"thumb": "#d6deeb4c",
+			"thumb.active": "#d6deeb8c",
+			"track": "#00000000"
+		},
+		"glass": {
+			"tint": "#01111dcc",
+			"blur": 24
+		},
+		"font": {
+			"sans": "Geist",
+			"mono": "Geist Mono",
+			"size": {
+				"xs": 11,
+				"sm": 12,
+				"md": 13,
+				"lg": 14,
+				"xl": 16,
+				"xxl": 19
+			},
+			"line": {
+				"xs": 16,
+				"sm": 16,
+				"md": 18,
+				"lg": 22,
+				"xl": 24,
+				"xxl": 27
+			},
+			"weight": {
+				"regular": 400,
+				"medium": 500,
+				"semibold": 600,
+				"bold": 700
+			}
+		},
+		"radius": {
+			"sm": 4,
+			"md": 6,
+			"lg": 10,
+			"xl": 16,
+			"full": 9999
+		},
+		"space": {
+			"1": 4,
+			"2": 8,
+			"3": 12,
+			"4": 16,
+			"5": 24,
+			"6": 32,
+			"7": 48,
+			"8": 64
+		},
+		"control.height": 32,
+		"shadow": {
+			"sm": "0 1 2 0 #00000029",
+			"md": "0 4 12 0 #00000059",
+			"lg": "0 16 40 0 #00000080"
+		},
+		"motion": {
+			"duration": {
+				"fast": 140,
+				"normal": 180,
+				"slow": 320
+			},
+			"ease": {
+				"standard": "cubicBezier(0.2, 0, 0, 1)",
+				"enter": "cubicBezier(0.16, 1, 0.3, 1)",
+				"exit": "cubicBezier(0.25, 0.1, 0.25, 1)"
+			}
+		},
+		"button.bg": "{surface.raised}",
+		"button.hover": "alpha({text.primary}, 0.08)",
+		"button.pressed": "alpha({text.primary}, 0.12)",
+		"input.bg": "#0b253ab8",
+		"menu.bg": "{surface.overlay}",
+		"zeron": {
+			"sidebar": "#ebebeb0d",
+			"card": "#071d2e",
+			"dialog": "#081e30",
+			"input.border": "#bdc7d117",
+			"solid": "#ebebef",
+			"on_solid": "#000000",
+			"danger.muted": "#e87a7b",
+			"danger.strong": "#cb4744",
+			"danger.text": "#ffffff",
+			"danger.hover": "#bb413f",
+			"danger.pressed": "#ab3c39",
+			"info.strong": "#5b76a5",
+			"info.text": "#ffffff",
+			"info.hover": "#546d98",
+			"info.pressed": "#4c638b",
+			"warning.strong": "#ffca28",
+			"warning.text": "#000000",
+			"warning.hover": "#ffce39",
+			"warning.pressed": "#ffd24a",
+			"success.strong": "#22da6e",
+			"success.text": "#000000",
+			"success.hover": "#34dd7a",
+			"success.pressed": "#45e085",
+			"warning.muted": "#f5cf59",
+			"success.muted": "#4fdb8d",
+			"accent": {
+				"wash": "#219fd538",
+				"selection": "#219fd559"
+			},
+			"ink": {
+				"1": "#ffffff0a",
+				"2": "#ffffff0f",
+				"3": "#ffffff14",
+				"4": "#ffffff1c",
+				"5": "#ffffff29",
+				"6": "#ffffff38"
+			},
+			"diff": {
+				"add": "#22da6e",
+				"delete": "#ef5350",
+				"hunk": "#219fd514"
+			},
+			"cursor": "#d6deeb66",
+			"scrim": "#00000099",
+			"code.wash": "#219fd538",
+			"claude": "#d97757",
+			"glass": {
+				"active": "#ffffff1c",
+				"hover": "#ffffff0d"
+			},
+			"radius": {
+				"card": 12,
+				"item": 7,
+				"composer": 26,
+				"button": 8
+			},
+			"control": {
+				"sm": 26,
+				"lg": 38
+			},
+			"font.size.micro": 10,
+			"motion": {
+				"hover": 150,
+				"menu_in": 140,
+				"menu_out": 100,
+				"dialog_in": 180,
+				"collapse": 180,
+				"resize": 200,
+				"glyph": 280,
+				"resort": 260,
+				"fade_in": 500,
+				"tab_slide": 150,
+				"scroll_glide": 500,
+				"morph": 420,
+				"roll": 550
+			},
+			"solid.hover": "#cfd1d7",
+			"solid.pressed": "#bcc0c7",
+			"terminal": {
+				"fg": "#d6deeb",
+				"selection": "#394957",
+				"ansi": {
+					"0": "#011627",
+					"1": "#ef5350",
+					"2": "#22da6e",
+					"3": "#f7ecb5",
+					"4": "#219fd5",
+					"5": "#c792ea",
+					"6": "#80cbc4",
+					"7": "#d6deeb",
+					"8": "#5f7e97",
+					"9": "#ef9a9a",
+					"10": "#addb67",
+					"11": "#ffcb6b",
+					"12": "#82aaff",
+					"13": "#c792ea",
+					"14": "#7fdbca",
+					"15": "#ffffff"
+				}
+			}
+		}
+	},
+	"_source": {
+		"family": "winter-is-coming",
+		"name": "Winter is Coming Dark Blue",
+		"treatment": "Opaque",
+		"from": "comet crates/theme/src/builtins.rs"
+	}
+}

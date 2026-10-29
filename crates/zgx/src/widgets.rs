@@ -137,6 +137,8 @@ pub struct EditorHandle {
     typography: Rc<RefCell<(Color, f32, FontStyle)>>,
     wrap: Rc<Cell<bool>>,
     line_numbers: Rc<Cell<bool>>,
+    /// The box's height follows its text's (`set_auto_height`).
+    auto_height: Rc<Cell<bool>>,
     preferred_x: Rc<Cell<Option<f32>>>,
     text: NodeId,
     scene: Rc<RefCell<Scene>>,
@@ -153,6 +155,10 @@ struct EditorHint {
     value: EditorValue,
     /// The placeholder and its colour (`None`: the theme's `muted`).
     placeholder: RefCell<Option<(std::sync::Arc<str>, Option<Color>)>>,
+    /// What completing would add (`set_ghost`), and its colour; and the
+    /// node drawing it after the text's end, made when one first shows.
+    ghost: RefCell<Option<(std::sync::Arc<str>, Option<Color>)>>,
+    ghost_node: Cell<Option<NodeId>>,
     select_on_focus: Cell<bool>,
     /// A password field: its text shows masked and never leaves it.
     secure: Cell<bool>,
@@ -180,6 +186,48 @@ struct EditorHint {
     /// when the first shows.
     themed: Cell<u8>,
     theme_watch: Cell<Option<Box<(u8, Effect)>>>,
+    /// References drawn as chips (`set_chips`): the characters that start
+    /// one, and the chip's fill; and the chips the text holds, which stay
+    /// chips when the space after one goes.
+    chips: RefCell<Option<(String, Color)>>,
+    known_chips: RefCell<std::collections::HashSet<String>>,
+    /// Each chip's fill as last drawn, and the reference it holds: what
+    /// the pointer is over (`EditorHandle::chip_at`).
+    chip_spots: RefCell<Vec<(NodeId, String)>>,
+    /// `set_fits`: written whether the text fits on one line, and how much
+    /// narrower than the editor that line is.
+    fits: RefCell<Option<(Signal<bool>, f32)>>,
+    /// What an editor showing its text otherwise adds (`ShownHint`).
+    shown: std::cell::OnceCell<Box<ShownHint>>,
+}
+/// What an editor that shows its text otherwise than as written adds to
+/// its hint (`set_projector`, `set_chip_look`), and its own edits
+/// (`set_line_edits`, `set_paste_filter`): made when one is first set.
+#[derive(Default)]
+struct ShownHint {
+    projector: RefCell<Option<crate::editor_projection::Projector>>,
+    chip_look: RefCell<Option<crate::editor_projection::ChipLook>>,
+    /// Each chip's look, by its text, as it was asked.
+    looks: RefCell<std::collections::HashMap<String, Option<crate::editor_projection::ChipShown>>>,
+    edits: RefCell<Option<Rc<dyn crate::editor_projection::LineEdits>>>,
+    paste: RefCell<Option<crate::editor_projection::PasteFilter>>,
+    /// The last projection, the chips it was made with, and their icons
+    /// in it (by their bytes).
+    last: RefCell<Option<Rc<crate::editor_projection::Projected>>>,
+    last_chips: RefCell<Vec<std::ops::Range<usize>>>,
+    icons: RefCell<Vec<(std::ops::Range<usize>, std::sync::Arc<crate::svg::SvgData>)>>,
+    /// Its last layout, and what it was for.
+    layout: RefCell<Option<ShownLayout>>,
+    /// The icons drawn, in the chip layer.
+    icon_nodes: RefCell<Vec<NodeId>>,
+}
+struct ShownLayout {
+    map: Rc<crate::editor_projection::Projected>,
+    size: u32,
+    width: Option<u32>,
+    font: FontStyle,
+    revision: u64,
+    layout: Rc<dyn TextLayout>,
 }
 /// Stops an editor's theme watch (`EditorHint::watch_theme`) with its node.
 struct ThemeUnwatch(Weak<EditorHint>);
@@ -225,6 +273,8 @@ struct CodeHint {
     /// Where it was last drawn, and last told.
     caret_drawn: Cell<Option<Caret>>,
     caret_told: Cell<Option<Caret>>,
+    /// Its gutter's marks, plate, presses and card (`set_gutter_marks`, …).
+    gutter: std::cell::OnceCell<Box<crate::editor_gutter::Gutter>>,
 }
 impl Drop for CodeHint {
     /// A long text's last layout and its line cache hold each other.
@@ -239,6 +289,8 @@ impl EditorHint {
         Self {
             value,
             placeholder: RefCell::default(),
+            ghost: RefCell::default(),
+            ghost_node: Cell::default(),
             select_on_focus: Cell::default(),
             secure: Cell::default(),
             input_mode: Cell::default(),
@@ -247,10 +299,116 @@ impl EditorHint {
             composition_layer: Cell::default(),
             reveal: Cell::default(),
             reveal_at: Cell::default(),
+            chips: RefCell::default(),
+            known_chips: RefCell::default(),
+            chip_spots: RefCell::default(),
+            fits: RefCell::default(),
             code: std::cell::OnceCell::default(),
             themed: Cell::default(),
             theme_watch: Cell::default(),
+            shown: std::cell::OnceCell::default(),
         }
+    }
+    fn shown_made(&self) -> &ShownHint {
+        self.shown.get_or_init(Default::default)
+    }
+    /// What shows of `text` with `selection` (`set_projector`, chips' looks):
+    /// `None` while it shows as written. Asked of the projector again only
+    /// when the text or the selection's lines change.
+    fn projection(
+        &self,
+        text: &str,
+        selection: std::ops::Range<usize>,
+    ) -> Option<Rc<crate::editor_projection::Projected>> {
+        use crate::editor_projection::{
+            CHIP_TRAIL, CHIP_WELL, Projected, Projection, Replacement, lines_of,
+        };
+        let shown = self.shown.get()?;
+        if self.secure.get() || crate::editor_lines::is_long(text) {
+            return None;
+        }
+        let projector = shown.projector.borrow().clone();
+        let look = shown.chip_look.borrow().clone();
+        if projector.is_none() && look.is_none() {
+            return None;
+        }
+        let active = lines_of(text, selection);
+        let chips = if look.is_some() {
+            self.chips_in(text)
+        } else {
+            Vec::new()
+        };
+        if let Some(last) = &*shown.last.borrow()
+            && last.source == text
+            && last.active == active
+            && *shown.last_chips.borrow() == chips
+        {
+            return (!last.is_plain()).then(|| last.clone());
+        }
+        let mut projection = match &projector {
+            Some(projector) => projector(text, active.clone()),
+            None => Projection::default(),
+        };
+        let mut icons = Vec::new();
+        if let Some(look) = look {
+            let mut seen = std::collections::HashMap::new();
+            let mut chipped = Vec::new();
+            for range in &chips {
+                let token = &text[range.clone()];
+                let shown_as = {
+                    let known = shown.looks.borrow().get(token).cloned();
+                    match known {
+                        Some(known) => known,
+                        None => {
+                            let asked = look(token);
+                            shown
+                                .looks
+                                .borrow_mut()
+                                .insert(token.to_owned(), asked.clone());
+                            asked
+                        }
+                    }
+                };
+                seen.insert(token.to_owned(), shown_as.clone());
+                let Some(chip) = shown_as else { continue };
+                if chip.plain {
+                    continue;
+                }
+                if let Some(icon) = chip.icon {
+                    icons.push((range.clone(), icon));
+                }
+                let mut r = Replacement::new(
+                    range.clone(),
+                    chip.label.unwrap_or_else(|| token.to_owned()),
+                );
+                r.lead = CHIP_WELL;
+                r.trail = CHIP_TRAIL;
+                chipped.push(r);
+            }
+            // Only the chips the text holds keep their looks.
+            *shown.looks.borrow_mut() = seen;
+            if !chipped.is_empty() {
+                // A chip outranks what a projector shows over it.
+                projection.replacements.retain(|r| {
+                    !chipped
+                        .iter()
+                        .any(|c| r.range.start < c.range.end && c.range.start < r.range.end)
+                });
+                projection.replacements.extend(chipped);
+                projection.replacements.sort_by_key(|r| r.range.start);
+            }
+        }
+        let projected = Rc::new(Projected::new(text, active, projection));
+        *shown.icons.borrow_mut() = icons;
+        *shown.last_chips.borrow_mut() = chips;
+        *shown.last.borrow_mut() = Some(projected.clone());
+        (!projected.is_plain()).then_some(projected)
+    }
+    /// Where a caret moving to `at` goes: past a range shown whole (a
+    /// chip's label) to its far end.
+    fn step(&self, text: &str, at: usize, forward: bool) -> usize {
+        self.projection(text, at..at)
+            .map_or(at, |p| p.step(at, forward))
     }
     /// Redraw `root` when a theme colour it has shown in changes: one
     /// effect, made again only when it shows in another, and stopped when
@@ -317,6 +475,12 @@ impl EditorHint {
     fn code_made(&self) -> &CodeHint {
         self.code.get_or_init(Default::default)
     }
+    fn gutter(&self) -> Option<&crate::editor_gutter::Gutter> {
+        self.code()?.gutter.get().map(|gutter| &**gutter)
+    }
+    fn gutter_made(&self) -> &crate::editor_gutter::Gutter {
+        self.code_made().gutter.get_or_init(Default::default)
+    }
     /// Its long text's line cache, made the first time it is needed.
     fn line_cache(&self) -> Rc<crate::editor_lines::LineCache> {
         self.code_made()
@@ -346,6 +510,97 @@ pub struct Caret {
     pub anchor: usize,
     /// Where the caret is.
     pub focus: usize,
+}
+/// The room a one-line row needs at least: narrower, a composer opens out
+/// (composer.rs MIN_COMPACT_INPUT_WIDTH).
+pub const FITS_MIN_WIDTH: f32 = 200.;
+/// How far under the room a line must fall before it fits again
+/// (composer.rs COLLAPSE_HYSTERESIS): opening out and folding back share
+/// no boundary, so a width right at it cannot flip back and forth.
+pub const FITS_HYSTERESIS: f32 = 32.;
+/// Whether text `width` points wide (`None`: it has a line break) fits a
+/// line `room` wide, given whether it fitted before (`set_fits`).
+pub fn line_fits(fitted: bool, width: Option<f32>, room: f32) -> bool {
+    let Some(width) = width else {
+        return false;
+    };
+    if room < FITS_MIN_WIDTH {
+        return false;
+    }
+    if fitted {
+        width <= room
+    } else {
+        width < room - FITS_HYSTERESIS
+    }
+}
+impl EditorHint {
+    /// The chips in `text`: its finished references, and those that were
+    /// chips before (the space after one deleted).
+    fn chips_in(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        let Some((triggers, _)) = &*self.chips.borrow() else {
+            return Vec::new();
+        };
+        let known = self.known_chips.borrow();
+        // Those a chip's look calls plain text (asked once for each).
+        let plain = |token: &str| {
+            let Some(shown) = self.shown.get() else {
+                return false;
+            };
+            let known = shown.looks.borrow().get(token).cloned();
+            let look = match known {
+                Some(look) => look,
+                None => {
+                    let Some(ask) = shown.chip_look.borrow().clone() else {
+                        return false;
+                    };
+                    let look = ask(token);
+                    shown
+                        .looks
+                        .borrow_mut()
+                        .insert(token.to_owned(), look.clone());
+                    look
+                }
+            };
+            look.is_some_and(|l| l.plain)
+        };
+        chip_ranges(text, triggers)
+            .into_iter()
+            .filter(|(range, finished)| *finished || known.contains(&text[range.clone()]))
+            .filter(|(range, _)| !plain(&text[range.clone()]))
+            .map(|(range, _)| range)
+            .collect()
+    }
+}
+/// The references in `text` (UTF-8 byte ranges): a word that starts with
+/// one of `triggers` (at the start, after a space or an opening bracket)
+/// and holds more than the trigger; and whether it is finished (a space or
+/// a line break follows it, as a completion's pick leaves one). A no-break
+/// space joins a reference's words: a chat's title is one chip.
+pub(crate) fn chip_ranges(text: &str, triggers: &str) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut previous: Option<char> = None;
+    for (at, c) in text.char_indices() {
+        if c.is_whitespace() && !(c == '\u{a0}' && start.is_some()) {
+            if let Some(from) = start.take()
+                && at > from + 1
+            {
+                out.push((from..at, true));
+            }
+        } else if start.is_none()
+            && triggers.contains(c)
+            && previous.is_none_or(|p| p.is_whitespace() || "([{<".contains(p))
+        {
+            start = Some(at);
+        }
+        previous = Some(c);
+    }
+    if let Some(from) = start
+        && text.len() > from + 1
+    {
+        out.push((from..text.len(), false));
+    }
+    out
 }
 impl EditorHandle {
     /// The value it is bound to; edits set it.
@@ -439,6 +694,89 @@ impl EditorHandle {
         *self.hint.misspelled.borrow_mut() = ranges;
         self.refresh();
     }
+    /// Draw finished references (a word starting with one of `triggers`,
+    /// followed by a space: `@path `) as chips filled with `fill`, and
+    /// delete each whole: a backspace at a chip's end takes all of it, a
+    /// forward delete at its start too. `None` draws none.
+    pub fn set_chips(&self, chips: Option<(&str, Color)>) {
+        let chips = chips.map(|(t, c)| (t.to_owned(), c));
+        if *self.hint.chips.borrow() == chips {
+            return;
+        }
+        *self.hint.chips.borrow_mut() = chips;
+        self.refresh();
+    }
+    /// The chip (`set_chips`) under window point `(x, y)`: the reference
+    /// it holds and where its fill is drawn, in the window's points.
+    pub fn chip_at(&self, x: f32, y: f32) -> Option<(String, Rect)> {
+        let scene = self.scene.borrow();
+        self.hint
+            .chip_spots
+            .borrow()
+            .iter()
+            .filter(|(node, _)| scene.contains(*node))
+            .map(|(node, token)| (token, scene.transformed_bounds(*node)))
+            .find(|(_, at)| {
+                at.width > 0.
+                    && x >= at.x
+                    && x < at.x + at.width
+                    && y >= at.y
+                    && y < at.y + at.height
+            })
+            .map(|(token, at)| (token.clone(), at))
+    }
+    /// Show the text otherwise than as written (`Projector`): ranges
+    /// hidden or shown as other text, faces over ranges. Its carets, hits
+    /// and selections stay the text's, mapped through what shows; it shows
+    /// as written while a composition is open, and when it is long
+    /// (`editor_lines`) or secure.
+    pub fn set_projector(&self, projector: Option<crate::editor_projection::Projector>) {
+        let shown = self.hint.shown_made();
+        // The same one again (its colours asked again, unchanged): nothing
+        // to show anew.
+        let same = match (&*shown.projector.borrow(), &projector) {
+            (Some(now), Some(new)) => Rc::ptr_eq(now, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        *shown.projector.borrow_mut() = projector;
+        shown.last.borrow_mut().take();
+        self.refresh();
+    }
+    /// Show each chip (`set_chips`) as `look` says: its label in place of
+    /// its text, after a well its icon is painted in. The text keeps the
+    /// reference as written; a caret steps over a chip whole.
+    pub fn set_chip_look(&self, look: Option<crate::editor_projection::ChipLook>) {
+        let shown = self.hint.shown_made();
+        *shown.chip_look.borrow_mut() = look;
+        shown.looks.borrow_mut().clear();
+        shown.last.borrow_mut().take();
+        self.refresh();
+    }
+    /// Make line breaks and Tab edit the text's structure as `edits` says
+    /// (a Markdown draft's lists continuing, indenting and outdenting).
+    pub fn set_line_edits(&self, edits: Option<Rc<dyn crate::editor_projection::LineEdits>>) {
+        *self.hint.shown_made().edits.borrow_mut() = edits.filter(|_| self.multiline);
+    }
+    /// Pass what is pasted through `filter` before it goes in (references
+    /// resolved): one undo step all the same.
+    pub fn set_paste_filter(&self, filter: Option<crate::editor_projection::PasteFilter>) {
+        *self.hint.shown_made().paste.borrow_mut() = filter;
+    }
+    /// Write into `fits` whether the text fits on one line `inset` points
+    /// narrower than the editor's text box: a
+    /// composer folding into one row while its draft is short and opening
+    /// out as it grows. A line break never fits, nor a line narrower than
+    /// `FITS_MIN_WIDTH`; once it does not fit, it must fall
+    /// `FITS_HYSTERESIS` under the width before it does again. The signal
+    /// is written only when that changes.
+    pub fn set_fits(&self, fits: Signal<bool>, inset: f32) {
+        *self.hint.fits.borrow_mut() = Some((fits, inset));
+        self.refresh();
+    }
     /// The misspelled word the selection is in (or the caret touches).
     pub(crate) fn misspelling_at_selection(&self) -> Option<std::ops::Range<usize>> {
         let (anchor, focus) = self.selection();
@@ -503,6 +841,31 @@ impl EditorHandle {
         *current = next;
         drop(current);
         self.refresh();
+    }
+    /// A completion's rest, shown faint after the text while the caret
+    /// rests at its end with nothing selected (a single-line editor's: a
+    /// path's folder, a command's name), coloured `color` (`None`: the
+    /// theme's `muted`). It is not part of the value, sizes nothing, and is
+    /// the app's to accept (Tab writing the completed text).
+    pub fn set_ghost(&self, text: Option<&str>, color: Option<Color>) {
+        let next = text
+            .filter(|text| !text.is_empty())
+            .map(|text| (std::sync::Arc::<str>::from(text), color));
+        let mut current = self.hint.ghost.borrow_mut();
+        if *current == next {
+            return;
+        }
+        *current = next;
+        drop(current);
+        self.refresh();
+    }
+    /// The ghost, if any.
+    pub fn ghost(&self) -> Option<String> {
+        self.hint
+            .ghost
+            .borrow()
+            .as_ref()
+            .map(|(text, _)| text.to_string())
     }
     /// The placeholder, if any.
     pub fn placeholder(&self) -> Option<String> {
@@ -592,6 +955,84 @@ impl EditorHandle {
             self.refresh();
         }
     }
+    /// Mark lines in a numbered editor's gutter (review comments): each
+    /// shows its look's glyph on a well in its number's place, and follows
+    /// its line through edits (`TextEditor::set_anchors`; `on_gutter_move`
+    /// tells where edits took them). A mark already on the line it is
+    /// given keeps its place; a line past the text's end is taken up as
+    /// the text grows to it.
+    pub fn set_gutter_marks(&self, marks: &[crate::editor_gutter::GutterMark]) {
+        let changed = {
+            let Ok(mut editor) = self.editor.try_borrow_mut() else {
+                return;
+            };
+            self.hint.gutter_made().set_marks(&mut editor, marks)
+        };
+        if changed {
+            self.refresh();
+        }
+    }
+    /// The gutter's marks, on the lines edits took them to.
+    pub fn gutter_marks(&self) -> Vec<crate::editor_gutter::GutterMark> {
+        self.hint
+            .gutter()
+            .map(|gutter| gutter.marks_now(&self.editor.borrow()))
+            .unwrap_or_default()
+    }
+    /// How the gutter's marks and its plate look (`GutterLook`).
+    pub fn set_gutter_look(&self, look: Option<crate::editor_gutter::GutterLook>) {
+        if self.hint.gutter_made().set_look(look) {
+            self.refresh();
+        }
+    }
+    /// What the gutter's cells are to assistive technology (`"Comment"`:
+    /// a cell is the button "Comment on line 12", a mark "Open comment on
+    /// line 12", expanded while its card shows).
+    pub fn set_gutter_label(&self, label: &str) {
+        if self.hint.gutter_made().set_label(label) {
+            self.refresh();
+        }
+    }
+    /// Call `told` with the line (from 1) of a gutter cell a primary press
+    /// lands on, and the id of the mark there: the press places no caret
+    /// and takes no focus. The plate under the pointer offers it.
+    pub fn on_gutter_press(&self, told: impl FnMut(usize, Option<&str>) + 'static) {
+        self.hint.gutter_made().on_press(Box::new(told));
+        self.refresh();
+    }
+    /// Call `told` with every mark, as they now are, after an edit moved
+    /// one off its line (after the editor is drawn: it may change what it
+    /// likes).
+    pub fn on_gutter_move(&self, told: impl FnMut(&[crate::editor_gutter::GutterMark]) + 'static) {
+        self.hint.gutter_made().on_move(Box::new(told));
+    }
+    /// Where line `line`'s gutter cell is (from 1), in the window's points,
+    /// while it is in view.
+    pub fn gutter_cell(&self, line: usize) -> Option<Rect> {
+        self.hint.gutter()?.cell(&self.scene.borrow(), line)
+    }
+    pub(crate) fn set_gutter_card(&self, node: Option<NodeId>) {
+        self.hint.gutter_made().set_card(node);
+    }
+    /// Show the gutter's card under line `line` (from 1; `None`: hidden).
+    pub fn set_gutter_card_line(&self, line: Option<usize>) {
+        if self.hint.gutter_made().set_card_line(line) {
+            self.refresh();
+        }
+    }
+    pub(crate) fn place_gutter_card(&self) {
+        if let Some(gutter) = self.hint.gutter() {
+            gutter.place_card(&mut self.scene.borrow_mut());
+        }
+    }
+    pub(crate) fn scene_bounds(&self, node: NodeId) -> Rect {
+        let scene = self.scene.borrow();
+        if scene.contains(node) {
+            scene.bounds(node)
+        } else {
+            Rect::default()
+        }
+    }
     /// What Tab inserts in a multiline editor (a code editor's indent:
     /// `"    "`, `"\t"`), instead of moving focus on; with lines selected
     /// it indents each, and Shift+Tab takes an indent off. `None`: Tab
@@ -599,6 +1040,16 @@ impl EditorHandle {
     pub fn set_indent(&self, indent: Option<&str>) {
         *self.hint.code_made().indent.borrow_mut() =
             indent.filter(|_| self.multiline).map(Into::into);
+    }
+    /// Grow and shrink a multiline editor's box with its text, as a chat
+    /// composer does: its height is the text's (wrapped at its width) and
+    /// its padding, held between its `min_height` and `max_height`, past
+    /// which the text scrolls. Single-line controls keep theirs.
+    pub fn set_auto_height(&self, auto: bool) {
+        let auto = auto && self.multiline;
+        if self.auto_height.replace(auto) != auto {
+            self.refresh();
+        }
     }
     /// Update rendering and editing metrics together, including selection and IME geometry.
     pub fn set_typography(&self, color: Color, size: f32, font: FontStyle) {
@@ -778,6 +1229,9 @@ impl EditorHandle {
             return;
         }
         self.preferred_x.set(None);
+        let filter = self.hint.shown.get().and_then(|s| s.paste.borrow().clone());
+        let filtered = filter.and_then(|f| f(text));
+        let text = filtered.as_deref().unwrap_or(text);
         // A step of its own, even of one character: not the typing's.
         self.editor
             .borrow_mut()
@@ -951,9 +1405,17 @@ fn committed_layout(
     width: Option<f32>,
     font: &FontStyle,
 ) -> Rc<dyn TextLayout> {
-    let lines = storage.upgrade().and_then(|s| {
-        let editors = s.editors.borrow();
-        let hint = &editors.get(&node)?.hint;
+    let hint = storage
+        .upgrade()
+        .and_then(|s| s.editors.borrow().get(&node).map(|e| e.hint.clone()));
+    if let Some(hint) = &hint
+        && e.preedit().is_none()
+        && e.long_text().is_none()
+        && let Some(map) = hint.projection(&e.text(), e.selection().range())
+    {
+        return shown_layout(hint, scene, node, &map, size, width, font);
+    }
+    let lines = hint.and_then(|hint| {
         (e.long_text().is_some() || hint.highlighted()).then(|| hint.line_cache())
     });
     match lines {
@@ -968,6 +1430,47 @@ fn committed_layout(
         }
         None => editor_layout(storage, scene, node, &e.text(), size, width, font),
     }
+}
+/// What shows of `map`'s text laid out, the editor's last if it is the
+/// same: its geometry the text's (`ProjectedLayout`).
+fn shown_layout(
+    hint: &EditorHint,
+    scene: &Scene,
+    node: NodeId,
+    map: &Rc<crate::editor_projection::Projected>,
+    size: f32,
+    width: Option<f32>,
+    font: &FontStyle,
+) -> Rc<dyn TextLayout> {
+    let font = &*editor_font(scene, node, font);
+    let shown = hint.shown_made();
+    let revision = scene.text_shaper_revision();
+    if let Some(last) = &*shown.layout.borrow()
+        && Rc::ptr_eq(&last.map, map)
+        && last.size == size.to_bits()
+        && last.width == width.map(f32::to_bits)
+        && last.font == *font
+        && last.revision == revision
+    {
+        return last.layout.clone();
+    }
+    // Colours change no metrics: laid out in one.
+    let layout: Rc<dyn TextLayout> = match map.rich(Color(0, 0, 0, 255), size, font, &[]) {
+        Some(rich) => Rc::new(crate::editor_projection::ProjectedLayout {
+            shown: scene.shape_rich_text(&rich, width).into(),
+            map: map.clone(),
+        }),
+        None => scene.shape_text_with_font("", size, width, font).into(),
+    };
+    *shown.layout.borrow_mut() = Some(ShownLayout {
+        map: map.clone(),
+        size: size.to_bits(),
+        width: width.map(f32::to_bits),
+        font: font.clone(),
+        revision,
+        layout: layout.clone(),
+    });
+    layout
 }
 fn editor_layout(
     storage: &Weak<UiStorage>,
@@ -1114,6 +1617,10 @@ pub(crate) struct UiStorage {
     mount_theme: RefCell<Option<Rc<ThemeScope>>>,
     text_geometry_revision: Signal<u64>,
     presented: Signal<bool>,
+    /// The modifier keys held now (`Ui::set_held_keys`).
+    held_keys: Signal<crate::input::Modifiers>,
+    /// Whether the window is the active one (`Ui::set_window_active`).
+    pub(crate) window_active: Signal<bool>,
     /// Where popups may show (`Ui::set_popup_screens`).
     popup_screens: Signal<Vec<Rect>>,
     /// The sizes the platform cut popups to, by their roots
@@ -1387,6 +1894,8 @@ impl Ui {
             mount_theme: RefCell::new(None),
             text_geometry_revision: runtime.signal(0),
             presented: runtime.signal(true),
+            held_keys: runtime.signal(crate::input::Modifiers::default()),
+            window_active: runtime.signal(true),
             overlay_scrollbars: runtime.signal(false),
             caret_width: Rc::new(Cell::new(1.)),
             caret_blink: Rc::default(),
@@ -2294,6 +2803,27 @@ impl Ui {
             });
         }
         self.storage.presented.set(presented);
+    }
+    /// The modifier keys held down now, as the host last said: none while
+    /// its window is at the back. A view reads it (`HeldKeys`, provided to
+    /// every view mounted here) to show what a held key offers, as a
+    /// sidebar shows ⌘1 to ⌘9 while ⌘ is down.
+    pub fn held_keys(&self) -> Signal<crate::input::Modifiers> {
+        self.storage.held_keys.clone()
+    }
+    /// Whether the window is the active one, as the host last said (true
+    /// until it says otherwise). A view reads it (`WindowActive`, provided to
+    /// every view mounted here) to hold still while its window is at the
+    /// back.
+    pub fn window_active(&self) -> Signal<bool> {
+        self.storage.window_active.clone()
+    }
+    /// The host's word on the modifier keys held (each change of them, and
+    /// none as its window goes to the back).
+    pub fn set_held_keys(&self, held: crate::input::Modifiers) {
+        if self.storage.held_keys.with_untracked(|now| *now != held) {
+            self.storage.held_keys.set(held);
+        }
     }
     /// Draw scrollbars as macOS's overlay ones (and GTK's) are: hidden until
     /// the user scrolls their view, then fading out a second after it stops,
@@ -3339,10 +3869,16 @@ impl Ui {
         // else to the next Tab stop (as a native toolkit moves it on, rather
         // than to the window), so keys still reach the app and a screen
         // reader says where it went: once the frame settles
-        // (`try_prepare_frame`).
+        // (`try_prepare_frame`). A layer takes no focus: focus in one (a
+        // toast's action, its toast going) moves on to the app, never to
+        // the layer's panel, outside the app.
         let refocus = self.input.focused().filter(|id| inside(*id)).and_then(|_| {
             let s = self.scene.borrow();
-            let mut at = s.parent(node);
+            let mut at = if self.input.in_layer(&s, node) {
+                None
+            } else {
+                s.parent(node)
+            };
             while let Some(id) = at {
                 if self.input.options(id).is_some_and(|o| o.focusable) {
                     return Some(id);
@@ -3582,6 +4118,9 @@ impl Ui {
                 Transform { x: 8., y: 6. }
             },
         );
+        // References as chips (`set_chips`), under the selection and text.
+        let chip_layer = self.container(viewport, Layout::Overlay, Style::default());
+        let chip_nodes: Rc<RefCell<Vec<NodeId>>> = Rc::default();
         let selection_layer = self.container(viewport, Layout::Overlay, Style::default());
         // Line numbers (`set_line_numbers`): a clipped column beside the
         // viewport, which moves right to make room.
@@ -3597,6 +4136,8 @@ impl Ui {
         let number_nodes: Rc<RefCell<Vec<NodeId>>> = Rc::default();
         let line_numbers = Rc::new(Cell::new(false));
         let draw_numbers = line_numbers.clone();
+        let auto_height = Rc::new(Cell::new(false));
+        let draw_auto_height = auto_height.clone();
         let mut initial = value.value_untracked();
         let canonical = match &initial {
             TextValue::Flat(text) => match normalize_text(text, multiline) {
@@ -3706,6 +4247,7 @@ impl Ui {
         let draw_line_count: Cell<Option<(u64, usize)>> = Cell::new(None);
         let draw_semantic_revision: Cell<Option<u64>> = Cell::new(None);
         let watched_theme = theme.clone();
+        let draw_runtime = self.runtime.clone();
         let refresh: Rc<dyn Fn()> = Rc::new(move || {
             let e = edit.borrow();
             let selection = e.selection();
@@ -3747,7 +4289,15 @@ impl Ui {
             if !s.contains(root) {
                 return;
             }
-            s.prepare_layout();
+            // Mounting with what mounts around it (in an update, never
+            // laid out yet), it draws in no box: a layout now would lay out
+            // the window half built, for a box the frame's layout gives
+            // anyway, after which it draws again (`refresh_if_resized`: its
+            // box changed).
+            let boxed = !(draw_runtime.deferring() && s.never_laid_out(root));
+            if boxed {
+                s.prepare_layout();
+            }
             let bounds = s.bounds(root);
             let root_style = s.style(root);
             *draw_geometry.borrow_mut() = Some((
@@ -3774,10 +4324,16 @@ impl Ui {
             // The gutter: as wide as the last line's number (two digits at
             // least, so the text does not move at line 10), and a gap.
             let numbered = draw_numbers.get();
+            // Shown otherwise than as written (`set_projector`): whole, a
+            // highlighter's colours over it; never while composing.
+            let projected = (display_text.is_none() && e.preedit().is_none())
+                .then(|| draw_hint.projection(&display, selection.range()))
+                .flatten();
             // Long, or coloured a line at a time: laid out by its lines.
-            let long = display_text.is_some()
-                || crate::editor_lines::is_long(&display)
-                || draw_hint.highlighted();
+            let long = projected.is_none()
+                && (display_text.is_some()
+                    || crate::editor_lines::is_long(&display)
+                    || draw_hint.highlighted());
             let (digits, digit) = if numbered {
                 // Unwrapped, a long text's layout (its width is not the
                 // gutter's to give) has them counted.
@@ -3871,20 +4427,42 @@ impl Ui {
             };
             // A long text's lines show apart (below): this node holds none.
             let shown_text = if long { "" } else { shown_text };
-            // Selection and policy changes retain the same immutable paint text.
-            let paint_text = match s.kind(text) {
-                NodeKind::Text { text, .. } if text.as_ref() == shown_text => text.clone(),
-                _ => std::sync::Arc::from(shown_text),
-            };
-            s.set_kind(
-                text,
-                NodeKind::Text {
-                    text: paint_text,
-                    color: shown_color,
-                    font_size: size,
-                },
-            );
             let font = editor_font(&s, root, &font).into_owned();
+            // What shows of a projected text, in its runs (a highlighter's
+            // colours last).
+            let shown_rich = projected
+                .as_ref()
+                .filter(|_| shown.is_none())
+                .and_then(|map| {
+                    let colors = draw_hint
+                        .code()
+                        .and_then(|c| c.lines.borrow().clone())
+                        .and_then(|lines| lines.text_colors(&display))
+                        .unwrap_or_default();
+                    map.rich(color, size, &font, &colors)
+                });
+            match shown_rich {
+                Some(rich) => {
+                    if !matches!(s.kind(text), NodeKind::RichText { text } if **text == rich) {
+                        s.set_kind(text, NodeKind::RichText { text: rich.into() });
+                    }
+                }
+                None => {
+                    // Selection and policy changes retain the same immutable paint text.
+                    let paint_text = match s.kind(text) {
+                        NodeKind::Text { text, .. } if text.as_ref() == shown_text => text.clone(),
+                        _ => std::sync::Arc::from(shown_text),
+                    };
+                    s.set_kind(
+                        text,
+                        NodeKind::Text {
+                            text: paint_text,
+                            color: shown_color,
+                            font_size: size,
+                        },
+                    );
+                }
+            }
             s.set_font(text, font.clone());
             s.set_kind(caret, NodeKind::Rect(color));
             let wrap_width = draw_wrap.get().then_some(inner_width.max(1.));
@@ -3902,9 +4480,14 @@ impl Ui {
                     &font,
                 )
             });
-            let layout: Rc<dyn TextLayout> = match &long_lines {
-                Some(lines) => lines.clone(),
-                None => editor_layout(&draw_storage, &s, root, &display, size, wrap_width, &font),
+            let layout: Rc<dyn TextLayout> = match (&long_lines, &projected) {
+                (Some(lines), _) => lines.clone(),
+                (None, Some(map)) => {
+                    shown_layout(&draw_hint, &s, root, map, size, wrap_width, &font)
+                }
+                (None, None) => {
+                    editor_layout(&draw_storage, &s, root, &display, size, wrap_width, &font)
+                }
             };
             let prior_position = draw_position.get();
             let caret_position =
@@ -3948,6 +4531,45 @@ impl Ui {
                 }
             }
             let (tw, th) = layout.size();
+            // Written after the layout (what follows it may read the scene).
+            let mut fits_now = None;
+            // In no box yet, it asks nothing of its box's size: the draw
+            // after the first layout does.
+            if boxed && let Some((fits, inset)) = draw_hint.fits.borrow().clone() {
+                let text = e.text();
+                // An empty draft is no width: nothing to shape.
+                let width = (!text.contains('\n')).then(|| {
+                    if text.is_empty() {
+                        0.
+                    } else if let Some(rich) = projected
+                        .as_ref()
+                        .and_then(|map| map.rich(color, size, &font, &[]))
+                    {
+                        // What shows of it (a chip's label, not its path).
+                        s.shape_rich_text(&rich, None).size().0
+                    } else {
+                        s.measure_text_with_font(&text, size, None, &font).0
+                    }
+                });
+                let room = inner_width - inset;
+                let was = fits.with_untracked(|f| *f);
+                let now = line_fits(was, width, room);
+                if was != now {
+                    fits_now = Some((fits, now));
+                }
+            }
+            // Auto height: the box asks for the text's; layout holds it
+            // between its min and max, and lays the text out again in the
+            // box it gets (the next refresh asks for the same: it settles).
+            if boxed && draw_auto_height.get() {
+                let want = th + padding.top + padding.bottom;
+                let mut style = s.style(root).clone();
+                if style.height.is_none_or(|h| (h - want).abs() > 0.25) {
+                    style.height = Some(want);
+                    style.height_percent = None;
+                    s.set_style(root, style);
+                }
+            }
             let limit = (
                 if draw_wrap.get() {
                     0.
@@ -4116,6 +4738,83 @@ impl Ui {
                 }
                 drop(pool);
             }
+            // The ghost: what completing would add, after the text's end
+            // while the caret rests there with nothing selected.
+            let ghost = draw_hint.ghost.borrow().clone().filter(|_| {
+                !multiline
+                    && !long
+                    && display_len > 0
+                    && display_cursor == display_len
+                    && e.preedit().is_none()
+                    && selection.range().is_empty()
+                    && !draw_hint.secure.get()
+            });
+            let ghost_node = draw_hint.ghost_node.get().filter(|id| s.contains(*id));
+            match (ghost, ghost_node) {
+                (Some((rest, rest_color)), node) => {
+                    let node = node.unwrap_or_else(|| {
+                        let node = s.append(
+                            viewport,
+                            NodeKind::Text {
+                                text: std::sync::Arc::from(""),
+                                color,
+                                font_size: size,
+                            },
+                            Style::default(),
+                        );
+                        // Under the caret.
+                        let mut order = s.children(viewport).to_vec();
+                        order.retain(|id| *id != node);
+                        let at = order
+                            .iter()
+                            .position(|id| *id == caret)
+                            .unwrap_or(order.len());
+                        order.insert(at, node);
+                        s.reorder_children(viewport, &order);
+                        draw_hint.ghost_node.set(Some(node));
+                        node
+                    });
+                    let end = layout.caret_position(TextPosition {
+                        byte_offset: display_len,
+                        affinity: TextAffinity::Before,
+                    });
+                    let width = s.measure_text_with_font(&rest, size, None, &font).0;
+                    s.set_kind(
+                        node,
+                        NodeKind::Text {
+                            text: rest,
+                            // The placeholder's colour unless given its own.
+                            color: rest_color
+                                .or_else(|| placeholder.as_ref().and_then(|(_, color)| *color))
+                                .unwrap_or(theme.color_untracked(tok::TEXT_TERTIARY)),
+                            font_size: size,
+                        },
+                    );
+                    s.set_font(node, font.clone());
+                    s.set_style(node, fixed(width + 2., end.height));
+                    s.set_transform(
+                        node,
+                        Transform {
+                            x: end.x - scroll.0,
+                            y: end.y - scroll.1,
+                        },
+                    );
+                }
+                (None, Some(node)) => {
+                    if !matches!(s.kind(node), NodeKind::Text { text, .. } if text.is_empty()) {
+                        s.set_kind(
+                            node,
+                            NodeKind::Text {
+                                text: std::sync::Arc::from(""),
+                                color,
+                                font_size: size,
+                            },
+                        );
+                        s.set_style(node, fixed(0., 0.));
+                    }
+                }
+                (None, None) => {}
+            }
             s.set_transform(
                 caret,
                 Transform {
@@ -4252,6 +4951,114 @@ impl Ui {
                 }
                 drop(marked);
             }
+            // Chips: a rounded fill behind each finished reference, 2 wider
+            // each side than its text, the line's height.
+            let ranges = draw_hint.chips_in(&e.text());
+            *draw_hint.known_chips.borrow_mut() = ranges
+                .iter()
+                .map(|r| e.text()[r.clone()].to_owned())
+                .collect();
+            let text_now = e.text();
+            let chips: Vec<_> = match &*draw_hint.chips.borrow() {
+                Some((_, fill)) if !draw_hint.secure.get() => ranges
+                    .into_iter()
+                    .flat_map(|range| {
+                        let token = &text_now[range.clone()];
+                        layout
+                            .selection(range.clone())
+                            .into_iter()
+                            .map(move |r| (r, token))
+                    })
+                    .filter_map(|(r, token)| {
+                        let y = r.y - scroll.1;
+                        (y + r.height > 0. && y < inner_height).then_some((
+                            r.x - scroll.0 - 2.,
+                            y + 1.,
+                            r.width + 4.,
+                            (r.height - 2.).max(0.),
+                            *fill,
+                            token,
+                        ))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let mut drawn = chip_nodes.borrow_mut();
+            while drawn.len() > chips.len() {
+                s.remove(drawn.pop().unwrap());
+            }
+            while drawn.len() < chips.len() {
+                drawn.push(s.append(
+                    chip_layer,
+                    NodeKind::Rect(Color(0, 0, 0, 0)),
+                    Style::default(),
+                ));
+            }
+            let mut spots = draw_hint.chip_spots.borrow_mut();
+            spots.clear();
+            for (id, (x, y, w, h, fill, token)) in drawn.iter().zip(chips) {
+                spots.push((*id, token.to_owned()));
+                let kind = NodeKind::Quad(crate::scene::QuadStyle {
+                    fill,
+                    radius: 5.,
+                    border_color: Color(0, 0, 0, 0),
+                    border_width: 0.,
+                    shadow: None,
+                    decoration: None,
+                    border_over: false,
+                    outline: None,
+                });
+                if *s.kind(*id) != kind {
+                    s.set_kind(*id, kind);
+                }
+                s.set_style(*id, fixed(w, h));
+                s.set_transform(*id, Transform { x, y });
+            }
+            drop(spots);
+            drop(drawn);
+            // Each chip's icon in its well (`set_chip_look`), in the text's colour.
+            if let Some(shown_hint) = draw_hint.shown.get() {
+                use crate::editor_projection::{CHIP_ICON, CHIP_WELL};
+                let icons: Vec<_> = if projected.is_some() {
+                    shown_hint
+                        .icons
+                        .borrow()
+                        .iter()
+                        .filter_map(|(range, icon)| {
+                            let r = *layout.selection(range.clone()).first()?;
+                            let y = r.y - scroll.1;
+                            (y + r.height > 0. && y < inner_height).then(|| {
+                                (
+                                    r.x - scroll.0 + (CHIP_WELL - CHIP_ICON) / 2.,
+                                    y + (r.height - CHIP_ICON) / 2.,
+                                    icon.clone(),
+                                )
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let mut drawn = shown_hint.icon_nodes.borrow_mut();
+                while drawn.len() > icons.len() {
+                    s.remove(drawn.pop().unwrap());
+                }
+                while drawn.len() < icons.len() {
+                    drawn.push(s.append(
+                        chip_layer,
+                        NodeKind::Rect(Color(0, 0, 0, 0)),
+                        Style::default(),
+                    ));
+                }
+                for (id, (x, y, icon)) in drawn.iter().zip(icons) {
+                    let tinted = std::sync::Arc::new(icon.tinted(color));
+                    if !matches!(s.kind(*id), NodeKind::Svg(svg) if svg.same_pixels(&tinted)) {
+                        s.set_kind(*id, NodeKind::Svg(tinted));
+                    }
+                    s.set_style(*id, fixed(CHIP_ICON, CHIP_ICON));
+                    s.set_transform(*id, Transform { x, y });
+                }
+            }
             let mut nodes = selection_nodes.borrow_mut();
             while nodes.len() > rects.len() {
                 s.remove(nodes.pop().unwrap());
@@ -4311,9 +5118,20 @@ impl Ui {
                 }
                 current = starts.partition_point(|&start| start <= display_cursor);
             }
+            // A gutter's marks show in their lines' numbers' place.
+            let marked_gutter = draw_hint.gutter();
+            if let Some(marked) = marked_gutter {
+                let view = (gutter_width + inner_width, inner_height);
+                marked.lay(&e, gutter, &shown, gutter_width, line_height, origin, view);
+                shown.retain(|(line, _)| !marked.marked(*line));
+            }
             let mut numbers = number_nodes.borrow_mut();
             while numbers.len() > shown.len() {
-                s.remove(numbers.pop().unwrap());
+                let number = numbers.pop().unwrap();
+                if marked_gutter.is_some() {
+                    sem.borrow_mut().remove(number);
+                }
+                s.remove(number);
             }
             while numbers.len() < shown.len() {
                 numbers.push(s.append(
@@ -4343,6 +5161,14 @@ impl Ui {
                 align: crate::text_layout::TextAlign::End,
                 ..font.clone()
             };
+            if let Some(marked) = marked_gutter {
+                marked.numbered(
+                    numbers
+                        .iter()
+                        .copied()
+                        .zip(shown.iter().map(|(line, _)| *line)),
+                );
+            }
             for (id, (line, y)) in numbers.iter().zip(shown) {
                 let label = line.to_string();
                 let color = if line == current { bright } else { dim };
@@ -4366,6 +5192,13 @@ impl Ui {
                 s.set_transform(*id, Transform { x: GUTTER_INSET, y });
             }
             drop(numbers);
+            if let Some(marked) = marked_gutter {
+                if numbered {
+                    marked.draw(&mut s, &mut sem.borrow_mut());
+                } else {
+                    marked.clear(&mut s, &mut sem.borrow_mut());
+                }
+            }
             // Marked text, underlined as a native field underlines it: a thin
             // line under all of it, a thick one under the clause the input
             // method is converting (its cursor range), where its candidates
@@ -4546,6 +5379,15 @@ impl Ui {
                 semantics.update_long_lines(root, window);
             }
             semantics.set_placeholder(root, placeholder.as_ref().map(|(hint, _)| hint.as_ref()));
+            // After this layout: what follows it (a composer flipping its
+            // row) rebuilds around the editor, which must not be mid-refresh.
+            if let Some((fits, now)) = fits_now
+                && let Some(storage) = draw_storage.upgrade()
+            {
+                storage.after_layout.borrow_mut().push(Box::new(move || {
+                    fits.set(now);
+                }));
+            }
         });
         // Geometry refresh may make an existing stationary drag scrollable.
         // The weak callback avoids refresh -> arm -> tick -> refresh ownership cycles.
@@ -4554,9 +5396,17 @@ impl Ui {
             let hook = interaction_refresh.clone();
             let told = hint.clone();
             let storage = Rc::downgrade(&self.storage);
+            let marked = editor.clone();
             Rc::new(move || {
+                if let Some(gutter) = told.gutter() {
+                    gutter.settle(&marked);
+                }
                 refresh();
                 EditorHint::watch_theme(&told, &storage, root, &watched_theme);
+                // Where edits took the gutter's marks, told likewise.
+                if let Some(gutter) = told.gutter() {
+                    gutter.tell(&marked);
+                }
                 // Where the caret is, told once drawn (nothing borrowed),
                 // if it moved. The callback is out while it runs: a refresh
                 // it causes finds none and leaves the telling to this one,
@@ -4597,6 +5447,7 @@ impl Ui {
             typography: typography.clone(),
             wrap: wrap.clone(),
             line_numbers: line_numbers.clone(),
+            auto_height: auto_height.clone(),
             preferred_x: preferred_x.clone(),
             text,
             scene: self.scene.clone(),
@@ -4853,7 +5704,17 @@ impl Ui {
         *interaction_refresh.borrow_mut() = Some(Rc::downgrade(&arm));
         let draw = refresh.clone();
         let tab_indent = hint.clone();
+        let key_hint = hint.clone();
+        let gutter_hint = hint.clone();
         self.on_event(root, true, move |cx| {
+            // The gutter's plate follows the pointer, and a press on a cell
+            // is its own, placing no caret.
+            if let Some(gutter) = gutter_hint.gutter() {
+                let busy = gesture.mode.get().is_some() || gesture.text_press.get().is_some();
+                if gutter.event(cx, &scene, root, busy) {
+                    return;
+                }
+            }
             if cx.phase != EventPhase::Target {
                 return;
             }
@@ -5428,8 +6289,22 @@ impl Ui {
                                     |byte| layout.caret(byte),
                                 );
                             }
-                            Key::ArrowLeft => e.move_left(word, modifiers.shift),
-                            Key::ArrowRight => e.move_right(word, modifiers.shift),
+                            Key::ArrowLeft | Key::ArrowRight => {
+                                let forward = key == Key::ArrowRight;
+                                if forward {
+                                    e.move_right(word, modifiers.shift)
+                                } else {
+                                    e.move_left(word, modifiers.shift)
+                                }
+                                // A range shown whole (a chip's label) is
+                                // stepped over whole.
+                                let sel = e.selection();
+                                let to = key_hint.step(&e.text(), sel.focus, forward);
+                                if to != sel.focus {
+                                    let anchor = if modifiers.shift { sel.anchor } else { to };
+                                    e.set_selection(anchor, to);
+                                }
+                            }
                             // macOS: Home and End scroll to the text's start or
                             // end and leave the caret where it is, as NSTextView
                             // (scrollToBeginningOfDocument:) and Chrome there do;
@@ -5579,6 +6454,27 @@ impl Ui {
                             Key::Delete if cfg!(target_os = "macos") && modifiers.meta => {
                                 changed = e.delete_to_line_end();
                             }
+                            // A chip goes whole: from its end backward, from
+                            // its start forward.
+                            Key::Backspace | Key::Delete
+                                if let Some(chip) = {
+                                    let sel = e.selection();
+                                    (sel.anchor == sel.focus)
+                                        .then(|| key_hint.chips_in(&e.text()))
+                                        .and_then(|chips| {
+                                            chips.into_iter().find(|r| {
+                                                if matches!(key, Key::Backspace) {
+                                                    r.end == sel.focus
+                                                } else {
+                                                    r.start == sel.focus
+                                                }
+                                            })
+                                        })
+                                } =>
+                            {
+                                e.set_selection(chip.start, chip.end);
+                                changed = e.delete_backward(false);
+                            }
                             Key::Backspace => {
                                 changed = e.delete_backward(word);
                             }
@@ -5586,8 +6482,40 @@ impl Ui {
                                 changed = e.delete_next(word);
                             }
                             Key::Enter => {
-                                if multiline {
+                                // A list goes on at a break (`set_line_edits`).
+                                let edit = key_hint
+                                    .shown
+                                    .get()
+                                    .and_then(|s| s.edits.borrow().clone())
+                                    .filter(|_| e.selection().range().is_empty() && e.preedit().is_none())
+                                    .and_then(|edits| edits.newline(&e.text(), e.selection().focus));
+                                if let Some((range, with)) = edit {
+                                    changed = e.replace_range(range, &with);
+                                } else if multiline {
                                     changed = e.insert("\n");
+                                }
+                            }
+                            // Tab indents a list's items, Shift+Tab outdents
+                            // them (`set_line_edits`).
+                            Key::Tab
+                                if !command
+                                    && !modifiers.control
+                                    && !modifiers.alt
+                                    && e.preedit().is_none()
+                                    && let Some((range, with, after)) = key_hint
+                                        .shown
+                                        .get()
+                                        .and_then(|s| s.edits.borrow().clone())
+                                        .and_then(|edits| {
+                                            edits.indent(&e.text(), e.selection().range(), modifiers.shift)
+                                        }) =>
+                            {
+                                let reversed = e.selection().anchor > e.selection().focus;
+                                changed = e.replace_range(range, &with);
+                                if reversed {
+                                    e.set_selection(after.end, after.start);
+                                } else {
+                                    e.set_selection(after.start, after.end);
                                 }
                             }
                             // Control-Tab leaves it, as AppKit's text views.

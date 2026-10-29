@@ -161,6 +161,8 @@ pub struct RichText {
     options: crate::text_layout::TextOptions,
     text: Arc<str>,
     runs: Arc<[TextRun]>,
+    /// Ranges that copy as other text (`with_copied`).
+    copied: Arc<[(Range<usize>, Arc<str>)]>,
 }
 impl RichText {
     /// `text` styled by `runs`. Errs unless the runs cover the text in
@@ -194,7 +196,58 @@ impl RichText {
             text,
             runs,
             options: Default::default(),
+            copied: Arc::new([]),
         })
+    }
+    /// With ranges of its text that copy as other text: a formula drawn
+    /// over a placeholder copies as its source. Ranges out of order, out of
+    /// the text or off its char boundaries are left out.
+    pub fn with_copied(mut self, copied: Vec<(Range<usize>, Arc<str>)>) -> Self {
+        let mut end = 0;
+        let text = &self.text;
+        self.copied = copied
+            .into_iter()
+            .filter(|(range, _)| {
+                let ok = range.start >= end
+                    && range.start < range.end
+                    && range.end <= text.len()
+                    && text.is_char_boundary(range.start)
+                    && text.is_char_boundary(range.end);
+                if ok {
+                    end = range.end;
+                }
+                ok
+            })
+            .collect();
+        self
+    }
+    /// The ranges that copy as other text, in order (`with_copied`).
+    pub fn copied(&self) -> &[(Range<usize>, Arc<str>)] {
+        &self.copied
+    }
+    /// `range` of its text as copying gives it: a range that copies as
+    /// other text gives that text whole once any of it is in `range`.
+    pub fn copy_text(&self, range: Range<usize>) -> String {
+        self.copy_text_to(range).0
+    }
+    /// `copy_text`, and where the text it gave ends: past `range` where it
+    /// ends in a range copied whole.
+    pub(crate) fn copy_text_to(&self, range: Range<usize>) -> (String, usize) {
+        let mut out = String::new();
+        let (mut at, mut end) = (range.start, range.end);
+        for (span, copied) in self.copied.iter() {
+            if span.end <= at || span.start >= range.end {
+                continue;
+            }
+            out.push_str(&self.text[at..span.start.max(at)]);
+            out.push_str(copied);
+            at = span.end.min(range.end).max(at);
+            end = end.max(span.end);
+        }
+        if at < range.end {
+            out.push_str(&self.text[at..range.end]);
+        }
+        (out, end)
     }
     /// With `options`: how text that doesn't fit ends, and its line clamp.
     pub fn with_options(mut self, options: crate::text_layout::TextOptions) -> Self {

@@ -23,6 +23,8 @@ mod plugin_hooks;
 mod plugin_shared;
 #[path = "../plugins.rs"]
 mod plugins;
+#[path = "../sandbox.rs"]
+mod sandbox;
 #[path = "../script.rs"]
 mod script;
 #[path = "../state.rs"]

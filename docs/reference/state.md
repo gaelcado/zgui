@@ -33,13 +33,18 @@ ui.fetch(url: string, opts: FetchOptions?) -> Promise<Response>
 ui.clipboard.read() -> string?
 ui.clipboard.write(text: string) -> boolean
 ui.clipboard.read_image() -> Promise<Bitmap?>
-ui.clipboard.write_image(image: Bitmap) -> Promise<boolean>
+ui.clipboard.write_image(image: Bitmap | string) -> Promise<boolean>
 ui.open_files(opts: FilePickerOptions?) -> Promise<{ File }>
 ui.save_file(opts: FilePickerOptions?) -> Promise<File?>
 ui.read_file(file: File | string) -> Promise<string>
 ui.write_file(file: File | string, text: string) -> Promise<nil>
 ui.args: { string }
 ui.on_open(handler: (e: { files: { File }, urls: { string } }) -> ())
+ui.haptic(pattern: ("level" | "alignment" | "generic")?) -> boolean
+ui.open_url(url: string) -> boolean
+ui.play_sound(path: string) -> boolean
+ui.notify(opts: { title: string?, body: string?, background: boolean?, data: any? }) -> boolean
+ui.on_notification(handler: (data: any) -> ()) -> ()
 ```
 
 ## Making state
@@ -239,9 +244,14 @@ return ui.column {
 
 ### The clipboard and files
 
-A desktop window gives scripts its clipboard and file dialogs (`zgx::platform`). `ui.clipboard.read()` returns its text, `ui.clipboard.write(text)` replaces it. `ui.clipboard.read_image()` settles with its image as a full-colour `Bitmap` (`w`, `h`; a screenshot, an image editor's copy, a browser's Copy Image), or nil, and `ui.clipboard.write_image(bitmap)` puts one there (a `ui.bitmap`, or one read before) for other apps to paste, settling with whether it took it: promises, as a large image is decoded and encoded off the main thread (a 4K one took 15 to 70 ms to read and 130 ms to write). State can keep a `Bitmap`, its pixels counted against a plugin's memory limit, and `ui.image { src = state }` shows the one it holds (a pasted picture: `ui.clipboard.read_image():after(function(b) if b then pasted:set(b) end end)`). `ui.open_files({ title, directory, filters = { { "Images", { "png" } } }, multiple })` settles with the files the user picks (an empty list if they cancel) and `ui.save_file({ name })` with where they choose to save (or nil), each a `{ path, name }`. A script reads and writes only files the user picked in this host's dialogs, as a web page does: `ui.read_file(file)` settles with its text and `ui.write_file(file, text)` writes beside it and renames over it (never half a file), both off the main thread. Headless, without a window, they are errors.
+A desktop window gives scripts its clipboard and file dialogs (`zgx::platform`). `ui.clipboard.read()` returns its text, `ui.clipboard.write(text)` replaces it. `ui.clipboard.read_image()` settles with its image as a full-colour `Bitmap` (`w`, `h`; a screenshot, an image editor's copy, a browser's Copy Image), or nil, and `ui.clipboard.write_image(bitmap)` puts one there (a `ui.bitmap`, or one read before) for other apps to paste, settling with whether it took it; given an image's `src` as `ui.image` takes it (a path from the script's directory, or a `host:` or remote image already shown), it copies that image's pixels, an image's Copy Image (a file is decoded off the main thread; an SVG has none): promises, as a large image is decoded and encoded off the main thread (a 4K one took 15 to 70 ms to read and 130 ms to write). State can keep a `Bitmap`, its pixels counted against a plugin's memory limit, and `ui.image { src = state }` shows the one it holds (a pasted picture: `ui.clipboard.read_image():after(function(b) if b then pasted:set(b) end end)`). `ui.open_files({ title, directory, filters = { { "Images", { "png" } } }, multiple })` settles with the files the user picks (an empty list if they cancel) and `ui.save_file({ name })` with where they choose to save (or nil), each a `{ path, name }`. A script reads and writes only files the user picked in this host's dialogs, as a web page does: `ui.read_file(file)` settles with its text and `ui.write_file(file, text)` writes beside it and renames over it (never half a file), both off the main thread. Headless, without a window, they are errors.
 
 `ui.args` is what the app was launched with after its script (`zgx-run app/ notes.txt` gives `{ "notes.txt" }`), and `ui.on_open(handler)` is handed the files and URLs the system asks it to open: those among its launch's arguments, and with an `application_id` (reverse-DNS, in `zgx.json` or `Application::application_id`) a file opened with the app, a link to it, or a second launch's on Windows. Its files are the user's choice, as a dialog's are, so `ui.read_file` takes them; what arrives before the script registers its handler waits for it. It is the app's: a plugin's `ui.on_open` is an error.
+`ui.haptic(pattern)` taps the trackpad now, as macOS's `NSHapticFeedbackManager` does: `"level"` (the default) when a control reaches its next detent (a slider's step), `"alignment"` when something snaps into place (a dragged tab settling into a new slot), `"generic"` otherwise. It returns whether the platform could; without a haptic trackpad, off macOS or headless it does nothing, and is not an error. Call it once per change, from the handler that makes it (never at a step the control stays on); `ScriptHost::haptics()` counts the calls, felt or not, for tests.
+
+`ui.open_url(url)` hands a web address (`http:`, `https:` with a host, or `mailto:`) to the system's browser, as a link in rich text does, or a pane of the system's settings to them (`x-apple.systempreferences:…` on macOS, `ms-settings:…` on Windows: where the user grants a permission the app asks for), and returns whether it did; any other scheme (a file, another app's) opens nothing, nor does it headless. A plugin needs `Capability::Web`. `FakeDesktop::opened()` lists what tests opened.
+
+`ui.play_sound(path)` plays a sound file (a WAV, an AIFF, an MP3; a path from the script's directory, as an image's) now, starting it over if it is still playing, and returns whether the platform could: macOS reads each file once (`NSSound`); off macOS and headless nothing plays, and it is not an error. `ui.notify { title, body, background }` posts the desktop's banner with the app's name and icon, even while the app is frontmost: with `background = true` only while it is not (a run finishing while you look elsewhere), returning false otherwise. Given `data`, a click on it hands that data to the script's `ui.on_notification` handler (the latest run's; a plugin's banners reach its own): a chat's id, say, to open it. macOS posts it through the notification centre where the app has a bundle of its own, and through `osascript` without one (`cargo run`, whose banners report no clicks); elsewhere and headless nothing shows. Both need `Capability::Notify` in a plugin. `FakeDesktop::played()` and `notified()` list what tests asked for, never playing nor showing it, `FakeDesktop::click_notification(i)` clicks the `i`th banner, and `FakeDesktop::set_active(false)` puts the app in the background.
 
 Plugins reach the network, the clipboard and files only if the host grants each: `ScriptHost::grant("plugin.luau", Capability::Fetch)` (or `Clipboard`, `Files`; `Plugin::grants` for the plugins an app sets), and the app's actions and shared state only where it exposes them (see Plugins in `docs/scripting.md`). A plugin that fails to load is left out and its error reported; the app and the other plugins load.
 
@@ -249,7 +259,7 @@ Plugins reach the network, the clipboard and files only if the host grants each:
 
 `ui.computed(f)` and `ui.effect(f)` run `f` at once and again whenever a state it read with `get` (or a tracked field: `web.title`, `term.pwd`, a ref) changes; reads with `peek` do not count. `ui.batch(f)` runs `f` and updates what its writes affect once, after it; it returns what `f` returns. Every handler already runs in a batch.
 
-`ui.on_cleanup(f)` runs `f` when what is being built goes away: a component unmounting, an effect running again, the script reloading (stop a subscription, a timer of the host's). `ui.now()` is milliseconds since the epoch, to the microsecond; it is not tracked (`os.time` counts whole seconds). `print` writes a line to the app's stderr.
+`ui.on_cleanup(f)` runs `f` when what is being built goes away: a component unmounting, an effect running again, the script reloading (stop a subscription, a timer of the host's). `ui.now()` is milliseconds since the epoch, to the microsecond; it is not tracked (`os.time` counts whole seconds). `ui.clock { since, every, cycle, offset }` is a state the engine moves on at each `every` milliseconds (1000) since `since` (now unless given): the time since then, two units at most (`"59s"`, `"1m 32s"`, `"1h 20m"`, `"2d 3h"`), or with `cycle` its words in turn from `offset`; given as a text's content, a timer ticks with no script call. `print` writes a line to the app's stderr.
 
 ## Large data
 
@@ -499,6 +509,11 @@ return function(props)
     return ui.row { card(props), ui.text { "New" } }
 end
 ```
+
+### Sandboxed scripts
+
+`ui.sandbox(source, { name, fallback })` runs a script the app holds as text (an agent's visual, a user's snippet) in a VM of its own and shows the node it returns, sandboxed as a plugin named `name` is: what the host granted that name (nothing, unless it did), the plugins' memory and time limits, no `require`, its source read as source, never bytecode. Its `ui.state` is its own, kept by `name` while the app runs, and its handlers and computeds run in its VM; the commands it declares go nowhere. As `source` (a string, a state or a function) changes, it runs again in a new VM. A script that fails to load or returns no node shows `fallback(why)` in its place, and the app's own error stays clear. An error it reports as it runs (a handler's, a component's) is told to `on_error(why)`, what it shows staying; without `on_error` the fallback takes its place. Other properties style the column it shows in; it is themed as where it sits, so `"$text"` and the like are the app's tokens.
+
 ## Gotchas
 
 - State values are read-only snapshots: `tasks:get()[1].done = true` fails with "attempt to modify a readonly table" and a hint naming `set_key`, `patch`, `update`, `insert` and `set`.

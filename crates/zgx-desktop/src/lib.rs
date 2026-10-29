@@ -41,6 +41,8 @@ mod local_time;
 mod look_up;
 mod native_drag;
 mod native_events;
+#[cfg(target_os = "macos")]
+mod native_fonts;
 mod native_prompt;
 mod platform;
 mod popup_window;

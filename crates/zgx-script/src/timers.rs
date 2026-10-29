@@ -52,6 +52,31 @@ impl Timers {
         });
         Stop(alive)
     }
+    /// Call `fire` after `first`, then after each wait it returns, until it
+    /// returns none or the guard drops: a clock whose ticks fall on its own
+    /// boundaries (`ui.clock`), not every so often from when it started.
+    pub fn schedule(
+        &self,
+        first: Duration,
+        mut fire: impl FnMut() -> Option<Duration> + 'static,
+    ) -> Stop {
+        let alive = Rc::new(Cell::new(true));
+        let running = alive.clone();
+        self.spawn(async move {
+            let mut wait = first;
+            loop {
+                zgx::timer::sleep(wait).await;
+                if !running.get() {
+                    return;
+                }
+                match fire() {
+                    Some(next) => wait = next,
+                    None => return,
+                }
+            }
+        });
+        Stop(alive)
+    }
 }
 /// Stops its timer when dropped (or `stop`ped).
 pub(crate) struct Stop(Rc<Cell<bool>>);

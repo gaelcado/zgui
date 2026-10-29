@@ -1,4 +1,8 @@
-use std::time::{Duration, Instant};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use zgx::{
     compose::prelude::*,
     input::{InputEvent, ScrollGesture},
@@ -147,6 +151,70 @@ fn a_mouse_wheel_never_stretches_and_momentum_bounces_off_an_edge() {
 }
 
 #[test]
+fn momentum_bounces_off_an_edge_once_however_long_it_runs() {
+    let mut ui = Ui::new(300., 200.);
+    ui.set_elastic_scrolling(true);
+    let (offset, content) = mount(&mut ui);
+    // A fling up into the top: the fingers lift, and the momentum runs on
+    // long after the bounce has sprung back, as macOS's does.
+    offset.set(30.);
+    ui.prepare_frame();
+    phase(&mut ui, ScrollGesture::Began);
+    scroll_by(&mut ui, -10.);
+    phase(&mut ui, ScrollGesture::Ended);
+    phase(&mut ui, ScrollGesture::MomentumBegan);
+    let mut bounces = 0;
+    let mut was_out = false;
+    let start = Instant::now();
+    for step in 0..120 {
+        scroll_by(&mut ui, -20. * 0.97_f32.powi(step));
+        ui.advance_interactions(start + Duration::from_millis(16 * step as u64 + 16))
+            .unwrap();
+        ui.prepare_frame();
+        let out = shift(&ui, content, &offset) > 0.5;
+        if out && !was_out {
+            bounces += 1;
+        }
+        was_out = out;
+    }
+    phase(&mut ui, ScrollGesture::MomentumEnded);
+    ui.advance_interactions(start + Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(bounces, 1, "one bounce");
+    assert_eq!(shift(&ui, content, &offset), 0.);
+}
+
+#[test]
+fn a_stretch_let_go_into_momentum_springs_back_once() {
+    let mut ui = Ui::new(300., 200.);
+    ui.set_elastic_scrolling(true);
+    let (offset, content) = mount(&mut ui);
+    // Pulled down past the top, then flung: the momentum after the fingers
+    // lift pushes the same way.
+    phase(&mut ui, ScrollGesture::Began);
+    scroll_by(&mut ui, -40.);
+    phase(&mut ui, ScrollGesture::Ended);
+    phase(&mut ui, ScrollGesture::MomentumBegan);
+    let mut stretches = 0;
+    let mut was_out = true;
+    let start = Instant::now();
+    for step in 0..120 {
+        scroll_by(&mut ui, -15. * 0.97_f32.powi(step));
+        ui.advance_interactions(start + Duration::from_millis(16 * step as u64 + 16))
+            .unwrap();
+        ui.prepare_frame();
+        let out = shift(&ui, content, &offset) > 0.5;
+        if out && !was_out {
+            stretches += 1;
+        }
+        was_out = out;
+    }
+    phase(&mut ui, ScrollGesture::MomentumEnded);
+    assert_eq!(stretches, 0, "back once, and no bounce after");
+    let _ = offset;
+}
+
+#[test]
 fn a_nested_view_at_its_edge_lets_the_outer_one_stretch() {
     let mut ui = Ui::new(300., 300.);
     ui.set_elastic_scrolling(true);
@@ -232,4 +300,77 @@ fn a_spring_back_steps_every_refresh_of_the_display() {
     ui.advance_interactions(start).unwrap();
     let next = ui.next_interaction_deadline().expect("a step after");
     assert_eq!(next.duration_since(start), Duration::from_micros(8_333));
+}
+
+/// Stretch a 100-high list of 400 past its top, then its end, letting go
+/// each time: it shows the stretch, springs back, and builds no row while it
+/// does.
+fn stretch_list(list: impl FnOnce(&Ui, Signal<f32>, Rc<Cell<usize>>) -> View) {
+    let mut ui = Ui::new(300., 200.);
+    ui.set_elastic_scrolling(true);
+    let offset = ui.signal(0.);
+    let built = Rc::new(Cell::new(0));
+    let view = list(&ui, offset.clone(), built.clone());
+    let stretched = ui.signal(0_f32);
+    let view = ui.mount(view.w(200.).h(100.).stretched(stretched.clone()));
+    ui.prepare_frame();
+    let content = content(&ui, view.node());
+    let rows = built.get();
+    phase(&mut ui, ScrollGesture::Began);
+    scroll_by(&mut ui, -40.);
+    let top = shift(&ui, content, &offset);
+    assert!(0. < top && top < 40., "the top stretches down: {top}");
+    assert_eq!(stretched.get(), -top, "and says so");
+    assert_eq!(offset.get(), 0.);
+    phase(&mut ui, ScrollGesture::Ended);
+    ui.advance_interactions(Instant::now() + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(shift(&ui, content, &offset), 0., "back");
+    assert_eq!(stretched.get(), 0.);
+    assert_eq!(built.get(), rows, "no row built as it stretched");
+
+    offset.set(300.);
+    ui.prepare_frame();
+    phase(&mut ui, ScrollGesture::Began);
+    scroll_by(&mut ui, 60.);
+    assert!(shift(&ui, content, &offset) < 0., "the end stretches up");
+    assert_eq!(offset.get(), 300.);
+    phase(&mut ui, ScrollGesture::Ended);
+    ui.advance_interactions(Instant::now() + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(shift(&ui, content, &offset), 0.);
+    assert_eq!(ui.next_interaction_deadline(), None);
+}
+
+#[test]
+fn a_virtual_list_stretches_past_its_edges_without_building_rows() {
+    stretch_list(|_, offset, built| {
+        virtual_list(
+            offset,
+            20.,
+            0,
+            || 20,
+            |index| index,
+            move |_, _, _| {
+                built.set(built.get() + 1);
+                div().h(20.)
+            },
+        )
+    });
+}
+
+#[test]
+fn a_variable_virtual_list_stretches_too() {
+    stretch_list(|ui, offset, built| {
+        variable_virtual_list(
+            offset,
+            VariableHeights::new(&ui.runtime, 20, 20.),
+            0,
+            |index| index,
+            move |_, _, _| {
+                built.set(built.get() + 1);
+                div()
+            },
+        )
+    });
 }

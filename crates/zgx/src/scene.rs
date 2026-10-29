@@ -529,6 +529,18 @@ impl LocalTransform {
         self.scale.0.abs().max(self.scale.1.abs())
     }
 }
+/// What `Scene::shows` keeps of the ancestors it walked, for the next call.
+#[derive(Default)]
+pub struct ShowsMemo(NodeMap<Passed>);
+impl ShowsMemo {
+    /// Forget it all (the scene changed).
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+/// What a node passes its children: its opacity times its ancestors', and
+/// `Scene::context`'s translation, clip and layer.
+type Passed = (f32, Transform, Option<Rect>, Option<Placement>);
 /// A transformed or filtered ancestor's mapping of its layer's content onto
 /// the viewport, how far a content blur spreads it there, and the viewport
 /// clip around that layer (see `Scene::descend`).
@@ -1303,6 +1315,12 @@ pub struct Style {
     /// its top shows no top band, and the band grows to its width as the
     /// content scrolls under that edge.
     pub fade_overflow: bool,
+    /// With `fade_overflow`, a band keeps its width and slides in from past
+    /// its edge as content runs past it, reaching the edge as the content
+    /// runs a whole band past: a label's end fades in gently as it grows too
+    /// long, rather than its last point dimming at once (Zeron's
+    /// `fade_label_overflow`).
+    pub fade_eased: bool,
     /// Lay its edges on whole points: a box placed by percentages or ratios
     /// (a split pane) keeps crisp borders at every size. Its size follows
     /// its rounded edges, so boxes that share an edge still meet.
@@ -1358,6 +1376,7 @@ impl Default for Style {
             fade_edges_x: [0.; 2],
             fade_insets_x: [0.; 2],
             fade_overflow: false,
+            fade_eased: false,
             snap: false,
             min_width: None,
             max_width: None,
@@ -1409,6 +1428,7 @@ impl Style {
             fade_edges_x,
             fade_insets_x,
             fade_overflow,
+            fade_eased,
             snap,
             min_width,
             max_width,
@@ -1428,6 +1448,7 @@ impl Style {
             & (*intrinsic_height == other.intrinsic_height)
             & (*clip == other.clip)
             & (*fade_overflow == other.fade_overflow)
+            & (*fade_eased == other.fade_eased)
             & (*snap == other.snap)
             & (*text_wrap == other.text_wrap)
             & (*align == other.align)
@@ -1472,6 +1493,7 @@ impl Style {
             fade_edges_x,
             fade_insets_x,
             fade_overflow,
+            fade_eased,
             snap,
             min_width,
             max_width,
@@ -1491,6 +1513,7 @@ impl Style {
             | *intrinsic_height
             | *clip
             | *fade_overflow
+            | *fade_eased
             | *snap
             | *text_wrap;
         let unset = layout_options.is_none()
@@ -1705,6 +1728,9 @@ struct Node {
     /// Scroll content: a translation is reported as a `ScrollMove` the
     /// renderer may apply by copying pixels (see `set_scroll_copy`).
     scroll_copy: bool,
+    /// Scroll content laid out in the viewport's room, shrinking before it
+    /// scrolls (`set_scroll_fit`).
+    scroll_fit: bool,
     /// `CONTENTS`: lays out as its last child (`Scene::set_contents`):
     /// `style` is then derived, its own kept in `Scene::contents_styles`.
     /// `ZOOMED`: has a zoom (`Scene::set_zoom`). One byte, so the branches
@@ -2020,7 +2046,8 @@ fn relevant_to_in_place(node: &Node, bits: u8, constraints: &mut Constraints) {
     // Scroll content is as large as its content along an axis nothing
     // sizes it on: the viewport's room does not fit it (it scrolls),
     // so nothing in it shrinks or wraps to the viewport there.
-    if node.scroll_copy {
+    // Content that shrinks first keeps that room (`set_scroll_fit`).
+    if node.scroll_copy && !node.scroll_fit {
         if node.style.width.is_none() && node.style.width_percent.is_none() {
             constraints.width = None;
         }
@@ -2372,7 +2399,7 @@ fn exposed(clip: Rect, dx: f32, dy: f32) -> Vec<Rect> {
     strips
 }
 /// A `fade_edges` ancestor's clip (less its `fade_insets`) and its bands
-/// (top, right, bottom, left).
+/// (top, right, bottom, left); inside two, both joined (`joined_masks`).
 pub type FadeMask = (Rect, [f32; 4]);
 /// A box with rounded corners: its radii top-left, top-right, bottom-right,
 /// bottom-left, each at most half its shorter side.
@@ -2541,7 +2568,7 @@ impl PaintItem<'_> {
             .projective
             .or_else(|| extras.matrix.map(crate::affine::Projective::from))
     }
-    /// The nearest `fade_edges` ancestor's clip and bands (top, bottom).
+    /// Its `fade_edges` ancestors' clip and bands (top, right, bottom, left).
     pub fn mask(&self) -> Option<FadeMask> {
         self.extras.as_ref().and_then(|extras| extras.mask)
     }
@@ -2806,6 +2833,7 @@ impl Scene {
                     shader_uniforms: None,
                     promoted: false,
                     scroll_copy: false,
+                    scroll_fit: false,
                     special: Special::None,
                     replaced: false,
                     rtl: false,
@@ -3272,11 +3300,12 @@ impl Scene {
     /// transparent; `None` when nothing does.
     pub fn visible_bounds(&self, id: NodeId) -> Option<Rect> {
         self.note_geometry_read(id);
-        let (bounds, effects, clip) = self.world(id);
-        if effects.opacity <= 0. {
-            return None;
-        }
         if self.transformed > 0 {
+            // `placed` works out the clip in layer space: of `world`, only
+            // the opacity is wanted.
+            if self.world_opacity(id) <= 0. {
+                return None;
+            }
             let (bounds, clip, placement) = self.placed(id);
             let visible = bounds.intersection(clip.unwrap_or(UNCLIPPED))?;
             return match placement {
@@ -3287,7 +3316,89 @@ impl Scene {
                 None => Some(visible),
             };
         }
+        let (bounds, effects, clip) = self.world(id);
+        if effects.opacity <= 0. {
+            return None;
+        }
         bounds.intersection(clip.unwrap_or(self.viewport))
+    }
+    /// Whether anything of `id`'s box shows (`visible_bounds` is some),
+    /// keeping in `memo` what each of its ancestors passes down: nodes
+    /// asked about together (a loader's cells, every loader in a window)
+    /// share their ancestors' work. `memo` holds while the scene is
+    /// unchanged; clear it after.
+    pub fn shows(&self, id: NodeId, memo: &mut ShowsMemo) -> bool {
+        self.note_geometry_read(id);
+        let node = self.node(id);
+        let (opacity, transform, clip, placement) = match node.parent {
+            Some(parent) => self.passed(parent, memo),
+            None => (1., Transform::default(), Some(self.viewport), None),
+        };
+        let own = if own_visible(&node.style) {
+            node.effects.opacity
+        } else {
+            0.
+        };
+        if opacity * own <= 0. {
+            return false;
+        }
+        let (_, bounds, clip, placement) = self.descend(node, transform, clip, placement);
+        let Some(visible) = bounds.intersection(clip.unwrap_or(UNCLIPPED)) else {
+            return false;
+        };
+        placement.is_none_or(|placement| {
+            placement
+                .matrix
+                .bounds(visible)
+                .intersection(placement.clip)
+                .is_some()
+        })
+    }
+    /// What `id` passes its children (`context`), and its opacity times
+    /// its ancestors': from `memo`, or worked out from its parent's and kept.
+    fn passed(&self, id: NodeId, memo: &mut ShowsMemo) -> Passed {
+        if let Some(passed) = memo.0.get(&id) {
+            return *passed;
+        }
+        let node = self.node(id);
+        let (opacity, transform, clip, placement) = match node.parent {
+            Some(parent) => self.passed(parent, memo),
+            None => (1., Transform::default(), Some(self.viewport), None),
+        };
+        let own = if own_visible(&node.style) {
+            node.effects.opacity
+        } else {
+            0.
+        };
+        let (transform, _, clip, placement) = self.descend(node, transform, clip, placement);
+        let passed = (opacity * own, transform, clip, placement);
+        memo.0.insert(id, passed);
+        passed
+    }
+    /// Whether no layout has placed `id` since it was appended.
+    pub(crate) fn never_laid_out(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.measurement.is_none() && node.bounds == Rect::default()
+    }
+    /// `world`'s opacity alone (`.1.opacity`).
+    fn world_opacity(&self, id: NodeId) -> f32 {
+        let node = self.node(id);
+        let mut opacity = if own_visible(&node.style) {
+            node.effects.opacity
+        } else {
+            0.
+        };
+        let mut parent = node.parent;
+        while let Some(id) = parent {
+            let ancestor = self.tree_node(id);
+            opacity *= if own_visible(&ancestor.style) {
+                ancestor.effects.opacity
+            } else {
+                0.
+            };
+            parent = ancestor.parent;
+        }
+        opacity
     }
     /// Where `id`'s box shows: the viewport-aligned box around its corners
     /// after its own and its ancestors' local transforms, unclipped. `bounds`
@@ -3886,6 +3997,13 @@ impl Scene {
             let style = &self.node(child).style;
             let (absolute, width, height, margin) =
                 (style.absolute, style.width, style.height, style.margin);
+            // Its contribution keeps to its own bounds, as CSS's does: a tab
+            // that shrinks no narrower than 40 needs 40.
+            let (floor, ceiling) = if horizontal {
+                (style.min_width, style.max_width)
+            } else {
+                (style.min_height, style.max_height)
+            };
             if absolute {
                 continue;
             }
@@ -3910,6 +4028,7 @@ impl Scene {
                     }),
                 }
             };
+            let need = dimension(need, floor, ceiling);
             let margins = if horizontal {
                 margin.left + margin.right
             } else {
@@ -4321,8 +4440,14 @@ impl Scene {
         if zero && cached & (HIT_DIRECTION << D) != 0 {
             return Some(own);
         }
+        // An image or icon is hit where it paints: its box, unless a
+        // transform of its own moves the picture past it.
         let safe = !node.transformed()
-            && !matches!(node.kind, NodeKind::Image(_) | NodeKind::Svg(_))
+            && match &node.kind {
+                NodeKind::Image(image) => image.transform() == crate::affine::Affine::IDENTITY,
+                NodeKind::Svg(svg) => svg.transform() == crate::affine::Affine::IDENTITY,
+                _ => true,
+            }
             && own.is_finite();
         if !safe {
             node.bounds_valid
@@ -4472,10 +4597,13 @@ impl Scene {
             if self.children_raw(node).is_empty() {
                 continue;
             }
-            if !hit
-                && !POPUPS
-                && transform == Transform::default()
-                && self.hit_outside(node, bounds, point)
+            // Nothing under it is hit where the point is outside its clip
+            // (a transformed descendant checks the clip around it first),
+            // nor past a side of its box nothing under it reaches. Both
+            // hold wherever its ancestors translate it: the proof is of
+            // the subtree's boxes against its own. A popup inside escapes
+            // the clip and is placed apart, so popups keep the full walk.
+            if !POPUPS && (!inside(clip, point) || (!hit && self.hit_outside(node, bounds, point)))
             {
                 continue;
             }
@@ -5349,6 +5477,7 @@ impl Scene {
             shader_uniforms: None,
             promoted: false,
             scroll_copy: false,
+            scroll_fit: false,
             special: Special::None,
             replaced: false,
             rtl,
@@ -5750,6 +5879,7 @@ impl Scene {
             || old.fade_edges_x != style.fade_edges_x
             || old.fade_insets_x != style.fade_insets_x
             || old.fade_overflow != style.fade_overflow
+            || old.fade_eased != style.fade_eased
             || old.padding != style.padding
             || old.padding_edges != style.padding_edges
             || old.text_wrap != style.text_wrap
@@ -8822,6 +8952,20 @@ impl Scene {
         }
         transform
     }
+    /// Lay scroll content `id` out in its viewport's room: what can shrink
+    /// does, down to its minimum size, before the content runs past the
+    /// viewport and scrolls (a strip of tabs sharing its width).
+    pub fn set_scroll_fit(&mut self, id: NodeId, enabled: bool) {
+        if self.node(id).scroll_fit != enabled {
+            self.node_mut(id).scroll_fit = enabled;
+            self.invalidate_layout(id);
+        }
+    }
+    /// Whether scroll content `id` shrinks before it scrolls
+    /// (`set_scroll_fit`).
+    pub fn scroll_fits(&self, id: NodeId) -> bool {
+        self.node(id).scroll_fit
+    }
     /// Moves reported by the most recent flush.
     pub fn scroll_moves(&self) -> &[ScrollMove] {
         &self.moves
@@ -8872,30 +9016,41 @@ impl Scene {
         for index in 0..self.overflow_fades.len() {
             let (id, before) = self.overflow_fades[index];
             let node = self.node(id);
-            let own = node.bounds;
-            // What scrolls may sit a level or two down (a scroll view's
-            // viewport fills it and holds the moving content): look past
-            // a lone child as large as the node, adding up translations.
-            let (mut holder, mut shift) = (node, Transform::default());
-            while let [only] = self.children_raw(holder)[..] {
-                let child = self.node(only);
-                let same = (child.bounds.x - own.x).abs() < 0.5
-                    && (child.bounds.y - own.y).abs() < 0.5
-                    && (child.bounds.width - own.width).abs() < 0.5
-                    && (child.bounds.height - own.height).abs() < 0.5;
-                if !same || self.children_raw(child).is_empty() {
+            // What scrolls may sit under wrappers: a scroll view's viewport,
+            // the node's own size, or an editor's padded box, which clips.
+            // Look through a lone child that is either (empty siblings, such
+            // as an editor's overlays, aside), and measure what is in the
+            // last one against that box.
+            let (mut frame, mut shift) = (node.bounds, Transform::default());
+            let mut kids = self.children_raw(node).as_slice();
+            loop {
+                let mut sized = kids.iter().filter(|kid| {
+                    let bounds = self.node(**kid).bounds;
+                    bounds.width > 0. && bounds.height > 0.
+                });
+                let (Some(only), None) = (sized.next(), sized.next()) else {
+                    break;
+                };
+                let child = self.node(*only);
+                if child.bounds != frame && clip_axes(&child.style) != (true, true) {
                     break;
                 }
-                shift.x += child.transform.x;
-                shift.y += child.transform.y;
-                holder = child;
+                shift = Transform {
+                    x: shift.x + child.transform.x,
+                    y: shift.y + child.transform.y,
+                };
+                frame = child.bounds.translated(shift);
+                kids = self.children_raw(child).as_slice();
             }
-            let reach = self
-                .children_raw(holder)
+            let own = frame;
+            let reach = kids
                 .iter()
                 .map(|child| {
                     let child = self.node(*child);
-                    child.bounds.translated(child.transform).translated(shift)
+                    child.bounds.translated(Transform {
+                        x: shift.x + child.transform.x,
+                        y: shift.y + child.transform.y,
+                    })
                 })
                 .reduce(Rect::union);
             let [top, bottom] = node.style.fade_edges;
@@ -9591,7 +9746,9 @@ fn fades(style: &Style) -> bool {
         .any(|band| band.is_finite() && *band > 0.)
 }
 /// The mask a node passes to its children: its own when it fades its edges
-/// (over its clip, less `fade_insets`), otherwise the one it inherited.
+/// (over its clip, less `fade_insets`), joined with the one it inherited,
+/// otherwise that one. A label fading at its end inside a list fading at
+/// its top and bottom fades at all three.
 fn fade_mask(
     inherited: Option<FadeMask>,
     clip: Option<Rect>,
@@ -9602,8 +9759,18 @@ fn fade_mask(
     let [left, right] = style.fade_edges_x;
     let mut bands =
         [top, right, bottom, left].map(|band| if band.is_finite() { band.max(0.) } else { 0. });
+    // How far past each edge an eased band starts (`Style::fade_eased`).
+    let mut outset = [0.; 4];
     if let Some(overflow) = overflow {
-        bands = [0, 1, 2, 3].map(|i| bands[i].min(overflow[i]));
+        for i in 0..4 {
+            if !style.fade_eased || overflow[i] <= 0. {
+                bands[i] = bands[i].min(overflow[i]);
+            } else if bands[i] > 0. {
+                let progress = (overflow[i] / bands[i]).clamp(0., 1.);
+                let eased = progress * progress * (3. - 2. * progress);
+                outset[i] = bands[i] * (1. - eased);
+            }
+        }
     }
     match clip {
         Some(clip) if bands.iter().any(|band| *band > 0.) => {
@@ -9616,10 +9783,45 @@ fn fade_mask(
                 (clip.width - left - right).max(0.),
                 (clip.height - top - bottom).max(0.),
             );
-            Some((rect, bands))
+            let [above, after, below, before] = outset;
+            let rect = Rect::new(
+                rect.x - before,
+                rect.y - above,
+                rect.width + before + after,
+                rect.height + above + below,
+            );
+            Some(match inherited {
+                Some(outer) => joined_masks(outer, (rect, bands)),
+                None => (rect, bands),
+            })
         }
         _ => inherited,
     }
+}
+/// One mask for content inside two: at each edge the band of whichever
+/// fades further in (the inner's where neither fades), as a band only ever
+/// reads its own edge of the box.
+fn joined_masks(outer: FadeMask, inner: FadeMask) -> FadeMask {
+    // Each edge's coordinate (top, right, bottom, left) and which way is in.
+    let edges = |(rect, _): FadeMask| [rect.y, rect.x + rect.width, rect.y + rect.height, rect.x];
+    let inward = [1., -1., -1., 1.];
+    let (a, b) = (edges(outer), edges(inner));
+    let mut edge = b;
+    let mut bands = inner.1;
+    for i in 0..4 {
+        let reach = |at: f32, band: f32| (at + inward[i] * band) * inward[i];
+        if outer.1[i] > 0.
+            && (inner.1[i] <= 0. || reach(a[i], outer.1[i]) > reach(b[i], inner.1[i]))
+        {
+            edge[i] = a[i];
+            bands[i] = outer.1[i];
+        }
+    }
+    let [top, right, bottom, left] = edge;
+    (
+        Rect::new(left, top, (right - left).max(0.), (bottom - top).max(0.)),
+        bands,
+    )
 }
 /// The rounded clips a node passes to its children: its own box first when
 /// it clips both axes with rounded corners, otherwise those it inherited.
@@ -12952,6 +13154,153 @@ mod local_transform_tests {
         // Below the card the child is clipped away, rotated or not.
         assert_eq!(scene.hit_test(135., 150.), Some(root));
         assert_eq!(scene.hit_test_all(135., 105.), vec![wide, card, root]);
+    }
+    #[test]
+    fn a_translated_subtree_is_hit_where_its_boxes_reach() {
+        // A scrolled list's content: translated, a row reaching past its box.
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let root = scene.root();
+        let content = scene.append(root, NodeKind::Container(Layout::Overlay), fixed(50., 50.));
+        scene.set_transform(content, Transform { x: 100., y: 100. });
+        let row = scene.append(
+            content,
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            fixed(10., 10.),
+        );
+        scene.set_transform(row, Transform { x: 60., y: 0. });
+        scene.flush();
+        // Past the content's box, where its row reaches: the row; before
+        // it, where nothing of it reaches, the root.
+        assert_eq!(scene.hit_test(165., 105.), Some(row));
+        assert_eq!(scene.hit_test(95., 105.), Some(root));
+        // What was worked out of the subtree goes as the row moves: back
+        // inside, past the box is the root's; out again, the row's.
+        scene.set_transform(row, Transform::default());
+        scene.flush();
+        assert_eq!(scene.hit_test(165., 105.), Some(root));
+        assert_eq!(scene.hit_test(105., 105.), Some(row));
+        scene.set_transform(row, Transform { x: 60., y: 0. });
+        scene.flush();
+        assert_eq!(scene.hit_test(165., 105.), Some(row));
+        // Scrolled, all of it moves together.
+        scene.set_transform(content, Transform { x: 100., y: 40. });
+        scene.flush();
+        assert_eq!(scene.hit_test(165., 45.), Some(row));
+        assert_eq!(scene.hit_test(165., 105.), Some(root));
+    }
+    #[test]
+    fn nothing_is_hit_under_a_clip_the_point_is_outside() {
+        // A clipped panel, translated, whose child and grandchild overflow
+        // it: past the clip, only what is outside the panel is hit.
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let root = scene.root();
+        let panel = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(40., 40.)
+            },
+        );
+        scene.set_transform(panel, Transform { x: 100., y: 100. });
+        let wide = scene.append(panel, NodeKind::Container(Layout::Overlay), fixed(80., 10.));
+        let far = scene.append(wide, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(10., 10.));
+        scene.set_transform(far, Transform { x: 60., y: 0. });
+        scene.flush();
+        assert_eq!(scene.hit_test_all(130., 105.), vec![wide, panel, root]);
+        assert_eq!(scene.hit_test_all(165., 105.), vec![root]);
+        // Unclipped, the overflow is hit.
+        scene.set_style(panel, fixed(40., 40.));
+        scene.flush();
+        assert_eq!(scene.hit_test_all(165., 105.), vec![far, wide, root]);
+    }
+    #[test]
+    fn an_icon_is_hit_where_it_paints() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let root = scene.root();
+        let holder = scene.append(root, NodeKind::Container(Layout::Overlay), fixed(40., 40.));
+        scene.set_transform(holder, Transform { x: 100., y: 100. });
+        let svg = crate::svg::SvgData::new(
+            &b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'/>"[..],
+        )
+        .unwrap();
+        let icon = scene.append(
+            holder,
+            NodeKind::Svg(std::sync::Arc::new(svg.clone())),
+            fixed(20., 20.),
+        );
+        scene.flush();
+        // Its box, and nothing past the holder's.
+        assert_eq!(scene.hit_test(110., 110.), Some(icon));
+        assert_eq!(scene.hit_test(130., 130.), Some(holder));
+        assert_eq!(scene.hit_test(95., 95.), Some(root));
+        // Drawn twice as large about its centre, it reaches past both boxes.
+        scene.set_kind(
+            icon,
+            NodeKind::Svg(std::sync::Arc::new(
+                svg.transformed(crate::affine::Affine::scale(2., 2.)),
+            )),
+        );
+        scene.flush();
+        assert_eq!(scene.hit_test(125., 125.), Some(icon));
+        assert_eq!(scene.hit_test(95., 95.), Some(icon));
+    }
+    #[test]
+    fn shows_answers_as_visible_bounds_does() {
+        // Shown, clipped away, under a faded ancestor, and inside a
+        // rotated layer: asked together, sharing their ancestors.
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let root = scene.root();
+        let panel = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(40., 40.)
+            },
+        );
+        scene.set_transform(panel, Transform { x: 100., y: 100. });
+        let rect = |scene: &mut Scene, parent| {
+            scene.append(parent, NodeKind::Rect(Color(0, 0, 0, 255)), fixed(10., 10.))
+        };
+        let shown = rect(&mut scene, panel);
+        let clipped = rect(&mut scene, panel);
+        scene.set_transform(clipped, Transform { x: 60., y: 0. });
+        let faded = scene.append(root, NodeKind::Container(Layout::Overlay), fixed(40., 40.));
+        scene.set_effects(
+            faded,
+            Effects {
+                opacity: 0.,
+                ..Effects::default()
+            },
+        );
+        let under_faded = rect(&mut scene, faded);
+        let turned = scene.append(root, NodeKind::Container(Layout::Overlay), fixed(40., 40.));
+        scene.set_transform(turned, Transform { x: 200., y: 100. });
+        let in_turned = rect(&mut scene, turned);
+        scene.set_local_transform(turned, rotated(FRAC_PI_4));
+        let offscreen = rect(&mut scene, turned);
+        scene.set_transform(offscreen, Transform { x: 0., y: 500. });
+        scene.flush();
+        let mut memo = ShowsMemo::default();
+        let all = [
+            shown,
+            clipped,
+            under_faded,
+            in_turned,
+            offscreen,
+            panel,
+            root,
+        ];
+        let expected = [true, false, false, true, false, true, true];
+        for (id, expected) in all.into_iter().zip(expected) {
+            assert_eq!(scene.visible_bounds(id).is_some(), expected, "{id:?}");
+            assert_eq!(scene.shows(id, &mut memo), expected, "{id:?}");
+        }
     }
     #[test]
     fn nested_transforms_compose() {

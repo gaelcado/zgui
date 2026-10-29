@@ -17,6 +17,9 @@ categories = ["gui", "rendering"]
 [features]
 default = ["svg", "png", "jpeg", "gif"]
 svg = ["dep:resvg"]
+# SVG text drawn in the fonts the app registered (`FontData`): a diagram's
+# labels. Off, SVG text draws nothing (shaping adds rustybuzz).
+svg-text = ["svg", "resvg/text"]
 png = ["image/png"]
 jpeg = ["image/jpeg"]
 gif = ["dep:gif"]

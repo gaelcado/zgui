@@ -1,0 +1,39 @@
+{
+	// The same glass in daylight: a near-white veil over the blur, the well
+	// a brighter white, its outer edge a soft grey and its inner one white.
+	"name": "glass-light",
+	"type": "light",
+	"extends": "zgx-light",
+	"tokens": {
+		"glass.tint": "#e9e9ecb8",
+		"text": {
+			"primary": "#000000e0",
+			"secondary": "#0000008f",
+			"tertiary": "#00000059",
+			"disabled": "#00000038"
+		},
+		"hover": "#0000000a",
+		"pressed": "#00000012",
+		"border": "#0000001a",
+		"border.subtle": "#0000000f",
+		"border.strong": "#00000029",
+		"accent": "#3a5bd9",
+		"surface.overlay": "#f7f7f8f2",
+		"shell": {
+			"well": "#ffffffd1",
+			"edge": "#0000001f",
+			"selected": "#ffffffb3",
+			"selected_line": "#0000000d",
+			"hover": "#0000000a",
+			"tile": "#ffffff99",
+			"field": "#0000000a",
+			"field_line": "#00000012",
+			"bubble": "#0000000d",
+			"shadow": "0 8 24 0 #0000001f",
+			"inner": "0 0 0 2 #ffffffe6",
+			"inner_dim": "0 0 0 2 #ffffff80",
+			"send": "#16171b",
+			"on_send": "#ffffff"
+		}
+	}
+}

@@ -15,17 +15,37 @@ use zgx::{
 
 /// `options` side by side, one chosen (`selected`, its index): AppKit's
 /// segmented control, a radio group to assistive technology. One Tab
-/// stop: the arrows move the choice (as radios do), Home and End to the
-/// ends; a click chooses.
+/// stop: the arrows move the choice (as radios do, round past the ends),
+/// Home and End to the ends; a click chooses.
 pub fn segmented(
     label: impl Into<String>,
     selected: Signal<usize>,
     options: impl IntoIterator<Item = impl Into<String>>,
 ) -> View {
+    let options: Vec<String> = options.into_iter().map(Into::into).collect();
+    let chosen = selected.clone();
+    segmented_with(label, selected, options.len(), move |i, segment| {
+        segment_look(segment, chosen.clone(), i).child(text(options[i].clone()))
+    })
+}
+
+/// A [`segmented`] control whose segments the app draws: `segment(i,
+/// button)` gives option `i`'s button (bare: no look, no children) its
+/// look and face, and the control then makes it a radio of the group,
+/// chosen by a click or by the focus. The track keeps its look, which the
+/// app's styles override. A segment with no text names itself with
+/// `accessible_label`.
+pub fn segmented_with(
+    label: impl Into<String>,
+    selected: Signal<usize>,
+    count: usize,
+    mut segment: impl FnMut(usize, View) -> View,
+) -> View {
     let mut track = row()
         .role(Role::RadioGroup)
         .accessible_label(label)
         .focus_group(FocusGroup::Horizontal)
+        .focus_wrap(true)
         .shrink_0()
         .p(2.)
         .gap(2.)
@@ -33,33 +53,12 @@ pub fn segmented(
         .bg(tok::SURFACE_SUNKEN)
         .border(1.)
         .border_color(tok::BORDER_SUBTLE);
-    for (i, option) in options.into_iter().enumerate() {
-        let (checked, styled, clicked, focused) = (
-            selected.clone(),
-            selected.clone(),
-            selected.clone(),
-            selected.clone(),
-        );
+    for i in 0..count {
+        let (checked, clicked, focused) = (selected.clone(), selected.clone(), selected.clone());
         track = track.child(
-            button()
+            segment(i, button())
                 .role(Role::RadioButton)
                 .checked_when(move || checked.get() == i)
-                .px(12.)
-                .py(3.)
-                .rounded(5.)
-                .border(0.)
-                .reactive_style(move || {
-                    if styled.get() == i {
-                        Styles::new()
-                            .bg(tok::SURFACE_RAISED)
-                            .text_color(tok::TEXT_PRIMARY)
-                    } else {
-                        Styles::new()
-                            .bg(zgx::scene::Color(0, 0, 0, 0))
-                            .text_color(tok::TEXT_SECONDARY)
-                    }
-                })
-                .hover(|s| s.text_color(tok::TEXT_PRIMARY))
                 .on_click(move || {
                     clicked.set(i);
                 })
@@ -71,11 +70,32 @@ pub fn segmented(
                     {
                         focused.set(i);
                     }
-                })
-                .child(text(option)),
+                }),
         );
     }
     track
+}
+
+/// A segment's own look: the raised surface under the chosen one, the
+/// others' text secondary until the pointer is over them.
+fn segment_look(segment: View, selected: Signal<usize>, i: usize) -> View {
+    segment
+        .px(12.)
+        .py(3.)
+        .rounded(5.)
+        .border(0.)
+        .reactive_style(move || {
+            if selected.get() == i {
+                Styles::new()
+                    .bg(tok::SURFACE_RAISED)
+                    .text_color(tok::TEXT_PRIMARY)
+            } else {
+                Styles::new()
+                    .bg(zgx::scene::Color(0, 0, 0, 0))
+                    .text_color(tok::TEXT_SECONDARY)
+            }
+        })
+        .hover(|s| s.text_color(tok::TEXT_PRIMARY))
 }
 
 /// How a [`stepper`] counts.
@@ -290,6 +310,33 @@ pub fn disclosure(open: Signal<bool>, summary: View, content: impl Fn() -> View 
                 }
             },
         ))
+}
+
+/// A [`disclosure`] the app draws, its fold its own: `summary` dresses the
+/// bare summary button (its `expanded` state and its toggling by a click,
+/// Enter or Space set; no chevron, padding or wash of the disclosure's), and
+/// `content` stays mounted under it, showing and folding as the app has it
+/// follow `open` (an animated fold).
+pub fn disclosure_with(
+    open: Signal<bool>,
+    summary: impl FnOnce(View) -> View,
+    content: View,
+) -> View {
+    let (expanded, toggled) = (open.clone(), open);
+    // No look of a button's: no fill, padding or wash (its focus ring kept).
+    let bare = button()
+        .p(0.)
+        .gap(0.)
+        .rounded(0.)
+        .border(0.)
+        .bg(zgx::scene::Color(0, 0, 0, 0))
+        .hover(|s| s)
+        .active(|s| s)
+        .expanded_when(move || expanded.get())
+        .on_click(move || {
+            toggled.set(!toggled.with_untracked(|o| *o));
+        });
+    column().child(summary(bare)).child(content)
 }
 
 /// Sections of which one at most is open (`open`, its index, or `None`):

@@ -23,17 +23,44 @@ pub(crate) struct Ctx {
 pub(crate) struct Params<'a> {
     pub own: &'a Table,
     pub defaults: Option<&'a Table>,
+    /// Each table's string keys and values, read once: a parameter is
+    /// asked for by each of its spellings, most of them absent, and asking
+    /// Luau made a string of each.
+    keys: std::cell::OnceCell<[Vec<(mlua::LuaString, mlua::Value)>; 2]>,
 }
-impl Params<'_> {
+impl<'a> Params<'a> {
+    pub fn new(own: &'a Table, defaults: Option<&'a Table>) -> Self {
+        Self {
+            own,
+            defaults,
+            keys: Default::default(),
+        }
+    }
     /// The first of `names` set here or in the defaults (camelCase and
     /// snake_case spellings are both accepted).
     pub fn get(&self, names: &[&str]) -> mlua::Value {
-        for table in [Some(self.own), self.defaults].into_iter().flatten() {
+        let keys = self.keys.get_or_init(|| {
+            let read = |table: Option<&Table>| -> Vec<(mlua::LuaString, mlua::Value)> {
+                let Some(table) = table else {
+                    return Vec::new();
+                };
+                let mut out = Vec::new();
+                let _ = table.for_each::<mlua::Value, mlua::Value>(|k, v| {
+                    if let mlua::Value::String(k) = k
+                        && !v.is_nil()
+                    {
+                        out.push((k, v));
+                    }
+                    Ok(())
+                });
+                out
+            };
+            [read(Some(self.own)), read(self.defaults)]
+        });
+        for table in keys {
             for name in names {
-                if let Ok(v) = table.raw_get::<mlua::Value>(*name)
-                    && !v.is_nil()
-                {
-                    return v;
+                if let Some((_, v)) = table.iter().find(|(k, _)| k.as_bytes() == name.as_bytes()) {
+                    return v.clone();
                 }
             }
         }
@@ -928,10 +955,7 @@ pub(crate) fn build_timeline(
                 let at = position_of(ctx, position, &cursor, &labels)?;
                 let set = matches!(op, TlOp::Set { .. });
                 let targets = super::api::targets(ctx, targets.clone())?;
-                let params_ref = Params {
-                    own: params,
-                    defaults: if set { None } else { defaults },
-                };
+                let params_ref = Params::new(params, if set { None } else { defaults });
                 let current = |target: &Target, key: &Key, local: f64| -> Option<V> {
                     let time = at + local;
                     let track = tracks.iter().rev().find(|t| {
@@ -949,15 +973,7 @@ pub(crate) fn build_timeline(
                     }
                     zero.raw_set("duration", 0).map_err(err)?;
                     zero.raw_set("ease", "linear").map_err(err)?;
-                    compile(
-                        ctx,
-                        &targets,
-                        &Params {
-                            own: &zero,
-                            defaults: None,
-                        },
-                        &current,
-                    )?
+                    compile(ctx, &targets, &Params::new(&zero, None), &current)?
                 } else {
                     compile(ctx, &targets, &params_ref, &current)?
                 };
@@ -989,10 +1005,7 @@ pub(crate) fn build_timeline(
             }
             TlOp::Timer { params, position } => {
                 let at = position_of(ctx, position, &cursor, &labels)?;
-                let params_ref = Params {
-                    own: params,
-                    defaults,
-                };
+                let params_ref = Params::new(params, defaults);
                 let mut timing = timing(ctx, &params_ref)?;
                 timing.iteration = match number(&params_ref.get(&["duration"])) {
                     Some(d) => ctx.ms("duration", d)?.max(0.),

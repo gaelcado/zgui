@@ -50,9 +50,11 @@ A text editor bound to a string state: selection, undo, clipboard and IME includ
 | `label` | `string` | `""` | its accessible name (not drawn) |
 | `placeholder` | `Reactive<string>` | none | shown while the value is empty, never part of it |
 | `placeholder_color` | `Reactive<Color>` | `"#8a9ab0"` | |
+| `ghost` | `Reactive<string>` | none | what completing the text would add (a path's folder, a command's name), shown in the placeholder's colour after the text while the caret rests at its end with nothing selected, as a shell previews its completion; `""` for none. Not part of the value, sizing nothing; accepting it (Tab writing the completed text) is the app's. A single-line input's, never a password's |
 | `select_on_focus` | `boolean` | `false` | focusing selects all the text (an address bar) |
 | `inputmode` | `"text" \| "decimal" \| "numeric" \| "tel" \| "search" \| "email" \| "url" \| "none"` | `"text"` | what kind of text it takes (HTML's `inputmode`): which touch keyboard Windows shows (digits, `@`, `.com`) and what a Wayland input method offers; `"none"` shows no virtual keyboard, for a field with its own keypad. A hint, never a check of what is typed |
 | `spellcheck` | `boolean \| Readable<boolean> \| (() -> boolean)` | `false` | check the spelling as it is typed (HTML's `spellcheck`): misspelled words get a dotted line (not the word being typed), and the context menu offers the system checker's guesses, Learn Spelling and Ignore Spelling. Never in a password field |
+| `read_only` | `boolean \| Readable<boolean> \| (() -> boolean)` | `false` | shown, focused, selected and copied from, but never edited by the user (typing, pasting, cutting and deleting do nothing); a write to its `value` still shows. A file that can't be saved |
 | `multiline` | `boolean` | `false` (`textarea`: always) | `input` with several lines |
 | `w`, `h` | `Length` | `240` wide (an intrinsic width), `36` high (`textarea`: `156`) | |
 | `px`, `py` | `Length` | `8`, `6` | |
@@ -66,6 +68,14 @@ A text editor bound to a string state: selection, undo, clipboard and IME includ
 | `current_line` | `Reactive<Color>` | none | `textarea`: the colour behind the caret's row |
 | `tab` | `string` | none | `textarea`: what Tab inserts (`"    "`) instead of moving focus; with lines selected it indents each, Shift+Tab outdents, one step of undo |
 | `on_caret` | `(line, column, anchor, focus) -> ()` | none | `textarea`: where the caret is whenever it moves (a status bar): line and column from 1, the selection in bytes from 0 |
+| `gutter` | `{ marks, mark, mark_color, mark_fill, add, add_color, add_fill, label, on_press, on_move, card, card_line }` | none | `textarea` with `line_numbers`: review comments in its gutter. `marks`, a state or function of `{ { id, line }, … }` (lines from 1), shows `mark` (an SVG's src) in `mark_color` (`$text.secondary`) on a well of `mark_fill` (`$surface.raised`) filling a marked line's cell, in its number's place; each follows its line through edits (text inserted or removed above moves it, a line break typed at its line's start takes it down, undo takes it back), and `on_move(marks)` gets them all after an edit moved one (give them back to `marks`: a mark given its own line stays put). A line given past the text's end is taken up when the text has it. The pointer over any other line's cell is offered `add` on a 16-point plate of `add_fill` (`$accent`), its glyph `add_color` (`$accent.text`), followed by the engine alone: no script runs as it moves. A primary press on a cell calls `on_press(line, id)` (`id` the mark's there, or nil), placing no caret and taking no focus. `card`, a node built once, shows under the line `card_line` reads (nil: none): beside the gutter, 320 wide at most (the view's width, 8 in, when that would be under 220), under its line but kept inside the view, following the scroll, hidden while its line is out of view; it takes its own clicks, focus and keys. To assistive technology each cell is a button, `"Comment on line 12"`, a mark `"Open comment on line 12"` (expanded while its card shows), from `label` (`"Comment"`) |
+| `auto_height` | `boolean` | `false` | `textarea`: as tall as its text (wrapped at its width) and its padding, held between `min_h` and `max_h`, past which it scrolls: a chat composer growing line by line, without the script measuring anything. `layout = "height"` on a box around it eases the growth |
+| `chips`, `chip_color` | `string`, color | none | finished references as chips: a word starting with one of the `chips` characters and followed by a space (`"@"`: `@src/main.rs `, as a completion's pick leaves it; a no-break space joins its words, `@Write\u{a0}notes `) sits on a rounded fill in `chip_color` (the selection's unless set), and a backspace at its end (a delete at its start) takes it whole; the engine finds and draws them, no script per key |
+| `chip_label`, `chip_icon` | `(token) -> string?` | none | how a chip shows: the label in place of its reference (`"lib.rs"` for `@crates/zgx/src/lib.rs`; nil, as written; `false`, no chip at all: an amount, `$5`) after a 20-point well holding the icon `chip_icon` gives (an SVG's src, 14 in the text's colour). The value keeps the reference; carets, selection and clicks follow what shows, and a caret steps over a chip whole. Each is asked once for each new chip |
+| `chip_tooltip` | `(token) -> Node?` | none | a card over a chip while the pointer rests on it, as a `tooltip` shows: after 300 ms, gone as the pointer leaves the chip or presses, the text scrolls or a key is pressed; it takes no focus and lets the pointer through. The engine finds the chip under the pointer (no script as it moves); the card is made from the chip's reference as it first shows (nil: none) |
+| `markdown`, `code_color`, `code_bg` | `boolean`, color, color | `false`, the text's, `$surface.sunken` | `textarea`: a Markdown draft, edited as Zeron's composer edits one: bold, italics, strikethrough, headings and code in their faces as it is typed (code in the monospace font, `code_color` on `code_bg`); its markers hidden off the caret's lines and bullets shown as `•` (tasks `☐` `☑`), the value the Markdown as written; a line break goes on with a list (or leaves an empty item) and Tab and Shift+Tab indent and outdent its items, after `on_key` (which takes Enter to send, Tab for a menu). A `highlight` colours over its faces (a fence's code). It shows as written while an input method composes, and a long text (over 64 KiB) shows as written |
+| `on_paste` | `(text) -> string?` | none | what goes in for pasted text (nil: as pasted), one step of undo: pasted references resolved into chips |
+| `fits`, `fits_inset` | `State<boolean>`, `number` | none | written whether the text fits on one line `fits_inset` points narrower than the text box: a composer folds into one row while its draft is short and opens out as it grows. A line break never fits, nor a line under 200 wide; once it does not fit it must fall 32 under before it fits again (no flip-flop at the edge). Written only when that changes, by the engine |
 
 Its element (`on_mount`, a [ref](state.md#refs)) selects text: `el:select_all()`, `el:set_selection(a, b)`, `local a, b = el:selection()`, in characters, or in bytes from 0 as `string.find` counts them, `el:set_selection_bytes(a, b)` and `el:selection_bytes()` (a selection set so scrolls into view, focused or not); `el:replace_selection(text)` types `text` over the selection, one step of undo ([events](events.md#elements)). Each sees the text a handler just set, and leaves its state holding what it changed.
 
@@ -106,8 +116,28 @@ One of a few options side by side, as AppKit's segmented control: a radio group 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `value` | `State<any>` | required | the chosen option's value, both ways |
-| `options` | `{ string \| number \| { label, value } }` | required | what each shows; a bare string or number is its own value |
+| `options` | `{ string \| number \| { label, value, … } }` | required | what each shows; a bare string or number is its own value |
 | `label` | `string` | `""` | the group's accessible name |
+
+Its styles are the track's. An option with children, or styles of its own, draws its segment, as a `menu_item` with children does: the segment is a button its styles dress (none of the control's look) and its children fill, and `label` names it (an icon alone needs one). It is still the group's radio: its click, focus and the arrows choose it. A segment's look follows the choice by reading `value` (`variants = recipe { on = function() return mode:get() == "list" end }`).
+
+```lua
+local mode = ui.state("mode", "list")
+local function segment(id: string, label: string): SegmentedOption
+	return {
+		value = id,
+		label = label,
+		h = 24,
+		px = 10,
+		rounded = 6,
+		bg = function(): Color
+			return if mode:get() == id then "$surface.raised" else "#00000000"
+		end,
+		ui.text { label, text_size = "$font.size.sm" },
+	}
+end
+return ui.segmented { label = "Layout", value = mode, options = { segment("list", "List"), segment("grid", "Grid") } }
+```
 
 ## stepper
 
@@ -128,9 +158,51 @@ A button showing the chosen option that opens a menu of them over itself, the ch
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `value` | `State<any>` | required | the chosen option's value, both ways |
-| `options` | `{ string \| number \| { label, value, disabled } }` | required | a bare string or number is its own value; a disabled option shows but can't be chosen |
+| `options` | `{ string \| number \| { label, value, disabled, … } }` | required | a bare string or number is its own value; a disabled option shows but can't be chosen |
 | `placeholder` | `string` | `""` | shown while no option is chosen |
 | `label` | `string` | `""` | its accessible name |
+| `menu` | `{ …styles, enter?, exit? }` | the menu's look | the menu's panel: its styles, and its motion as it opens and as it closes (as a `ui.menu`'s `enter` and `exit`) |
+| `placement` | `Placement` | over the button | where the menu opens instead (`{ side = "bottom", align = "start", offset = 4 }`), its first item focused |
+
+Its styles and handlers are its button's, and its children, if any, the button's face instead of the chosen option's label and a chevron (none of the select's own look then): a select drawn as the app draws buttons, its value read from the state. An option with children, or styles of its own, draws its menu item as a `menu_item` with children does, the check included (it is still a radio item to assistive technology, checked while chosen); `label` names it and is what typing finds, and `id` is its item's.
+
+```lua
+local scope = ui.state("scope", "turn")
+local function item(value: string, label: string): SelectOption
+	return {
+		value = value,
+		label = label,
+		id = `scope_{value}`,
+		h = 30,
+		gap = 8,
+		ui.text { label, grow = 1 },
+		ui.text {
+			function()
+				return if scope:get() == value then "✓" else ""
+			end,
+		},
+	}
+end
+return ui.select {
+	label = "Scope",
+	value = scope,
+	h = 26,
+	px = 8,
+	gap = 6,
+	rounded = 6,
+	placement = { side = "bottom", align = "start", offset = 4 },
+	menu = { w = 200, p = 4, rounded = 12, enter = { opacity = { 0, 1 }, duration = 140 } },
+	options = { item("turn", "Last turn"), item("branch", "Branch") },
+	ui.text {
+		function()
+			return if scope:get() == "turn" then "Last turn" else "Branch"
+		end,
+	},
+	ui.text { "⌄", color = "$text.tertiary" },
+}
+```
+
+In Rust, `select_with(label, value, options, placeholder, SelectParts { button, bare_button, menu, item, placement })`, each part a closure dressing the select's own view, and `segmented_with(label, selected, count, |i, button| …)`.
 
 ## combobox
 

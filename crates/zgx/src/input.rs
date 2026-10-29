@@ -9,6 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The modifier keys held now (`Ui::held_keys`), provided to every view a
+/// `Ui` mounts: what a held key offers can show while it is down.
+#[derive(Clone)]
+pub struct HeldKeys(pub crate::reactive::Signal<Modifiers>);
+
+/// Whether the window is the active one (`Ui::window_active`), provided to
+/// every view a `Ui` mounts: what animates can hold still at the back.
+#[derive(Clone)]
+pub struct WindowActive(pub crate::reactive::Signal<bool>);
+
 /// The modifier keys held during an event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
@@ -303,6 +313,9 @@ pub struct EventContext {
     prevented: bool,
     focus: Option<NodeId>,
     capture: Option<Option<NodeId>>,
+    /// The capture is a drag source's (`capture_for_drag`), watching for a
+    /// drag: the press still selects and clicks what it is in.
+    capture_for_drag: bool,
     pointer_modifiers: Modifiers,
     click_count: u8,
     drag_threshold: f32,
@@ -332,6 +345,7 @@ impl EventContext {
             prevented: false,
             focus: None,
             capture: None,
+            capture_for_drag: false,
             pointer_modifiers: Modifiers::default(),
             click_count: 0,
             drag_threshold: DRAG_THRESHOLD,
@@ -450,9 +464,17 @@ impl EventContext {
     pub fn focus(&mut self) {
         self.focus = Some(self.current_target);
     }
-    /// Whether a listener so far asked to capture or release the pointer.
-    pub(crate) fn capture_requested(&self) -> bool {
+    /// Whether a listener so far asked to capture or release the pointer: a
+    /// container leaves a press that something in it keeps (a text field
+    /// in a tab, selecting) to it.
+    pub fn capture_requested(&self) -> bool {
         self.capture.is_some()
+    }
+    /// Whether something under the press keeps it (a field selecting, a
+    /// slider): a capture, but not a drag source's, which only watches for
+    /// a drag, so a tree row it is in is still chosen by the press.
+    pub fn press_kept(&self) -> bool {
+        self.capture.is_some() && !self.capture_for_drag
     }
     /// What a listener so far asked capture for: `Some(None)` a release.
     pub(crate) fn capture_target(&self) -> Option<Option<NodeId>> {
@@ -464,16 +486,25 @@ impl EventContext {
     /// when none exists.
     pub fn capture_pointer(&mut self) {
         self.capture = Some(Some(self.current_target));
+        self.capture_for_drag = false;
+    }
+    /// Capture the pointer as a drag source does, to see whether the press
+    /// becomes a drag: what the press is in still takes it (`press_kept`).
+    pub fn capture_for_drag(&mut self) {
+        self.capture_pointer();
+        self.capture_for_drag = true;
     }
     /// Release a pointer capture.
     pub fn release_pointer(&mut self) {
         self.capture = Some(None);
+        self.capture_for_drag = false;
     }
     /// Capture the pointer from what it was pressed on, which hears a
     /// cancel and never activates: a drag that began on a link selects
     /// text instead. For pointer moves while the press is down.
     pub(crate) fn take_pointer(&mut self) {
         self.capture = Some(Some(self.current_target));
+        self.capture_for_drag = false;
         self.take_pointer = Some(self.current_target);
     }
     /// Whether a listener so far has prevented the default.
@@ -500,6 +531,9 @@ pub struct NodeInput {
     /// Its place in Tab order, as HTML's `tabindex`: positive indices first,
     /// in order, then 0s in document order; negative leaves Tab order.
     pub tab_index: i32,
+    /// HTML's `inert`: the pointer passes through the node and everything
+    /// in it, listeners or not (content on its way out).
+    pub inert: bool,
 }
 type Callback = Rc<RefCell<dyn FnMut(&mut EventContext)>>;
 struct Entry {
@@ -526,6 +560,9 @@ struct Group {
     /// Its arrows choose what they move to, wrapping at the ends: a radio
     /// group's (`set_group_chooses`).
     chooses: bool,
+    /// Past its last member the arrows go round to its first, and back
+    /// (ARIA's tabs and menus); a list box stops at its ends.
+    wrap: bool,
 }
 struct FocusScope {
     root: NodeId,
@@ -657,6 +694,9 @@ struct State {
     drag_ending: Option<NodeId>,
     /// A drag from another window over this one (`drag_over`).
     visit: Option<drag::Visit>,
+    /// Files dragged in from another app while they are over the window: a
+    /// `DraggedFiles` naming those the platform has told of.
+    files: Option<crate::actions::Action>,
     /// How the last drag ended, until its host takes it (`take_drag_ended`).
     drag_ended: Option<drag::DragEnded>,
     /// The destination the drag rests on, toward springing it open.
@@ -1480,6 +1520,12 @@ impl InputDispatcher {
     pub(crate) fn keep_focus_for_press(&self) {
         self.state.borrow_mut().keep_focus = true;
     }
+    /// Whether `node` is inside a non-modal layer (`set_layer`).
+    pub fn in_layer(&self, scene: &Scene, node: NodeId) -> bool {
+        let s = self.state.borrow();
+        !s.layers.is_empty()
+            && (s.layers.contains(&node) || scene.ancestors(node).any(|id| s.layers.contains(&id)))
+    }
     /// The active modal root, if any. Focus and pointer routing stay inside
     /// it.
     pub fn focus_scope(&self) -> Option<NodeId> {
@@ -1848,16 +1894,16 @@ impl InputDispatcher {
         let mut s = self.state.borrow_mut();
         match axis {
             Some(axis) => {
-                let (current, chooses) = s
-                    .groups
-                    .get(&root)
-                    .map_or((None, false), |g| (g.current, g.chooses));
+                let old = s.groups.get(&root);
+                let current = old.and_then(|g| g.current);
+                let (chooses, wrap) = old.map_or((false, false), |g| (g.chooses, g.wrap));
                 s.groups.insert(
                     root,
                     Group {
                         axis: Some(axis),
                         current,
                         chooses,
+                        wrap,
                     },
                 );
             }
@@ -1878,6 +1924,7 @@ impl InputDispatcher {
                 axis: None,
                 current,
                 chooses: false,
+                wrap: false,
             },
         );
     }
@@ -1887,6 +1934,13 @@ impl InputDispatcher {
     pub(crate) fn set_group_chooses(&self, root: NodeId, chooses: bool) {
         if let Some(group) = self.state.borrow_mut().groups.get_mut(&root) {
             group.chooses = chooses;
+        }
+    }
+    /// Whether `root`'s focus group goes round past its ends (set after
+    /// `set_focus_group`).
+    pub fn set_focus_wrap(&self, root: NodeId, wrap: bool) {
+        if let Some(group) = self.state.borrow_mut().groups.get_mut(&root) {
+            group.wrap = wrap;
         }
     }
     /// Make `member` the one its focus group's Tab stop lands on: the
@@ -1931,7 +1985,8 @@ impl InputDispatcher {
         let (axis, wraps) = {
             let s = self.state.borrow();
             let g = s.groups.get(&group)?;
-            (g.axis?, g.chooses)
+            // A radio group's arrows go round, as do tabs' and menus'.
+            (g.axis?, g.chooses || g.wrap)
         };
         enum Step {
             Back,
@@ -2100,6 +2155,14 @@ impl InputDispatcher {
     fn hit_target(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
         let mut fallback = None;
         'hits: for hit in scene.hit_test_all(x, y) {
+            // Inside something inert: as if it were not there.
+            let mut up = Some(hit);
+            while let Some(id) = up {
+                if self.options(id).is_some_and(|options| options.inert) {
+                    continue 'hits;
+                }
+                up = scene.parent(id);
+            }
             let mut node = Some(hit);
             while let Some(id) = node {
                 let (options, hollow) = self.options_hollow(id);
@@ -2125,6 +2188,12 @@ impl InputDispatcher {
         }
         fallback.filter(|id| self.enabled(scene, *id))
     }
+    /// The modifier keys held now, as the platform says they changed (all
+    /// let go once a shortcut's keys come up): a pointer event dispatched
+    /// without modifiers of its own reads these, as a key event leaves them.
+    pub fn set_modifiers(&self, held: Modifiers) {
+        self.state.borrow_mut().modifiers = held;
+    }
     /// Route `event` as the platform delivers it: pointer events to what is
     /// under the pointer or captures it, keys to the focused node.
     pub fn dispatch(&self, scene: &Rc<RefCell<Scene>>, event: InputEvent) -> DispatchResult {
@@ -2141,6 +2210,93 @@ impl InputDispatcher {
         self.dispatch_impl(scene, event, Some(modifiers), true)
     }
     fn dispatch_impl(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        event: InputEvent,
+        modifiers: Option<Modifiers>,
+        bindings: bool,
+    ) -> DispatchResult {
+        let files = match &event {
+            InputEvent::FileHover { .. }
+            | InputEvent::FileHoverCancelled
+            | InputEvent::FilesDrop { .. }
+            | InputEvent::FilesDropRejected { .. } => Some(event.clone()),
+            InputEvent::PointerMove { .. } | InputEvent::PointerLeave
+                if self.state.borrow().files.is_some() =>
+            {
+                Some(event.clone())
+            }
+            _ => None,
+        };
+        let mut result = self.dispatch_routed(scene, event, modifiers, bindings);
+        if let Some(event) = files
+            && self.visit_files(scene, &event, result.default_prevented)
+        {
+            result.default_prevented = true;
+        }
+        result
+    }
+    /// Files dragged in from other apps reach the window's destinations as a
+    /// drag from outside carrying [`DraggedFiles`]: over them as the files
+    /// come in and as the pointer moves with them (macOS sends the window
+    /// moves, not file events, while they are over it), out as they leave,
+    /// and dropped where they are let go unless a listener of the grouped
+    /// paths (`View::on_files_drop`) took them first. Whether a destination
+    /// took a drop.
+    fn visit_files(&self, scene: &Rc<RefCell<Scene>>, event: &InputEvent, taken: bool) -> bool {
+        match event {
+            InputEvent::FileHover { x, y, path } => {
+                let files = {
+                    let mut state = self.state.borrow_mut();
+                    let known = state
+                        .files
+                        .as_ref()
+                        .and_then(|files| files.downcast_ref::<DraggedFiles>())
+                        .map_or_else(Vec::new, |files| files.paths().to_vec());
+                    if !known.contains(path) {
+                        let mut paths = known;
+                        paths.push(path.clone());
+                        state.files = Some(crate::actions::Action::new(DraggedFiles::new(paths)));
+                    }
+                    state.files.clone()
+                };
+                if let Some(files) = files {
+                    self.drag_over(scene, &files, *x, *y);
+                }
+                false
+            }
+            InputEvent::PointerMove { x, y } => {
+                let files = self.state.borrow().files.clone();
+                if let Some(files) = files {
+                    self.drag_over(scene, &files, *x, *y);
+                }
+                false
+            }
+            // Out of the window, the files may come back: they are still
+            // the drag's.
+            InputEvent::PointerLeave => {
+                self.drag_out(scene);
+                false
+            }
+            InputEvent::FileHoverCancelled | InputEvent::FilesDropRejected { .. } => {
+                if self.state.borrow_mut().files.take().is_some() {
+                    self.drag_out(scene);
+                }
+                false
+            }
+            InputEvent::FilesDrop { x, y, paths } => {
+                self.state.borrow_mut().files = None;
+                if taken {
+                    self.drag_out(scene);
+                    return false;
+                }
+                let files = crate::actions::Action::new(DraggedFiles::new(paths.clone()));
+                self.drag_drop(scene, &files, *x, *y)
+            }
+            _ => false,
+        }
+    }
+    fn dispatch_routed(
         &self,
         scene: &Rc<RefCell<Scene>>,
         event: InputEvent,
@@ -2285,6 +2441,8 @@ impl InputDispatcher {
                 }
             }
         }
+        // A press may open a modal (a select's menu opens on press).
+        let scopes_before = self.state.borrow().scopes.len();
         let mut capture = self
             .captured()
             .filter(|id| self.enabled(&scene.borrow(), *id));
@@ -2470,6 +2628,15 @@ impl InputDispatcher {
                 InputEvent::PointerDown {
                     button: PointerButton::Primary,
                     ..
+                } if target.is_some_and(|id| !scene.borrow().contains(id)) => {
+                    // A handler replaced the pressed node (a title turning
+                    // into its editor, which takes focus): the focus it gave
+                    // stands, and nothing is pressed.
+                    self.state.borrow_mut().pressed = None;
+                }
+                InputEvent::PointerDown {
+                    button: PointerButton::Primary,
+                    ..
                 } => {
                     self.state.borrow_mut().pressed = target;
                     let mut node = target.filter(|id| self.enabled(&scene.borrow(), *id));
@@ -2581,6 +2748,32 @@ impl InputDispatcher {
                     }
                 }
                 _ => {}
+            }
+        }
+        // A press that opened a modal outside what it pressed is over for
+        // that: its pressed look ends, as a release would, and the release
+        // that follows goes to the modal.
+        if matches!(
+            event,
+            InputEvent::PointerDown {
+                button: PointerButton::Primary,
+                ..
+            }
+        ) && let Some(target) = target
+        {
+            let opened = {
+                let state = self.state.borrow();
+                (state.scopes.len() > scopes_before)
+                    .then(|| state.scopes.last().map(|scope| scope.root))
+                    .flatten()
+            };
+            let outside = opened.is_some_and(|root| {
+                let scene = scene.borrow();
+                scene.contains(target) && !scene.is_within(target, root)
+            });
+            if outside {
+                self.state.borrow_mut().pressed = None;
+                self.route(scene, target, InputEvent::PointerCancel);
             }
         }
         {
@@ -3774,4 +3967,6 @@ mod disabled_observer_tests {
 
 #[path = "input_drag.rs"]
 mod drag;
-pub use drag::{DragEnded, DragEvent, DragItem, DragPhase, DragState, DraggedText, SPRING_DELAY};
+pub use drag::{
+    DragEnded, DragEvent, DragItem, DragPhase, DragState, DraggedFiles, DraggedText, SPRING_DELAY,
+};

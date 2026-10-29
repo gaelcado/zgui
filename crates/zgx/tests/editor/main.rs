@@ -20,6 +20,8 @@ mod editor_caret_width;
 mod editor_code;
 #[path = "../editor_context_menu.rs"]
 mod editor_context_menu;
+#[path = "../editor_gutter.rs"]
+mod editor_gutter;
 #[path = "../editor_hints.rs"]
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]
@@ -38,6 +40,8 @@ mod editor_paging;
 mod editor_pointer_selection;
 #[path = "../editor_primary_paste.rs"]
 mod editor_primary_paste;
+#[path = "../editor_projection.rs"]
+mod editor_projection;
 #[path = "../editor_read_only.rs"]
 mod editor_read_only;
 #[path = "../editor_selection_theme.rs"]

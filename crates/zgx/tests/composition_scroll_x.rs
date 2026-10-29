@@ -137,3 +137,83 @@ fn horizontal_disabled_cleanup_and_oversized_focus() {
     ui.prepare_frame();
     assert_eq!(offset.get(), 900.);
 }
+#[test]
+fn content_that_shrinks_first_fits_its_viewport_then_scrolls() {
+    // Five tabs of up to 100 that shrink to 40, in a strip 300 wide.
+    let mut ui = Ui::new(600., 400.);
+    let offset = ui.signal(0.);
+    let count = ui.signal(5_usize);
+    let read = count.clone();
+    let tab = || {
+        row().max_w(100.).min_w(40.).h(20.).flex_shrink(1.).child(
+            text("A tab with a long title")
+                .text_wrap(false)
+                .truncate()
+                .min_w(0.)
+                .flex_shrink(1.),
+        )
+    };
+    let view = ui.mount(
+        scroll_x(offset.clone())
+            .shrink_first()
+            .w(300.)
+            .h(40.)
+            .child(switch(
+                move || read.get(),
+                move |n, _| (0..n).fold(row(), |strip, _| strip.child(tab())),
+            )),
+    );
+    ui.prepare_frame();
+    let widths = |ui: &Ui| -> Vec<f32> {
+        let scene = ui.scene.borrow();
+        let mut strip = view.node();
+        while scene.children(strip).len() == 1 {
+            strip = scene.children(strip)[0];
+        }
+        scene
+            .children(strip)
+            .iter()
+            .map(|c| scene.bounds(*c).width)
+            .collect()
+    };
+    // They share it: 60 each, nothing to scroll.
+    assert!(
+        widths(&ui).iter().all(|w| (w - 60.).abs() < 0.01),
+        "{:?}",
+        widths(&ui)
+    );
+    offset.set(1000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 0.);
+    // Ten: at their minimum, 400 in all, and the strip scrolls the rest.
+    count.set(10);
+    ui.prepare_frame();
+    assert!(
+        widths(&ui).iter().all(|w| (w - 40.).abs() < 0.01),
+        "{:?}",
+        widths(&ui)
+    );
+    offset.set(f32::INFINITY);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 100.);
+}
+#[test]
+fn content_that_shrinks_first_sizes_its_scroll_view() {
+    // Not 320 wide by default: as wide as two tabs of 100, in a row with
+    // room for more.
+    let mut ui = Ui::new(600., 400.);
+    let offset = ui.signal(0.);
+    let tab = || div().w(100.).h(20.).flex_shrink(1.);
+    let view = ui.mount(
+        row().w(600.).child(
+            scroll_x(offset)
+                .shrink_first()
+                .min_w(0.)
+                .child(row().child(tab()).child(tab())),
+        ),
+    );
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let strip = scene.children(view.node())[0];
+    assert_eq!(scene.bounds(strip).width, 200.);
+}

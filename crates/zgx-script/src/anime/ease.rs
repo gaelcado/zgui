@@ -178,6 +178,11 @@ pub(crate) enum Ease {
     /// Points (t, value) in increasing t.
     Piecewise(Rc<[(f64, f64)]>),
     Spring(Rc<Spring>),
+    /// Critically damped (`critical`): Zeron's composer glide
+    /// (composer_dock.rs Glide), twelve time constants over its duration,
+    /// so it never overshoots and has settled within a fraction of a pixel
+    /// at its end.
+    Critical,
     /// A script function: called every frame, so it costs a script call.
     Script(mlua::Function),
     /// Played backwards: a reversed or alternating iteration.
@@ -186,7 +191,7 @@ pub(crate) enum Ease {
 impl PartialEq for Ease {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Ease::Linear, Ease::Linear) => true,
+            (Ease::Linear, Ease::Linear) | (Ease::Critical, Ease::Critical) => true,
             (Ease::Curve(a, b), Ease::Curve(c, d)) => a == c && b == d,
             (
                 Ease::Steps {
@@ -243,6 +248,14 @@ impl Ease {
                     1.
                 } else {
                     spring.at(t * spring.settle)
+                }
+            }
+            Ease::Critical => {
+                if t >= 1. {
+                    1.
+                } else {
+                    let w = 12. * t.max(0.);
+                    1. - (1. + w) * (-w).exp()
                 }
             }
             Ease::Mirror(inner) => 1. - inner.at(1. - t, vm),
@@ -305,6 +318,7 @@ impl Ease {
                 return piecewise(args.unwrap());
             }
             "linear" | "none" => return Ok(Ease::Linear),
+            "critical" => return Ok(Ease::Critical),
             "steps" => {
                 let mut parts = args.unwrap_or("").split(',').map(str::trim);
                 let count: f64 = parts
@@ -500,6 +514,10 @@ mod tests {
         close(at("cubicBezier(.25, .1, .25, 1)", 0.5), 0.8024033877399112);
         close(at("linear(0, 0.25 50%, 1)", 0.25), 0.125);
         close(at("linear(0, 0.25 50%, 1)", 0.75), 0.625);
+        // Zeron's glide: x = 1 - (1 + wt)e^(-wt), w twelve a duration.
+        close(at("critical", 0.25), 1. - 4. * (-3f64).exp());
+        close(at("critical", 1.), 1.);
+        assert!(at("critical", 0.9) < 1. && at("critical", 0.9) > 0.999);
         // v3 and snake-case spellings.
         close(at("easeInOutQuad", 0.75), 0.875);
         close(at("in_out_quad", 0.75), 0.875);

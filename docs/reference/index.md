@@ -7,12 +7,12 @@ One page per element and API group of [zgx-script](../scripting.md). Each gives 
 | [Containers](containers.md) | `column`, `row`, `div`, `overlay`, `grid` |
 | [Text](text.md) | `text`, `rich`, `span`, `markdown`, localized messages (`i18n`, `t`, `locale`) |
 | [Controls](controls.md) | `button`, `input`, `textarea`, `checkbox`, `slider`, `progress` |
-| [Images and canvas](media.md) | `image`, `svg`, `canvas`, `path`, `linear`, `bitmap`, `shader` |
+| [Images and canvas](media.md) | `image`, `svg`, `canvas`, `path`, `linear`, `bitmap`, `shader`, `voice_glyph` |
 | [3D scenes](3d.md) | `scene3d`, `mesh`, `light`, `group` |
 | [Scrolling](scrolling.md) | `scroll`, `scroll_x`, `list` |
 | [Dynamic content](dynamic.md) | `show`, `switch`, `each`, `presence` |
 | [Overlays and menus](overlays.md) | `modal`, `popover`, `menu`, `menu_item`, `submenu`, `context_menu` |
-| [Web views, terminals, commands](native.md) | `webview`, `web`, `terminal`, `term`, `command` |
+| [Web views, terminals, commands](native.md) | `webview`, `web`, `terminal`, `term`, `native`, `command` |
 | [State and components](state.md) | `state`, `shared`, `persist`, `use_state`, `computed`, `effect`, `batch`, `ref`, `component`, `on_mount`, `slot`, `contribute`, actions |
 | [Animation](anime.md) | the `anime` global (anime.js v4), `tween`, `spring`, `loop` |
 | [Properties](properties.md) | every style property, grouped |

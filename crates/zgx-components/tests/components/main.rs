@@ -8,12 +8,16 @@ mod controls;
 mod date;
 #[path = "../grid.rs"]
 mod grid;
+#[path = "../select.rs"]
+mod select;
 #[path = "../tabs.rs"]
 mod tabs;
 #[path = "../toast.rs"]
 mod toast;
 #[path = "../tree.rs"]
 mod tree;
+#[path = "../voice.rs"]
+mod voice;
 
 /// A test file no area lists builds into nothing and its tests never run,
 /// silently.

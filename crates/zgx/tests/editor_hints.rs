@@ -1,5 +1,5 @@
-//! Editor placeholders, the selection API, select-on-focus and window drag
-//! regions.
+//! Editor placeholders and ghosts, the selection API, select-on-focus and
+//! window drag regions.
 use zgx::{
     compose::prelude::*,
     input::{InputEvent, Modifiers, PointerButton},
@@ -328,4 +328,63 @@ fn a_secondary_click_on_a_drag_region_asks_for_the_window_menu() {
     ui.dispatch(secondary(true, at.x + 5.));
     ui.dispatch(secondary(false, at.x + 5.));
     assert_eq!(ui.take_window_gesture(), None);
+}
+
+/// Every text the editor paints that is not empty, with where it lies.
+fn texts(ui: &Ui, root: NodeId) -> Vec<(String, Color, f32)> {
+    let scene = ui.scene.borrow();
+    descendants(ui, root)
+        .into_iter()
+        .filter_map(|id| match scene.kind(id) {
+            NodeKind::Text { text, color, .. } if !text.is_empty() => {
+                Some((text.to_string(), *color, scene.bounds(id).x))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_ghost_follows_the_text_while_the_caret_rests_at_its_end() {
+    let mut ui = Ui::new(500., 300.);
+    let value = ui.signal(String::new());
+    let rest = ui.signal(String::from("de"));
+    let read = rest.clone();
+    let view = ui.mount(
+        text_input("Path", value.clone())
+            .id("path")
+            .placeholder("Type a path")
+            .placeholder_color(Color(1, 2, 3, 255))
+            .ghost_when(move || read.get()),
+    );
+    ui.prepare_frame();
+    let path = view.find("path").unwrap();
+    // Empty: the placeholder, no ghost.
+    assert_eq!(texts(&ui, path).len(), 1);
+    ui.input.focus(&ui.scene, Some(path));
+    ui.dispatch(InputEvent::Text("co".into()));
+    ui.prepare_frame();
+    let shown = texts(&ui, path);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    let (typed, ghost) = (&shown[0], &shown[1]);
+    assert_eq!(typed.0, "co");
+    // After the text, in the placeholder's colour; never the value.
+    assert_eq!((ghost.0.as_str(), ghost.1), ("de", Color(1, 2, 3, 255)));
+    assert!(ghost.2 > typed.2, "{shown:?}");
+    assert_eq!(value.get(), "co");
+    // The caret away from the end, or a selection: none.
+    let editor = ui.editor(path).unwrap();
+    editor.set_selection(1, 1);
+    ui.prepare_frame();
+    assert_eq!(texts(&ui, path).len(), 1);
+    editor.select_all();
+    ui.prepare_frame();
+    assert_eq!(texts(&ui, path).len(), 1);
+    editor.set_selection(2, 2);
+    ui.prepare_frame();
+    assert_eq!(texts(&ui, path).len(), 2);
+    // Its source empty: none.
+    rest.set(String::new());
+    ui.prepare_frame();
+    assert_eq!(texts(&ui, path).len(), 1);
 }
